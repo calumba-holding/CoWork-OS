@@ -153,7 +153,6 @@ export class ChannelGateway {
     // Track the most recent assistant text emitted during a follow-up window.
     // This should reflect what the user saw last during the follow-up, even if it is shorter than prior outputs.
     const followUpLatestAssistantText = new Map<string, string>();
-
     // Follow-ups log a user_message event at the start of processing. Use it to
     // reset per-task follow-up tracking so we don't incorrectly carry state from
     // the original task execution.
@@ -161,8 +160,6 @@ export class ChannelGateway {
       followUpMessagesSent.set(data.taskId, false);
       followUpLatestAssistantText.set(data.taskId, "");
     };
-    agentDaemon.on("user_message", onUserMessage);
-    this.daemonListeners.push({ event: "user_message", handler: onUserMessage });
 
     // Listen for assistant messages (streaming responses)
     // Note: daemon emits { taskId, message } not { taskId, content }
@@ -195,8 +192,6 @@ export class ChannelGateway {
         }
       }
     };
-    agentDaemon.on("assistant_message", onAssistantMessage);
-    this.daemonListeners.push({ event: "assistant_message", handler: onAssistantMessage });
 
     const onTaskQueued = (data: {
       taskId: string;
@@ -212,15 +207,11 @@ export class ChannelGateway {
         : "⏳ Queued. I’ll start as soon as a slot is free.";
       this.router.sendTaskUpdate(data.taskId, explicit || fallback);
     };
-    agentDaemon.on("task_queued", onTaskQueued);
-    this.daemonListeners.push({ event: "task_queued", handler: onTaskQueued });
 
     const onTaskDequeued = (data: { taskId: string; message?: string }) => {
       const explicit = typeof data.message === "string" ? data.message.trim() : "";
       this.router.sendTaskUpdate(data.taskId, explicit || "▶️ Starting now.");
     };
-    agentDaemon.on("task_dequeued", onTaskDequeued);
-    this.daemonListeners.push({ event: "task_dequeued", handler: onTaskDequeued });
 
     // Listen for task completion
     const onTaskCompleted = (data: {
@@ -239,8 +230,6 @@ export class ChannelGateway {
       lastMessages.delete(data.taskId);
       followUpMessagesSent.delete(data.taskId);
     };
-    agentDaemon.on("task_completed", onTaskCompleted);
-    this.daemonListeners.push({ event: "task_completed", handler: onTaskCompleted });
 
     // Listen for task cancellation
     const onTaskCancelled = (data: { taskId: string; message?: string }) => {
@@ -249,8 +238,6 @@ export class ChannelGateway {
       lastMessages.delete(data.taskId);
       followUpMessagesSent.delete(data.taskId);
     };
-    agentDaemon.on("task_cancelled", onTaskCancelled);
-    this.daemonListeners.push({ event: "task_cancelled", handler: onTaskCancelled });
 
     // Listen for task errors
     // Note: daemon emits { taskId, error } or { taskId, message }
@@ -260,8 +247,6 @@ export class ChannelGateway {
       lastMessages.delete(data.taskId);
       followUpMessagesSent.delete(data.taskId);
     };
-    agentDaemon.on("error", onError);
-    this.daemonListeners.push({ event: "error", handler: onError });
 
     // Listen for tool errors (individual tool execution failures)
     const onToolError = (data: { taskId: string; tool?: string; error?: string }) => {
@@ -284,8 +269,6 @@ export class ChannelGateway {
       });
       this.router.sendTaskUpdate(data.taskId, message);
     };
-    agentDaemon.on("tool_error", onToolError);
-    this.daemonListeners.push({ event: "tool_error", handler: onToolError });
 
     // Listen for follow-up message completion
     const onFollowUpCompleted = async (data: { taskId: string }) => {
@@ -310,8 +293,6 @@ export class ChannelGateway {
       // Send any artifacts (images, screenshots) created during the follow-up
       await this.router.sendArtifacts(data.taskId);
     };
-    agentDaemon.on("follow_up_completed", onFollowUpCompleted);
-    this.daemonListeners.push({ event: "follow_up_completed", handler: onFollowUpCompleted });
 
     // Listen for follow-up failures
     const onFollowUpFailed = async (data: { taskId: string; error?: string }) => {
@@ -335,8 +316,6 @@ export class ChannelGateway {
       followUpMessagesSent.delete(data.taskId);
       followUpLatestAssistantText.delete(data.taskId);
     };
-    agentDaemon.on("follow_up_failed", onFollowUpFailed);
-    this.daemonListeners.push({ event: "follow_up_failed", handler: onFollowUpFailed });
 
     // Listen for task pauses (usually when the assistant asks a question).
     // This is important for Telegram draft streaming: without a task_completed event,
@@ -352,8 +331,6 @@ export class ChannelGateway {
         // Best-effort only.
       }
     };
-    agentDaemon.on("task_paused", onTaskPaused);
-    this.daemonListeners.push({ event: "task_paused", handler: onTaskPaused });
 
     // Listen for approval requests - forward to Discord/Telegram
     const onApprovalRequested = (data: { taskId: string; approval: Any }) => {
@@ -362,8 +339,201 @@ export class ChannelGateway {
       }
       this.router.sendApprovalRequest(data.taskId, data.approval);
     };
-    agentDaemon.on("approval_requested", onApprovalRequested);
-    this.daemonListeners.push({ event: "approval_requested", handler: onApprovalRequested });
+
+    const onArtifactCreated = (data: { taskId: string; path?: string; label?: string }) => {
+      const path = typeof data.path === "string" ? data.path.trim() : "";
+      if (!path) return;
+      const label = typeof data.label === "string" && data.label.trim().length > 0 ? data.label : path;
+      this.router.sendTaskUpdate(data.taskId, `📎 Artifact: ${label}\n${path}`);
+    };
+
+    const onKeyClaimEvidenceAttached = (data: {
+      taskId: string;
+      keyClaims?: string[];
+      evidenceRefs?: Array<{ sourceUrlOrPath?: string; snippet?: string }>;
+    }) => {
+      const keyClaims = Array.isArray(data.keyClaims)
+        ? data.keyClaims
+            .map((claim) => (typeof claim === "string" ? claim.trim() : ""))
+            .filter((claim) => claim.length > 0)
+        : [];
+      const evidenceRefs = Array.isArray(data.evidenceRefs)
+        ? data.evidenceRefs
+            .map((ref) => ({
+              sourceUrlOrPath:
+                typeof ref?.sourceUrlOrPath === "string" ? ref.sourceUrlOrPath.trim() : "",
+              snippet: typeof ref?.snippet === "string" ? ref.snippet.trim() : "",
+            }))
+            .filter((ref) => ref.sourceUrlOrPath.length > 0)
+        : [];
+      if (evidenceRefs.length === 0) return;
+
+      const claimLines =
+        keyClaims.length > 0
+          ? `Key claims:\n${keyClaims.slice(0, 3).map((claim) => `- ${claim}`).join("\n")}\n\n`
+          : "";
+      const sourceLines = evidenceRefs
+        .slice(0, 5)
+        .map((ref, index) => {
+          const snippet =
+            ref.snippet.length > 0 ? ` — ${ref.snippet.slice(0, 120)}` : "";
+          return `${index + 1}. ${ref.sourceUrlOrPath}${snippet}`;
+        })
+        .join("\n");
+
+      this.router.sendTaskUpdate(
+        data.taskId,
+        `🔎 Evidence links for key claims\n\n${claimLines}Sources:\n${sourceLines}`,
+      );
+    };
+
+    const timelineBridgeHandler = (timelineType: string) => (evt: Any) => {
+      const taskId = typeof evt?.taskId === "string" ? evt.taskId : "";
+      if (!taskId) return;
+      const payload =
+        evt?.payload && typeof evt.payload === "object" && !Array.isArray(evt.payload)
+          ? (evt.payload as Any)
+          : {};
+
+      const legacyTypeRaw =
+        typeof evt?.legacyType === "string"
+          ? evt.legacyType
+          : typeof payload?.legacyType === "string"
+            ? payload.legacyType
+            : undefined;
+
+      const effectiveType =
+        legacyTypeRaw && !String(legacyTypeRaw).startsWith("timeline_") ? legacyTypeRaw : undefined;
+
+      switch (effectiveType) {
+        case "assistant_message":
+          onAssistantMessage({ taskId, message: payload.message as string });
+          return;
+        case "user_message":
+          onUserMessage({ taskId, message: payload.message as string });
+          return;
+        case "task_queued":
+          onTaskQueued({
+            taskId,
+            message: payload.message as string,
+            position: payload.position as number,
+            reason: payload.reason as string,
+          });
+          return;
+        case "task_dequeued":
+          onTaskDequeued({ taskId, message: payload.message as string });
+          return;
+        case "task_completed":
+          onTaskCompleted({
+            taskId,
+            resultSummary: payload.resultSummary as string,
+            message: payload.message as string,
+          });
+          return;
+        case "task_cancelled":
+          onTaskCancelled({ taskId, message: payload.message as string });
+          return;
+        case "error":
+          onError({
+            taskId,
+            error: payload.error as string,
+            message: payload.message as string,
+          });
+          return;
+        case "tool_error":
+          onToolError({
+            taskId,
+            tool: payload.tool as string,
+            error: payload.error as string,
+          });
+          return;
+        case "follow_up_completed":
+          void onFollowUpCompleted({ taskId });
+          return;
+        case "follow_up_failed":
+          void onFollowUpFailed({ taskId, error: payload.error as string });
+          return;
+        case "task_paused":
+          void onTaskPaused({
+            taskId,
+            message: payload.message as string,
+            reason: payload.reason as string,
+          });
+          return;
+        case "approval_requested":
+          onApprovalRequested({ taskId, approval: payload.approval });
+          return;
+        case "artifact_created":
+        case "file_created":
+          onArtifactCreated({
+            taskId,
+            path: payload.path as string,
+            label: payload.label as string,
+          });
+          return;
+        default:
+          break;
+      }
+
+      // Summary-safe fallback when legacy alias metadata is not present.
+      if (timelineType === "timeline_artifact_emitted") {
+        onArtifactCreated({
+          taskId,
+          path: typeof payload.path === "string" ? payload.path : "",
+          label: typeof payload.label === "string" ? payload.label : undefined,
+        });
+        return;
+      }
+
+      if (timelineType === "timeline_evidence_attached") {
+        const isKeyClaimEvidence =
+          payload?.gate === "key_claim_evidence_gate" ||
+          (Array.isArray(payload?.keyClaims) && payload.keyClaims.length > 0);
+        if (isKeyClaimEvidence) {
+          onKeyClaimEvidenceAttached({
+            taskId,
+            keyClaims: payload.keyClaims as string[] | undefined,
+            evidenceRefs: payload.evidenceRefs as
+              | Array<{ sourceUrlOrPath?: string; snippet?: string }>
+              | undefined,
+          });
+        }
+        return;
+      }
+
+      if (timelineType === "timeline_error") {
+        onError({
+          taskId,
+          message: typeof payload.message === "string" ? payload.message : "Task failed",
+        });
+        return;
+      }
+
+      if (timelineType === "timeline_step_updated" && typeof payload.message === "string") {
+        const message = payload.message.trim();
+        if (message.length > 0) {
+          this.router.sendTaskUpdate(taskId, message);
+        }
+      }
+    };
+
+    const timelineEvents = [
+      "timeline_group_started",
+      "timeline_group_finished",
+      "timeline_step_started",
+      "timeline_step_updated",
+      "timeline_step_finished",
+      "timeline_evidence_attached",
+      "timeline_artifact_emitted",
+      "timeline_command_output",
+      "timeline_error",
+    ] as const;
+
+    for (const timelineEvent of timelineEvents) {
+      const handler = timelineBridgeHandler(timelineEvent);
+      agentDaemon.on(timelineEvent, handler);
+      this.daemonListeners.push({ event: timelineEvent, handler });
+    }
   }
 
   /**
