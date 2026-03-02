@@ -42,9 +42,30 @@ const DEFAULT_SETTINGS: GuardrailSettings = {
   enforceAllowedDomains: false,
   allowedDomains: [],
 
+  // Web search policy
+  webSearchMode: "cached",
+  webSearchMaxUsesPerTask: 8,
+  webSearchMaxUsesPerStep: 3,
+  webSearchAllowedDomains: [],
+  webSearchBlockedDomains: [],
+
   // Iterations
   maxIterationsPerTask: 50,
   iterationLimitEnabled: true,
+
+  // Execution continuation
+  autoContinuationEnabled: true,
+  defaultMaxAutoContinuations: 3,
+  defaultMinProgressScore: 0.25,
+  lifetimeTurnCapEnabled: true,
+  defaultLifetimeTurnCap: 320,
+  compactOnContinuation: true,
+  compactionThresholdRatio: 0.75,
+  loopWarningThreshold: 8,
+  loopCriticalThreshold: 14,
+  globalNoProgressCircuitBreaker: 20,
+  sideChannelDuringExecution: "paused",
+  sideChannelMaxCallsPerWindow: 2,
 };
 
 export class GuardrailManager {
