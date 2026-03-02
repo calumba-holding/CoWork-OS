@@ -192,6 +192,16 @@ describe("GuardrailSettingsSchema", () => {
       expect(result.data.tokenBudgetEnabled).toBe(true);
       expect(result.data.blockDangerousCommands).toBe(true);
       expect(result.data.maxIterationsPerTask).toBe(50);
+      expect(result.data.webSearchMode).toBe("cached");
+      expect(result.data.webSearchMaxUsesPerTask).toBe(8);
+      expect(result.data.webSearchMaxUsesPerStep).toBe(3);
+      expect(result.data.webSearchAllowedDomains).toEqual([]);
+      expect(result.data.webSearchBlockedDomains).toEqual([]);
+      expect(result.data.autoContinuationEnabled).toBe(true);
+      expect(result.data.defaultMaxAutoContinuations).toBe(3);
+      expect(result.data.defaultMinProgressScore).toBe(0.25);
+      expect(result.data.lifetimeTurnCapEnabled).toBe(true);
+      expect(result.data.defaultLifetimeTurnCap).toBe(320);
     }
   });
 
@@ -208,6 +218,42 @@ describe("GuardrailSettingsSchema", () => {
   it("validates custom blocked patterns", () => {
     const result = GuardrailSettingsSchema.safeParse({
       customBlockedPatterns: ["rm -rf", "DROP TABLE"],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects out-of-range continuation thresholds", () => {
+    const result = GuardrailSettingsSchema.safeParse({
+      defaultMinProgressScore: 1.5,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects invalid web search mode values", () => {
+    const result = GuardrailSettingsSchema.safeParse({
+      webSearchMode: "archive",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects negative web search usage caps", () => {
+    const result = GuardrailSettingsSchema.safeParse({
+      webSearchMaxUsesPerTask: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects oversized web search domain lists", () => {
+    const result = GuardrailSettingsSchema.safeParse({
+      webSearchAllowedDomains: new Array(101).fill("example.com"),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts web search usage caps at upper bounds", () => {
+    const result = GuardrailSettingsSchema.safeParse({
+      webSearchMaxUsesPerTask: 500,
+      webSearchMaxUsesPerStep: 100,
     });
     expect(result.success).toBe(true);
   });
