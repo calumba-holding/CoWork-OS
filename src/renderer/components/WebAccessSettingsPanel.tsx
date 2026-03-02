@@ -116,7 +116,9 @@ export const WebAccessSettingsPanel: React.FC = () => {
                   style={{
                     padding: "4px 8px",
                     borderRadius: 4,
-                    background: "var(--surface-secondary, #1a1a1a)",
+                    background: "var(--color-bg-secondary)",
+                    border: "1px solid var(--color-border)",
+                    color: "var(--color-text)",
                   }}
                 >
                   {accessUrl}
@@ -133,7 +135,9 @@ export const WebAccessSettingsPanel: React.FC = () => {
                     style={{
                       padding: "4px 8px",
                       borderRadius: 4,
-                      background: "var(--surface-secondary, #1a1a1a)",
+                      background: "var(--color-bg-secondary)",
+                      border: "1px solid var(--color-border)",
+                      color: "var(--color-text)",
                       fontSize: 12,
                       maxWidth: 200,
                       overflow: "hidden",
@@ -149,10 +153,10 @@ export const WebAccessSettingsPanel: React.FC = () => {
                       alignItems: "center",
                       gap: 4,
                       padding: "4px 8px",
-                      border: "1px solid var(--border-color, #333)",
+                      border: "1px solid var(--color-border)",
                       borderRadius: 4,
-                      background: "none",
-                      color: "var(--text-secondary, #999)",
+                      background: "var(--color-bg-glass)",
+                      color: "var(--color-text-secondary)",
                       cursor: "pointer",
                       fontSize: 11,
                     }}
@@ -167,7 +171,7 @@ export const WebAccessSettingsPanel: React.FC = () => {
             {status && (
               <div className="settings-field">
                 <label>Status</label>
-                <div style={{ fontSize: 12, color: "var(--text-tertiary, #666)" }}>
+                <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
                   {status.connectedClients} connected client(s)
                   {status.startedAt && (
                     <> &middot; Started {new Date(status.startedAt).toLocaleTimeString()}</>
