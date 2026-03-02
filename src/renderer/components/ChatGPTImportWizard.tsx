@@ -133,7 +133,7 @@ export function ChatGPTImportWizard({
         setError(null);
         setStep("options");
       }
-    } catch  {
+    } catch {
       setError("Failed to select file. Please try again.");
     }
   };
@@ -400,18 +400,32 @@ export function ChatGPTImportWizard({
           </div>
 
           <div className="settings-form-group">
-            <label className="settings-toggle">
-              <input
-                type="checkbox"
-                checked={forcePrivate}
-                onChange={(e) => setForcePrivate(e.target.checked)}
-              />
-              <span className="settings-toggle-label">Mark all imported memories as private</span>
-            </label>
-            <p className="settings-form-hint">
-              Recommended. Private memories are never exposed through gateway channels or shared
-              contexts. Personal chat history should stay private.
-            </p>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                gap: "12px",
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+                  Mark all imported memories as private
+                </div>
+                <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+                  Recommended. Private memories are never exposed through gateway channels or shared
+                  contexts. Personal chat history should stay private.
+                </p>
+              </div>
+              <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+                <input
+                  type="checkbox"
+                  checked={forcePrivate}
+                  onChange={(e) => setForcePrivate(e.target.checked)}
+                />
+                <span className="toggle-slider" />
+              </label>
+            </div>
           </div>
 
           <div className="settings-form-group">
