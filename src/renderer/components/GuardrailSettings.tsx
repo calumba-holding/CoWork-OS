@@ -12,6 +12,8 @@ export function GuardrailSettings() {
   const [newPattern, setNewPattern] = useState("");
   const [newTrustedPattern, setNewTrustedPattern] = useState("");
   const [newDomain, setNewDomain] = useState("");
+  const [newWebSearchAllowedDomain, setNewWebSearchAllowedDomain] = useState("");
+  const [newWebSearchBlockedDomain, setNewWebSearchBlockedDomain] = useState("");
 
   useEffect(() => {
     loadSettings();
@@ -101,6 +103,42 @@ export function GuardrailSettings() {
     setSettings({
       ...settings,
       allowedDomains: settings.allowedDomains.filter((d) => d !== domain),
+    });
+  };
+
+  const addWebSearchAllowedDomain = () => {
+    if (!settings || !newWebSearchAllowedDomain.trim()) return;
+    if (settings.webSearchAllowedDomains.includes(newWebSearchAllowedDomain.trim())) return;
+    setSettings({
+      ...settings,
+      webSearchAllowedDomains: [...settings.webSearchAllowedDomains, newWebSearchAllowedDomain.trim()],
+    });
+    setNewWebSearchAllowedDomain("");
+  };
+
+  const removeWebSearchAllowedDomain = (domain: string) => {
+    if (!settings) return;
+    setSettings({
+      ...settings,
+      webSearchAllowedDomains: settings.webSearchAllowedDomains.filter((d) => d !== domain),
+    });
+  };
+
+  const addWebSearchBlockedDomain = () => {
+    if (!settings || !newWebSearchBlockedDomain.trim()) return;
+    if (settings.webSearchBlockedDomains.includes(newWebSearchBlockedDomain.trim())) return;
+    setSettings({
+      ...settings,
+      webSearchBlockedDomains: [...settings.webSearchBlockedDomains, newWebSearchBlockedDomain.trim()],
+    });
+    setNewWebSearchBlockedDomain("");
+  };
+
+  const removeWebSearchBlockedDomain = (domain: string) => {
+    if (!settings) return;
+    setSettings({
+      ...settings,
+      webSearchBlockedDomains: settings.webSearchBlockedDomains.filter((d) => d !== domain),
     });
   };
 
@@ -218,6 +256,218 @@ export function GuardrailSettings() {
         </div>
         <p className="settings-hint">
           Each tool call and follow-up message counts as an iteration. Default: 50
+        </p>
+      </div>
+
+      {/* Execution Continuation Section */}
+      <div className="settings-section">
+        <div className="settings-section-header">
+          <h3>Execution Continuation</h3>
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={settings.autoContinuationEnabled}
+              onChange={(e) =>
+                setSettings({ ...settings, autoContinuationEnabled: e.target.checked })
+              }
+            />
+            <span className="toggle-slider"></span>
+          </label>
+        </div>
+        <p className="settings-description">
+          Automatically continue a task after turn-window exhaustion when recent progress is strong
+          and loop risk is low.
+        </p>
+        <div className="settings-inline-input">
+          <label>Max auto continuations:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.defaultMaxAutoContinuations}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                defaultMaxAutoContinuations: parseInt(e.target.value) || 0,
+              })
+            }
+            min={0}
+            max={20}
+            step={1}
+            disabled={!settings.autoContinuationEnabled}
+          />
+        </div>
+        <div className="settings-inline-input">
+          <label>Min progress score:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.defaultMinProgressScore}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                defaultMinProgressScore: parseFloat(e.target.value) || 0,
+              })
+            }
+            min={-1}
+            max={1}
+            step={0.05}
+            disabled={!settings.autoContinuationEnabled}
+          />
+        </div>
+        <div className="settings-section-header">
+          <h4>Continuation Compaction</h4>
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={settings.compactOnContinuation}
+              onChange={(e) =>
+                setSettings({ ...settings, compactOnContinuation: e.target.checked })
+              }
+              disabled={!settings.autoContinuationEnabled}
+            />
+            <span className="toggle-slider"></span>
+          </label>
+        </div>
+        <div className="settings-inline-input">
+          <label>Compaction threshold ratio:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.compactionThresholdRatio}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                compactionThresholdRatio: parseFloat(e.target.value) || 0.75,
+              })
+            }
+            min={0.5}
+            max={0.95}
+            step={0.01}
+            disabled={!settings.autoContinuationEnabled || !settings.compactOnContinuation}
+          />
+        </div>
+        <div className="settings-inline-input">
+          <label>Loop warning threshold:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.loopWarningThreshold}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                loopWarningThreshold: parseInt(e.target.value, 10) || 8,
+              })
+            }
+            min={1}
+            max={200}
+            step={1}
+            disabled={!settings.autoContinuationEnabled}
+          />
+        </div>
+        <div className="settings-inline-input">
+          <label>Loop critical threshold:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.loopCriticalThreshold}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                loopCriticalThreshold: parseInt(e.target.value, 10) || 14,
+              })
+            }
+            min={1}
+            max={400}
+            step={1}
+            disabled={!settings.autoContinuationEnabled}
+          />
+        </div>
+        <div className="settings-inline-input">
+          <label>No-progress breaker:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.globalNoProgressCircuitBreaker}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                globalNoProgressCircuitBreaker: parseInt(e.target.value, 10) || 20,
+              })
+            }
+            min={1}
+            max={1000}
+            step={1}
+            disabled={!settings.autoContinuationEnabled}
+          />
+        </div>
+        <div className="settings-inline-input">
+          <label>Side-channel during execution:</label>
+          <select
+            className="settings-input"
+            value={settings.sideChannelDuringExecution}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                sideChannelDuringExecution: e.target.value as "paused" | "limited" | "enabled",
+              })
+            }
+          >
+            <option value="paused">Paused</option>
+            <option value="limited">Limited</option>
+            <option value="enabled">Enabled</option>
+          </select>
+        </div>
+        <div className="settings-inline-input">
+          <label>Side-channel max calls/window:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.sideChannelMaxCallsPerWindow}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                sideChannelMaxCallsPerWindow: parseInt(e.target.value, 10) || 2,
+              })
+            }
+            min={0}
+            max={100}
+            step={1}
+            disabled={settings.sideChannelDuringExecution !== "limited"}
+          />
+        </div>
+        <div className="settings-section-header">
+          <h4>Lifetime Turn Cap</h4>
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={settings.lifetimeTurnCapEnabled}
+              onChange={(e) =>
+                setSettings({ ...settings, lifetimeTurnCapEnabled: e.target.checked })
+              }
+            />
+            <span className="toggle-slider"></span>
+          </label>
+        </div>
+        <div className="settings-inline-input">
+          <label>Default lifetime turn cap:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.defaultLifetimeTurnCap}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                defaultLifetimeTurnCap: parseInt(e.target.value) || 320,
+              })
+            }
+            min={20}
+            max={5000}
+            step={10}
+            disabled={!settings.lifetimeTurnCapEnabled}
+          />
+        </div>
+        <p className="settings-hint">
+          Defaults: auto continuation on, max 3 windows, min score 0.25, lifetime cap 320 turns.
         </p>
       </div>
 
@@ -419,6 +669,152 @@ export function GuardrailSettings() {
         </div>
         <p className="settings-hint">
           Default: 50MB. Increase for projects that generate large assets.
+        </p>
+      </div>
+
+      {/* Web Search Policy Section */}
+      <div className="settings-section">
+        <div className="settings-section-header">
+          <h3>Web Search Policy</h3>
+        </div>
+        <p className="settings-description">
+          Control web_search mode, usage caps, and domain filtering for search results.
+        </p>
+        <div className="settings-inline-input">
+          <label>Mode:</label>
+          <select
+            className="settings-input"
+            value={settings.webSearchMode}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                webSearchMode: e.target.value as "disabled" | "cached" | "live",
+              })
+            }
+          >
+            <option value="disabled">Disabled</option>
+            <option value="cached">Cached</option>
+            <option value="live">Live</option>
+          </select>
+        </div>
+        <div className="settings-inline-input">
+          <label>Max uses per task:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.webSearchMaxUsesPerTask}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                webSearchMaxUsesPerTask: parseInt(e.target.value, 10) || 1,
+              })
+            }
+            min={1}
+            max={500}
+            step={1}
+          />
+        </div>
+        <div className="settings-inline-input">
+          <label>Max uses per step:</label>
+          <input
+            type="number"
+            className="settings-input settings-input-number"
+            value={settings.webSearchMaxUsesPerStep}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                webSearchMaxUsesPerStep: parseInt(e.target.value, 10) || 1,
+              })
+            }
+            min={1}
+            max={100}
+            step={1}
+          />
+        </div>
+        <div className="settings-subsection">
+          <h4>Allowed Domains (optional)</h4>
+          <p className="settings-description">
+            If set, only search results from these domains are returned after blocked-domain filtering.
+          </p>
+          <div className="settings-input-group">
+            <input
+              type="text"
+              className="settings-input"
+              placeholder="e.g., reuters.com or *.openai.com"
+              value={newWebSearchAllowedDomain}
+              onChange={(e) => setNewWebSearchAllowedDomain(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addWebSearchAllowedDomain()}
+            />
+            <button
+              className="button-small button-secondary"
+              onClick={addWebSearchAllowedDomain}
+              disabled={!newWebSearchAllowedDomain.trim()}
+            >
+              Add
+            </button>
+          </div>
+          {settings.webSearchAllowedDomains.length > 0 ? (
+            <div className="pattern-list">
+              {settings.webSearchAllowedDomains.map((domain, index) => (
+                <span key={index} className="pattern-tag domain">
+                  {domain}
+                  <button
+                    className="pattern-remove"
+                    onClick={() => removeWebSearchAllowedDomain(domain)}
+                    title="Remove domain"
+                  >
+                    x
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="settings-hint">No allowlist configured. All domains are eligible unless blocked.</p>
+          )}
+        </div>
+        <div className="settings-subsection">
+          <h4>Blocked Domains</h4>
+          <p className="settings-description">
+            Results from blocked domains are always removed first.
+          </p>
+          <div className="settings-input-group">
+            <input
+              type="text"
+              className="settings-input"
+              placeholder="e.g., example.com or *.spam.com"
+              value={newWebSearchBlockedDomain}
+              onChange={(e) => setNewWebSearchBlockedDomain(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addWebSearchBlockedDomain()}
+            />
+            <button
+              className="button-small button-secondary"
+              onClick={addWebSearchBlockedDomain}
+              disabled={!newWebSearchBlockedDomain.trim()}
+            >
+              Add
+            </button>
+          </div>
+          {settings.webSearchBlockedDomains.length > 0 ? (
+            <div className="pattern-list">
+              {settings.webSearchBlockedDomains.map((domain, index) => (
+                <span key={index} className="pattern-tag custom">
+                  {domain}
+                  <button
+                    className="pattern-remove"
+                    onClick={() => removeWebSearchBlockedDomain(domain)}
+                    title="Remove domain"
+                  >
+                    x
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="settings-hint">No blocked domains configured.</p>
+          )}
+        </div>
+        <p className="settings-hint">
+          Domain precedence: blocked domains are applied first, then allowed-domain allowlist.
         </p>
       </div>
 
