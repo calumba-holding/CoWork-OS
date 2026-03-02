@@ -415,7 +415,6 @@ function sanitizeForBroadcast(value: unknown, depth = 0, key?: string): unknown 
 }
 
 function attachAgentDaemonTaskBridge(server: ControlPlaneServer, daemon: AgentDaemon): () => void {
-  // Avoid broadcasting tool_result blobs by default; remote clients can fetch details via task.get if needed.
   const allowlist = TASK_EVENT_BRIDGE_ALLOWLIST;
 
   const unsubscribes: Array<() => void> = [];
@@ -426,42 +425,38 @@ function attachAgentDaemonTaskBridge(server: ControlPlaneServer, daemon: AgentDa
         const taskId = typeof evt?.taskId === "string" ? evt.taskId : "";
         if (!taskId) return;
 
-        const payload = { ...evt };
-        delete payload.taskId;
+        const payload =
+          evt?.payload && typeof evt.payload === "object" && !Array.isArray(evt.payload)
+            ? ({ ...evt.payload } as Any)
+            : {};
 
-        // Avoid leaking full prompts in broadcast; clients can call task.get if needed.
-        if (eventType === "task_created" && payload?.task && typeof payload.task === "object") {
-          const t = payload.task as Any;
-          payload.task = {
-            id: t.id,
-            title: t.title,
-            status: t.status,
-            workspaceId: t.workspaceId,
-            createdAt: t.createdAt,
-            updatedAt: t.updatedAt,
-            completedAt: t.completedAt,
-            parentTaskId: t.parentTaskId,
-            agentType: t.agentType,
-            depth: t.depth,
-            resultSummary: t.resultSummary,
-            error: t.error,
-            assignedAgentRoleId: t.assignedAgentRoleId,
-            boardColumn: t.boardColumn,
-            priority: t.priority,
-          };
+        if (eventType === "timeline_step_updated" && typeof payload.message === "string") {
+          payload.message = truncateForBroadcastKey(payload.message, "message");
         }
 
-        if (
-          eventType === "assistant_message" &&
-          typeof payload?.message === "string" &&
-          payload.message.length > 12000
-        ) {
-          payload.message =
-            payload.message.slice(0, 12000) + "\n\n[... truncated for control-plane broadcast ...]";
+        if (eventType === "timeline_command_output" && typeof payload.output === "string") {
+          payload.output = truncateForBroadcastKey(payload.output, "message");
         }
 
-        if (eventType === "tool_call" && payload?.input !== undefined) {
-          payload.input = sanitizeForBroadcast(payload.input);
+        if (eventType === "timeline_evidence_attached" && Array.isArray(payload.evidenceRefs)) {
+          payload.evidenceRefs = payload.evidenceRefs.slice(0, 20).map((ref: Any) => ({
+            evidenceId:
+              typeof ref?.evidenceId === "string" && ref.evidenceId.trim().length > 0
+                ? ref.evidenceId.trim()
+                : "evidence",
+            sourceType:
+              typeof ref?.sourceType === "string" && ref.sourceType.trim().length > 0
+                ? ref.sourceType.trim()
+                : "other",
+            sourceUrlOrPath:
+              typeof ref?.sourceUrlOrPath === "string"
+                ? truncateForBroadcastKey(ref.sourceUrlOrPath, "sourceUrlOrPath")
+                : "",
+            snippet:
+              typeof ref?.snippet === "string"
+                ? truncateForBroadcastKey(ref.snippet, "snippet")
+                : undefined,
+          }));
         }
 
         const sanitizedPayload = sanitizeForBroadcast(payload);
@@ -470,7 +465,18 @@ function attachAgentDaemonTaskBridge(server: ControlPlaneServer, daemon: AgentDa
           taskId,
           type: eventType,
           payload: sanitizedPayload,
-          timestamp: Date.now(),
+          timestamp:
+            typeof evt?.timestamp === "number" && Number.isFinite(evt.timestamp)
+              ? evt.timestamp
+              : Date.now(),
+          schemaVersion: 2,
+          eventId: typeof evt?.eventId === "string" ? evt.eventId : undefined,
+          seq: typeof evt?.seq === "number" ? evt.seq : undefined,
+          ts: typeof evt?.ts === "number" ? evt.ts : undefined,
+          status: typeof evt?.status === "string" ? evt.status : undefined,
+          stepId: typeof evt?.stepId === "string" ? evt.stepId : undefined,
+          groupId: typeof evt?.groupId === "string" ? evt.groupId : undefined,
+          actor: typeof evt?.actor === "string" ? evt.actor : undefined,
         });
       } catch (error) {
         console.error("[ControlPlane] Failed to broadcast task event:", error);
