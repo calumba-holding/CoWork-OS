@@ -159,6 +159,12 @@ jobs:
         env:
           COWORK_DB_PATH: ${{ runner.temp }}/cowork-eval.db
 
+      - name: Enforce timeline reliability thresholds
+        if: steps.changes.outputs.agent == 'true'
+        run: npm run qa:timeline:enforce
+        env:
+          COWORK_DB_PATH: ${{ runner.temp }}/cowork-eval.db
+
       - name: Skip notice
         if: steps.changes.outputs.agent != 'true'
         run: echo "No agent-path changes detected. Skipping targeted eval gate."
