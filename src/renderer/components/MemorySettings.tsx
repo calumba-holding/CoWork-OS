@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { ChatGPTImportWizard } from "./ChatGPTImportWizard";
+import { PromptMemoryImportWizard } from "./PromptMemoryImportWizard";
 
 // Types inlined since preload types aren't directly importable in renderer
 type PrivacyMode = "normal" | "strict" | "disabled";
@@ -73,6 +74,7 @@ interface MemoryItem {
   content: string;
   tokens: number;
   createdAt: number;
+  type?: string;
 }
 
 interface MemorySettingsProps {
@@ -80,15 +82,72 @@ interface MemorySettingsProps {
   onSettingsChanged?: () => void;
 }
 
-/** Parse the ChatGPT import tag from memory content */
+interface ToggleRowProps {
+  title: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+}
+
+/** Parse imported-memory tags from memory content */
 function parseImportTag(content: string): { title: string; preview: string } {
   const match = content.match(
-    /^\[Imported from ChatGPT\s*—\s*"(.+?)"\s*(?:\(conv:[^)]+\))?\]\n?([\s\S]*)/,
+    /^\[Imported from\s+(.+?)\s*[-—]\s*"(.+?)"\s*(?:\([^)]+\))?\]\n?([\s\S]*)/,
   );
   if (match) {
-    return { title: match[1], preview: match[2].slice(0, 200) };
+    return { title: `${match[1]}: ${match[2]}`, preview: match[3].slice(0, 200) };
+  }
+  const fallback = content.match(/^\[Imported from\s+([^\]]+)\]\n?([\s\S]*)/);
+  if (fallback) {
+    return {
+      title: `Imported from ${fallback[1]}`,
+      preview: (fallback[2] || "").slice(0, 200),
+    };
   }
   return { title: "Imported Memory", preview: content.slice(0, 200) };
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const deltaMs = Date.now() - timestamp;
+  const minutes = Math.floor(deltaMs / (60 * 1000));
+  if (minutes < 1) return "Updated just now";
+  if (minutes < 60) return `Updated ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Updated ${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `Updated ${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function ToggleRow({ title, description, checked, onChange, disabled }: ToggleRowProps) {
+  return (
+    <div className="settings-form-group">
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: "12px",
+        }}
+      >
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>{title}</div>
+          <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+            {description}
+          </p>
+        </div>
+        <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={(e) => onChange(e.target.checked)}
+            disabled={disabled}
+          />
+          <span className="toggle-slider" />
+        </label>
+      </div>
+    </div>
+  );
 }
 
 const PAGE_SIZE = 20;
@@ -100,6 +159,8 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [showImportWizard, setShowImportWizard] = useState(false);
+  const [showPromptImportWizard, setShowPromptImportWizard] = useState(false);
+  const [showManageMemories, setShowManageMemories] = useState(false);
 
   // Imported memories state
   const [importedStats, setImportedStats] = useState<ImportedStats | null>(null);
@@ -116,6 +177,10 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
   const [relationshipItems, setRelationshipItems] = useState<RelationshipMemoryItem[]>([]);
   const [dueSoonItems, setDueSoonItems] = useState<RelationshipMemoryItem[]>([]);
   const [dueSoonReminder, setDueSoonReminder] = useState("");
+  const [recentMemories, setRecentMemories] = useState<MemoryItem[]>([]);
+  const [memorySearchQuery, setMemorySearchQuery] = useState("");
+  const [memorySearchResults, setMemorySearchResults] = useState<MemoryItem[]>([]);
+  const [searchingMemories, setSearchingMemories] = useState(false);
 
   useEffect(() => {
     if (workspaceId) {
@@ -133,6 +198,7 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
         loadedUserProfile,
         loadedRelationshipItems,
         loadedDueSoon,
+        loadedRecentMemories,
       ] = await Promise.all([
         window.electronAPI.getMemorySettings(workspaceId),
         window.electronAPI.getMemoryStats(workspaceId),
@@ -140,6 +206,7 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
         window.electronAPI.getUserProfile(),
         window.electronAPI.listRelationshipMemory({ limit: 80, includeDone: false }),
         window.electronAPI.getDueSoonCommitments(72),
+        window.electronAPI.getRecentMemories({ workspaceId, limit: 20 }),
       ]);
       setSettings(loadedSettings);
       setStats(loadedStats);
@@ -150,12 +217,52 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
       setDueSoonReminder(
         typeof loadedDueSoon?.reminderText === "string" ? loadedDueSoon.reminderText : "",
       );
+      setRecentMemories(Array.isArray(loadedRecentMemories) ? loadedRecentMemories : []);
     } catch (error) {
       console.error("Failed to load memory settings:", error);
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    const query = memorySearchQuery.trim();
+    if (!query) {
+      setMemorySearchResults([]);
+      setSearchingMemories(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSearchingMemories(true);
+    const timeout = setTimeout(async () => {
+      try {
+        const results = await window.electronAPI.searchMemories({
+          workspaceId,
+          query,
+          limit: 30,
+        });
+        if (cancelled) return;
+        const details = await window.electronAPI.getMemoryDetails(results.map((r) => r.id));
+        if (cancelled) return;
+        setMemorySearchResults(Array.isArray(details) ? details : []);
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Failed to search memories:", error);
+          setMemorySearchResults([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setSearchingMemories(false);
+        }
+      }
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [memorySearchQuery, workspaceId]);
 
   const loadImportedMemories = useCallback(
     async (offset = 0) => {
@@ -192,7 +299,7 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
   const handleDeleteImported = async () => {
     if (
       !confirm(
-        "Are you sure you want to delete all imported ChatGPT memories? Native memories will not be affected. This cannot be undone.",
+        "Are you sure you want to delete all imported memories? Native memories will not be affected. This cannot be undone.",
       )
     ) {
       return;
@@ -376,616 +483,92 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
     );
   }
 
+  const latestMemory =
+    recentMemories.find((memory) => !/^\s*[{[]/.test((memory.content || "").trim())) ||
+    recentMemories[0];
+  const selectedManageMemories = memorySearchQuery.trim() ? memorySearchResults : recentMemories;
+
   return (
     <div className="settings-section">
-      <h3 className="settings-section-title">Memory System</h3>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "10px",
+        }}
+      >
+        <h3 className="settings-section-title" style={{ margin: 0 }}>
+          Memory
+        </h3>
+        <button
+          className="settings-button"
+          onClick={() => setShowManageMemories((prev) => !prev)}
+          style={{ whiteSpace: "nowrap" }}
+        >
+          {showManageMemories ? "Hide Manage" : "Manage"}
+        </button>
+      </div>
       <p className="settings-section-description">
-        Captures observations during task execution for cross-session context. Memories help the AI
-        remember what it learned in previous sessions.
+        Keep useful context over time, control what gets remembered, and review or delete memory
+        whenever you want.
       </p>
 
-      {/* User Profile Facts */}
+      <ToggleRow
+        title="Use memory in responses"
+        description="Allows the assistant to reference saved memories while responding."
+        checked={settings.enabled}
+        onChange={(checked) => handleSave({ enabled: checked })}
+        disabled={saving}
+      />
+
+      <ToggleRow
+        title="Generate memory from chat history"
+        description="Automatically stores useful context from chats/tasks. Turn this off to stop new memory creation."
+        checked={settings.autoCapture}
+        onChange={(checked) => handleSave({ autoCapture: checked })}
+        disabled={saving || !settings.enabled}
+      />
+
       <div
         className="settings-form-group"
         style={{
           marginBottom: "20px",
-          paddingBottom: "16px",
-          borderBottom: "1px solid var(--color-border)",
+          padding: "14px",
+          border: "1px solid var(--color-border)",
+          borderRadius: "10px",
+          background: "var(--color-bg-secondary)",
         }}
       >
-        <div style={{ fontWeight: 500, color: "var(--color-text-primary)", marginBottom: "4px" }}>
-          User Memory Facts
+        <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+          Memory from your chats
         </div>
-        <p className="settings-form-hint" style={{ marginTop: 0 }}>
-          Curate what the assistant remembers about preferences and context.
+        <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: "10px" }}>
+          {latestMemory ? formatRelativeTime(latestMemory.createdAt) : "No memory captured yet"}
         </p>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "130px 1fr auto",
-            gap: "8px",
-            marginBottom: "10px",
-          }}
-        >
-          <select
-            className="settings-select"
-            value={newFactCategory}
-            onChange={(e) => setNewFactCategory(e.target.value as UserFactCategory)}
-            disabled={savingFact}
-          >
-            <option value="identity">Identity</option>
-            <option value="preference">Preference</option>
-            <option value="bio">Profile</option>
-            <option value="work">Work</option>
-            <option value="goal">Goal</option>
-            <option value="constraint">Constraint</option>
-            <option value="other">Other</option>
-          </select>
-          <input
-            className="settings-input"
-            type="text"
-            value={newFact}
-            onChange={(e) => setNewFact(e.target.value)}
-            placeholder="Add a fact (for example: Prefers concise responses)"
-            disabled={savingFact}
-          />
-          <button
-            className="settings-button"
-            onClick={handleAddFact}
-            disabled={savingFact || !newFact.trim()}
-            style={{ minWidth: "74px" }}
-          >
-            {savingFact ? "Saving..." : "Add"}
-          </button>
-        </div>
-
         <div
           style={{
             border: "1px solid var(--color-border)",
-            borderRadius: "6px",
-            maxHeight: "220px",
-            overflowY: "auto",
+            borderRadius: "8px",
+            padding: "10px 12px",
+            color: "var(--color-text-secondary)",
+            fontSize: "13px",
+            lineHeight: "1.45",
           }}
         >
-          {(!userProfile?.facts || userProfile.facts.length === 0) && (
-            <div
-              style={{ padding: "12px", color: "var(--color-text-secondary)", fontSize: "13px" }}
-            >
-              No user facts stored yet.
-            </div>
-          )}
-
-          {(userProfile?.facts || [])
-            .slice()
-            .sort((a, b) => {
-              if ((a.pinned ? 1 : 0) !== (b.pinned ? 1 : 0))
-                return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
-              if (a.confidence !== b.confidence) return b.confidence - a.confidence;
-              return b.lastUpdatedAt - a.lastUpdatedAt;
-            })
-            .map((fact) => (
-              <div
-                key={fact.id}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr auto",
-                  gap: "8px",
-                  alignItems: "center",
-                  padding: "10px 12px",
-                  borderBottom: "1px solid var(--color-border)",
-                }}
-              >
-                <div>
-                  <div style={{ color: "var(--color-text-primary)", fontSize: "13px" }}>
-                    {fact.value}
-                  </div>
-                  <div
-                    style={{
-                      color: "var(--color-text-tertiary)",
-                      fontSize: "11px",
-                      marginTop: "2px",
-                    }}
-                  >
-                    {fact.category} • {Math.round(fact.confidence * 100)}% confidence
-                  </div>
-                </div>
-                <div style={{ display: "flex", gap: "6px" }}>
-                  <button
-                    onClick={() => handleToggleFactPin(fact)}
-                    style={{
-                      border: "1px solid var(--color-border)",
-                      background: fact.pinned ? "var(--color-bg-tertiary)" : "transparent",
-                      borderRadius: "6px",
-                      color: "var(--color-text-secondary)",
-                      cursor: "pointer",
-                      fontSize: "11px",
-                      padding: "4px 8px",
-                    }}
-                  >
-                    {fact.pinned ? "Pinned" : "Pin"}
-                  </button>
-                  <button
-                    onClick={() => handleDeleteFact(fact.id)}
-                    style={{
-                      border: "1px solid var(--color-border)",
-                      background: "transparent",
-                      borderRadius: "6px",
-                      color: "var(--color-error)",
-                      cursor: "pointer",
-                      fontSize: "11px",
-                      padding: "4px 8px",
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            ))}
+          {latestMemory
+            ? (() => {
+                const preview =
+                  parseImportTag(latestMemory.content).preview || latestMemory.content;
+                return /^\s*[{[]/.test(preview.trim())
+                  ? "Recent memory is technical/system content. Open Manage to inspect all memories."
+                  : preview;
+              })()
+            : "No memory preview available yet."}
         </div>
       </div>
 
-      {/* Relationship Memory */}
-      <div
-        className="settings-form-group"
-        style={{
-          marginBottom: "20px",
-          paddingBottom: "16px",
-          borderBottom: "1px solid var(--color-border)",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: "6px",
-          }}
-        >
-          <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
-            Relationship Memory
-          </div>
-          <button
-            className="settings-button"
-            style={{ padding: "4px 10px" }}
-            onClick={() => loadData()}
-          >
-            Refresh
-          </button>
-        </div>
-        <p className="settings-form-hint" style={{ marginTop: 0 }}>
-          Continuity memory across identity, preferences, context, history, and commitments.
-        </p>
-
-        <div
-          style={{ marginBottom: "8px", fontSize: "12px", color: "var(--color-text-secondary)" }}
-        >
-          {dueSoonReminder || "No commitments due soon."}
-        </div>
-
-        <div
-          style={{
-            border: "1px solid var(--color-border)",
-            borderRadius: "6px",
-            maxHeight: "260px",
-            overflowY: "auto",
-          }}
-        >
-          {relationshipItems.length === 0 && (
-            <div
-              style={{ padding: "12px", color: "var(--color-text-secondary)", fontSize: "13px" }}
-            >
-              No relationship memory items stored yet.
-            </div>
-          )}
-          {relationshipItems.map((item) => (
-            <div
-              key={item.id}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr auto",
-                gap: "8px",
-                alignItems: "center",
-                padding: "10px 12px",
-                borderBottom: "1px solid var(--color-border)",
-              }}
-            >
-              <div>
-                <div style={{ color: "var(--color-text-primary)", fontSize: "13px" }}>
-                  {item.text}
-                </div>
-                <div
-                  style={{
-                    color: "var(--color-text-tertiary)",
-                    fontSize: "11px",
-                    marginTop: "2px",
-                  }}
-                >
-                  {item.layer} • {Math.round(item.confidence * 100)}% confidence
-                  {item.status ? ` • ${item.status}` : ""}
-                  {item.dueAt ? ` • due ${new Date(item.dueAt).toLocaleDateString()}` : ""}
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: "6px" }}>
-                {item.layer === "commitments" && (
-                  <button
-                    onClick={() => handleToggleCommitmentStatus(item)}
-                    style={{
-                      border: "1px solid var(--color-border)",
-                      background:
-                        item.status === "done" ? "var(--color-bg-tertiary)" : "transparent",
-                      borderRadius: "6px",
-                      color: "var(--color-text-secondary)",
-                      cursor: "pointer",
-                      fontSize: "11px",
-                      padding: "4px 8px",
-                    }}
-                  >
-                    {item.status === "done" ? "Reopen" : "Done"}
-                  </button>
-                )}
-                <button
-                  onClick={() => handleEditRelationship(item)}
-                  style={{
-                    border: "1px solid var(--color-border)",
-                    background: "transparent",
-                    borderRadius: "6px",
-                    color: "var(--color-text-secondary)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    padding: "4px 8px",
-                  }}
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => handleDeleteRelationship(item.id)}
-                  style={{
-                    border: "1px solid var(--color-border)",
-                    background: "transparent",
-                    borderRadius: "6px",
-                    color: "var(--color-error)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    padding: "4px 8px",
-                  }}
-                >
-                  Forget
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {dueSoonItems.length > 0 && (
-          <div
-            style={{ marginTop: "10px", fontSize: "12px", color: "var(--color-text-secondary)" }}
-          >
-            Due soon:{" "}
-            {dueSoonItems
-              .slice(0, 3)
-              .map((item) => item.text)
-              .join(" • ")}
-          </div>
-        )}
-      </div>
-
-      {/* Stats Display */}
-      {stats && (
-        <div
-          className="memory-stats-grid"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(4, 1fr)",
-            gap: "12px",
-            marginBottom: "20px",
-          }}
-        >
-          <div
-            className="stat-card"
-            style={{
-              padding: "12px",
-              background: "var(--color-bg-tertiary)",
-              borderRadius: "8px",
-              textAlign: "center",
-            }}
-          >
-            <div
-              style={{ fontSize: "24px", fontWeight: "600", color: "var(--color-text-primary)" }}
-            >
-              {(stats.count ?? 0).toLocaleString()}
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>Memories</div>
-          </div>
-          <div
-            className="stat-card"
-            style={{
-              padding: "12px",
-              background: "var(--color-bg-tertiary)",
-              borderRadius: "8px",
-              textAlign: "center",
-            }}
-          >
-            <div
-              style={{ fontSize: "24px", fontWeight: "600", color: "var(--color-text-primary)" }}
-            >
-              {(stats.totalTokens ?? 0).toLocaleString()}
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>Tokens</div>
-          </div>
-          <div
-            className="stat-card"
-            style={{
-              padding: "12px",
-              background: "var(--color-bg-tertiary)",
-              borderRadius: "8px",
-              textAlign: "center",
-            }}
-          >
-            <div
-              style={{ fontSize: "24px", fontWeight: "600", color: "var(--color-text-primary)" }}
-            >
-              {(stats.compressedCount ?? 0).toLocaleString()}
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>Compressed</div>
-          </div>
-          <div
-            className="stat-card"
-            style={{
-              padding: "12px",
-              background: "var(--color-bg-tertiary)",
-              borderRadius: "8px",
-              textAlign: "center",
-            }}
-          >
-            <div
-              style={{ fontSize: "24px", fontWeight: "600", color: "var(--color-text-primary)" }}
-            >
-              {Math.round((stats.compressionRatio ?? 0) * 100)}%
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>Ratio</div>
-          </div>
-        </div>
-      )}
-
-      {/* Imported Memories Section */}
-      {importedStats && importedStats.count > 0 && (
-        <div
-          className="settings-form-group"
-          style={{
-            marginBottom: "20px",
-            paddingBottom: "16px",
-            borderBottom: "1px solid var(--color-border)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              marginBottom: "12px",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
-                Imported Memories
-              </div>
-              <span
-                style={{
-                  background: "var(--color-accent, #3b82f6)",
-                  color: "white",
-                  fontSize: "11px",
-                  fontWeight: "600",
-                  padding: "2px 8px",
-                  borderRadius: "10px",
-                }}
-              >
-                {importedStats.count.toLocaleString()}
-              </span>
-            </div>
-            <button
-              onClick={handleToggleImported}
-              style={{
-                background: "none",
-                border: "1px solid var(--color-border)",
-                color: "var(--color-text-secondary)",
-                padding: "4px 12px",
-                borderRadius: "6px",
-                cursor: "pointer",
-                fontSize: "12px",
-              }}
-            >
-              {showImported ? "Hide" : "View"}
-            </button>
-          </div>
-
-          {/* Imported stats mini cards */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(2, 1fr)",
-              gap: "8px",
-              marginBottom: showImported ? "12px" : 0,
-            }}
-          >
-            <div
-              style={{
-                padding: "8px 12px",
-                background: "var(--color-bg-tertiary)",
-                borderRadius: "6px",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              <span style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>
-                Conversations
-              </span>
-              <span
-                style={{ fontSize: "14px", fontWeight: "600", color: "var(--color-text-primary)" }}
-              >
-                {importedStats.count.toLocaleString()}
-              </span>
-            </div>
-            <div
-              style={{
-                padding: "8px 12px",
-                background: "var(--color-bg-tertiary)",
-                borderRadius: "6px",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              <span style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>Tokens</span>
-              <span
-                style={{ fontSize: "14px", fontWeight: "600", color: "var(--color-text-primary)" }}
-              >
-                {importedStats.totalTokens.toLocaleString()}
-              </span>
-            </div>
-          </div>
-
-          {/* Expanded imported memories list */}
-          {showImported && (
-            <div>
-              <div
-                style={{
-                  maxHeight: "300px",
-                  overflowY: "auto",
-                  border: "1px solid var(--color-border)",
-                  borderRadius: "6px",
-                }}
-              >
-                {importedMemories.map((memory) => {
-                  const { title, preview } = parseImportTag(memory.content);
-                  return (
-                    <div
-                      key={memory.id}
-                      style={{
-                        padding: "10px 12px",
-                        borderBottom: "1px solid var(--color-border)",
-                        fontSize: "13px",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          marginBottom: "4px",
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontWeight: 500,
-                            color: "var(--color-text-primary)",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                            maxWidth: "70%",
-                          }}
-                        >
-                          {title}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: "11px",
-                            color: "var(--color-text-tertiary)",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {new Date(memory.createdAt).toLocaleDateString()} · {memory.tokens} tokens
-                        </div>
-                      </div>
-                      <div
-                        style={{
-                          color: "var(--color-text-secondary)",
-                          fontSize: "12px",
-                          lineHeight: "1.4",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          display: "-webkit-box",
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: "vertical" as const,
-                        }}
-                      >
-                        {preview}
-                      </div>
-                    </div>
-                  );
-                })}
-                {importedMemories.length === 0 && !loadingImported && (
-                  <div
-                    style={{
-                      padding: "20px",
-                      textAlign: "center",
-                      color: "var(--color-text-secondary)",
-                      fontSize: "13px",
-                    }}
-                  >
-                    No imported memories found.
-                  </div>
-                )}
-                {loadingImported && (
-                  <div
-                    style={{
-                      padding: "12px",
-                      textAlign: "center",
-                      color: "var(--color-text-secondary)",
-                      fontSize: "13px",
-                    }}
-                  >
-                    Loading...
-                  </div>
-                )}
-              </div>
-
-              {importedHasMore && !loadingImported && (
-                <button
-                  onClick={() => loadImportedMemories(importedOffset)}
-                  style={{
-                    display: "block",
-                    width: "100%",
-                    marginTop: "8px",
-                    padding: "6px",
-                    background: "none",
-                    border: "1px solid var(--color-border)",
-                    borderRadius: "6px",
-                    color: "var(--color-text-secondary)",
-                    cursor: "pointer",
-                    fontSize: "12px",
-                  }}
-                >
-                  Load more...
-                </button>
-              )}
-
-              <button
-                onClick={handleDeleteImported}
-                disabled={deletingImported}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  marginTop: "8px",
-                  padding: "6px 12px",
-                  background: "var(--color-error)",
-                  color: "white",
-                  border: "none",
-                  borderRadius: "6px",
-                  cursor: deletingImported ? "default" : "pointer",
-                  fontSize: "12px",
-                  opacity: deletingImported ? 0.6 : 1,
-                }}
-              >
-                {deletingImported ? "Deleting..." : "Delete All Imported Memories"}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Import from ChatGPT */}
+      {/* Import from other AI providers */}
       <div
         className="settings-form-group"
         style={{
@@ -999,167 +582,937 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
             <div
               style={{ fontWeight: 500, color: "var(--color-text-primary)", marginBottom: "4px" }}
             >
-              Import from ChatGPT
+              Import memory from other AI providers
             </div>
             <p className="settings-form-hint" style={{ margin: 0 }}>
-              {importedStats && importedStats.count > 0
-                ? "Import more conversations to append to existing imported memories. Duplicates are automatically skipped."
-                : "Import your ChatGPT conversation history to build richer context. Your data stays on your device."}
+              Bring relevant context and data from another AI provider. CoWork OS gives you a prompt
+              to fetch memory from Claude, Gemini, Meta AI, and others.
             </p>
           </div>
           <button
             className="chatgpt-import-btn chatgpt-import-btn-primary"
-            onClick={() => setShowImportWizard(true)}
+            onClick={() => setShowPromptImportWizard(true)}
             disabled={!settings.enabled}
             style={{ opacity: settings.enabled ? 1 : 0.5, whiteSpace: "nowrap" }}
           >
-            {importedStats && importedStats.count > 0 ? "Import More" : "Import"}
+            Start Import
           </button>
         </div>
       </div>
 
-      {/* Enable/Disable Toggle */}
-      <div className="settings-form-group">
-        <label className="settings-toggle">
-          <input
-            type="checkbox"
-            checked={settings.enabled}
-            onChange={(e) => handleSave({ enabled: e.target.checked })}
-            disabled={saving}
-          />
-          <span className="settings-toggle-label">Enable Memory System</span>
-        </label>
-        <p className="settings-form-hint">
-          When enabled, task observations are captured for future context.
-        </p>
-      </div>
-
-      {settings.enabled && (
+      {showManageMemories && (
         <>
-          {/* Auto-Capture Toggle */}
-          <div className="settings-form-group">
-            <label className="settings-toggle">
-              <input
-                type="checkbox"
-                checked={settings.autoCapture}
-                onChange={(e) => handleSave({ autoCapture: e.target.checked })}
-                disabled={saving}
-              />
-              <span className="settings-toggle-label">Auto-Capture Observations</span>
-            </label>
-            <p className="settings-form-hint">
-              Automatically capture tool calls, decisions, and results.
-            </p>
-          </div>
-
-          {/* Compression Toggle */}
-          <div className="settings-form-group">
-            <label className="settings-toggle">
-              <input
-                type="checkbox"
-                checked={settings.compressionEnabled}
-                onChange={(e) => handleSave({ compressionEnabled: e.target.checked })}
-                disabled={saving}
-              />
-              <span className="settings-toggle-label">Enable Compression</span>
-            </label>
-            <p className="settings-form-hint">
-              Uses LLM to summarize memories, reducing token usage by ~10x.
-            </p>
-          </div>
-
-          {/* Privacy Mode */}
-          <div className="settings-form-group">
-            <label className="settings-label">Privacy Mode</label>
-            <select
-              value={settings.privacyMode}
-              onChange={(e) => handleSave({ privacyMode: e.target.value as PrivacyMode })}
-              disabled={saving}
-              className="settings-select"
-            >
-              <option value="normal">Normal - Auto-detect sensitive data</option>
-              <option value="strict">Strict - Mark all as private</option>
-              <option value="disabled">Disabled - No memory capture</option>
-            </select>
-            <p className="settings-form-hint">
-              Controls how sensitive data is handled in memories.
-            </p>
-          </div>
-
-          {/* Retention Period */}
-          <div className="settings-form-group">
-            <label className="settings-label">Retention Period</label>
-            <select
-              value={settings.retentionDays}
-              onChange={(e) => handleSave({ retentionDays: parseInt(e.target.value) })}
-              disabled={saving}
-              className="settings-select"
-            >
-              <option value="7">7 days</option>
-              <option value="30">30 days</option>
-              <option value="90">90 days</option>
-              <option value="180">180 days</option>
-              <option value="365">1 year</option>
-            </select>
-            <p className="settings-form-hint">
-              Memories older than this will be automatically deleted.
-            </p>
-          </div>
-
-          {/* Storage Cap */}
-          <div className="settings-form-group">
-            <label className="settings-label">Storage Cap (MB)</label>
-            <input
-              type="number"
-              min={10}
-              max={5000}
-              step={10}
-              value={settings.maxStorageMb}
-              onChange={(e) => {
-                const value = Math.max(
-                  10,
-                  Math.min(5000, parseInt(e.target.value || "0", 10) || 100),
-                );
-                handleSave({ maxStorageMb: value });
-              }}
-              disabled={saving}
-              className="settings-input"
-            />
-            <p className="settings-form-hint">
-              Oldest memories are pruned automatically when this limit is exceeded.
-            </p>
-          </div>
-
-          {/* Clear Button */}
           <div
             className="settings-form-group"
             style={{
-              marginTop: "24px",
-              paddingTop: "16px",
-              borderTop: "1px solid var(--color-border)",
+              marginBottom: "20px",
+              paddingBottom: "16px",
+              borderBottom: "1px solid var(--color-border)",
             }}
           >
-            <button
-              className="settings-button settings-button-danger"
-              onClick={handleClear}
-              disabled={saving || clearing}
+            <div
+              style={{ fontWeight: 500, color: "var(--color-text-primary)", marginBottom: "8px" }}
+            >
+              Manage memories
+            </div>
+            <input
+              className="settings-input"
+              type="text"
+              value={memorySearchQuery}
+              onChange={(e) => setMemorySearchQuery(e.target.value)}
+              placeholder="Search memories"
+              style={{ marginBottom: "10px" }}
+            />
+            <div
               style={{
-                background: "var(--color-error)",
-                color: "white",
-                border: "none",
-                padding: "8px 16px",
-                borderRadius: "6px",
-                cursor: "pointer",
-                opacity: clearing ? 0.6 : 1,
+                border: "1px solid var(--color-border)",
+                borderRadius: "8px",
+                maxHeight: "220px",
+                overflowY: "auto",
               }}
             >
-              {clearing ? "Clearing..." : "Clear All Memories"}
-            </button>
-            <p className="settings-form-hint" style={{ marginTop: "8px" }}>
-              Permanently deletes all memories for this workspace.
-            </p>
+              {searchingMemories && (
+                <div
+                  style={{
+                    padding: "12px",
+                    fontSize: "13px",
+                    color: "var(--color-text-secondary)",
+                  }}
+                >
+                  Searching...
+                </div>
+              )}
+              {!searchingMemories && selectedManageMemories.length === 0 && (
+                <div
+                  style={{
+                    padding: "12px",
+                    fontSize: "13px",
+                    color: "var(--color-text-secondary)",
+                  }}
+                >
+                  No memories found.
+                </div>
+              )}
+              {!searchingMemories &&
+                selectedManageMemories.slice(0, 30).map((memory) => (
+                  <div
+                    key={memory.id}
+                    style={{
+                      padding: "10px 12px",
+                      borderBottom: "1px solid var(--color-border)",
+                    }}
+                  >
+                    <div
+                      style={{
+                        color: "var(--color-text-primary)",
+                        fontSize: "13px",
+                        marginBottom: "4px",
+                      }}
+                    >
+                      {parseImportTag(memory.content).title}
+                    </div>
+                    <div style={{ color: "var(--color-text-secondary)", fontSize: "12px" }}>
+                      {parseImportTag(memory.content).preview || memory.content.slice(0, 180)}
+                    </div>
+                    <div
+                      style={{
+                        color: "var(--color-text-tertiary)",
+                        fontSize: "11px",
+                        marginTop: "4px",
+                      }}
+                    >
+                      {new Date(memory.createdAt).toLocaleDateString()}
+                      {typeof memory.tokens === "number" ? ` • ${memory.tokens} tokens` : ""}
+                    </div>
+                  </div>
+                ))}
+            </div>
           </div>
+
+          {/* User Profile Facts */}
+          <div
+            className="settings-form-group"
+            style={{
+              marginBottom: "20px",
+              paddingBottom: "16px",
+              borderBottom: "1px solid var(--color-border)",
+            }}
+          >
+            <div
+              style={{ fontWeight: 500, color: "var(--color-text-primary)", marginBottom: "4px" }}
+            >
+              User Memory Facts
+            </div>
+            <p className="settings-form-hint" style={{ marginTop: 0 }}>
+              Curate what the assistant remembers about preferences and context.
+            </p>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "130px 1fr auto",
+                gap: "8px",
+                marginBottom: "10px",
+              }}
+            >
+              <select
+                className="settings-select"
+                value={newFactCategory}
+                onChange={(e) => setNewFactCategory(e.target.value as UserFactCategory)}
+                disabled={savingFact}
+              >
+                <option value="identity">Identity</option>
+                <option value="preference">Preference</option>
+                <option value="bio">Profile</option>
+                <option value="work">Work</option>
+                <option value="goal">Goal</option>
+                <option value="constraint">Constraint</option>
+                <option value="other">Other</option>
+              </select>
+              <input
+                className="settings-input"
+                type="text"
+                value={newFact}
+                onChange={(e) => setNewFact(e.target.value)}
+                placeholder="Add a fact (for example: Prefers concise responses)"
+                disabled={savingFact}
+              />
+              <button
+                className="settings-button"
+                onClick={handleAddFact}
+                disabled={savingFact || !newFact.trim()}
+                style={{ minWidth: "74px" }}
+              >
+                {savingFact ? "Saving..." : "Add"}
+              </button>
+            </div>
+
+            <div
+              style={{
+                border: "1px solid var(--color-border)",
+                borderRadius: "6px",
+                maxHeight: "220px",
+                overflowY: "auto",
+              }}
+            >
+              {(!userProfile?.facts || userProfile.facts.length === 0) && (
+                <div
+                  style={{
+                    padding: "12px",
+                    color: "var(--color-text-secondary)",
+                    fontSize: "13px",
+                  }}
+                >
+                  No user facts stored yet.
+                </div>
+              )}
+
+              {(userProfile?.facts || [])
+                .slice()
+                .sort((a, b) => {
+                  if ((a.pinned ? 1 : 0) !== (b.pinned ? 1 : 0))
+                    return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+                  if (a.confidence !== b.confidence) return b.confidence - a.confidence;
+                  return b.lastUpdatedAt - a.lastUpdatedAt;
+                })
+                .map((fact) => (
+                  <div
+                    key={fact.id}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr auto",
+                      gap: "8px",
+                      alignItems: "center",
+                      padding: "10px 12px",
+                      borderBottom: "1px solid var(--color-border)",
+                    }}
+                  >
+                    <div>
+                      <div style={{ color: "var(--color-text-primary)", fontSize: "13px" }}>
+                        {fact.value}
+                      </div>
+                      <div
+                        style={{
+                          color: "var(--color-text-tertiary)",
+                          fontSize: "11px",
+                          marginTop: "2px",
+                        }}
+                      >
+                        {fact.category} • {Math.round(fact.confidence * 100)}% confidence
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: "6px" }}>
+                      <button
+                        onClick={() => handleToggleFactPin(fact)}
+                        style={{
+                          border: "1px solid var(--color-border)",
+                          background: fact.pinned ? "var(--color-bg-tertiary)" : "transparent",
+                          borderRadius: "6px",
+                          color: "var(--color-text-secondary)",
+                          cursor: "pointer",
+                          fontSize: "11px",
+                          padding: "4px 8px",
+                        }}
+                      >
+                        {fact.pinned ? "Pinned" : "Pin"}
+                      </button>
+                      <button
+                        onClick={() => handleDeleteFact(fact.id)}
+                        style={{
+                          border: "1px solid var(--color-border)",
+                          background: "transparent",
+                          borderRadius: "6px",
+                          color: "var(--color-error)",
+                          cursor: "pointer",
+                          fontSize: "11px",
+                          padding: "4px 8px",
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </div>
+
+          {/* Relationship Memory */}
+          <div
+            className="settings-form-group"
+            style={{
+              marginBottom: "20px",
+              paddingBottom: "16px",
+              borderBottom: "1px solid var(--color-border)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: "6px",
+              }}
+            >
+              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+                Relationship Memory
+              </div>
+              <button
+                className="settings-button"
+                style={{ padding: "4px 10px" }}
+                onClick={() => loadData()}
+              >
+                Refresh
+              </button>
+            </div>
+            <p className="settings-form-hint" style={{ marginTop: 0 }}>
+              Continuity memory across identity, preferences, context, history, and commitments.
+            </p>
+
+            <div
+              style={{
+                marginBottom: "8px",
+                fontSize: "12px",
+                color: "var(--color-text-secondary)",
+              }}
+            >
+              {dueSoonReminder || "No commitments due soon."}
+            </div>
+
+            <div
+              style={{
+                border: "1px solid var(--color-border)",
+                borderRadius: "6px",
+                maxHeight: "260px",
+                overflowY: "auto",
+              }}
+            >
+              {relationshipItems.length === 0 && (
+                <div
+                  style={{
+                    padding: "12px",
+                    color: "var(--color-text-secondary)",
+                    fontSize: "13px",
+                  }}
+                >
+                  No relationship memory items stored yet.
+                </div>
+              )}
+              {relationshipItems.map((item) => (
+                <div
+                  key={item.id}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: "8px",
+                    alignItems: "center",
+                    padding: "10px 12px",
+                    borderBottom: "1px solid var(--color-border)",
+                  }}
+                >
+                  <div>
+                    <div style={{ color: "var(--color-text-primary)", fontSize: "13px" }}>
+                      {item.text}
+                    </div>
+                    <div
+                      style={{
+                        color: "var(--color-text-tertiary)",
+                        fontSize: "11px",
+                        marginTop: "2px",
+                      }}
+                    >
+                      {item.layer} • {Math.round(item.confidence * 100)}% confidence
+                      {item.status ? ` • ${item.status}` : ""}
+                      {item.dueAt ? ` • due ${new Date(item.dueAt).toLocaleDateString()}` : ""}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: "6px" }}>
+                    {item.layer === "commitments" && (
+                      <button
+                        onClick={() => handleToggleCommitmentStatus(item)}
+                        style={{
+                          border: "1px solid var(--color-border)",
+                          background:
+                            item.status === "done" ? "var(--color-bg-tertiary)" : "transparent",
+                          borderRadius: "6px",
+                          color: "var(--color-text-secondary)",
+                          cursor: "pointer",
+                          fontSize: "11px",
+                          padding: "4px 8px",
+                        }}
+                      >
+                        {item.status === "done" ? "Reopen" : "Done"}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleEditRelationship(item)}
+                      style={{
+                        border: "1px solid var(--color-border)",
+                        background: "transparent",
+                        borderRadius: "6px",
+                        color: "var(--color-text-secondary)",
+                        cursor: "pointer",
+                        fontSize: "11px",
+                        padding: "4px 8px",
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => handleDeleteRelationship(item.id)}
+                      style={{
+                        border: "1px solid var(--color-border)",
+                        background: "transparent",
+                        borderRadius: "6px",
+                        color: "var(--color-error)",
+                        cursor: "pointer",
+                        fontSize: "11px",
+                        padding: "4px 8px",
+                      }}
+                    >
+                      Forget
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {dueSoonItems.length > 0 && (
+              <div
+                style={{
+                  marginTop: "10px",
+                  fontSize: "12px",
+                  color: "var(--color-text-secondary)",
+                }}
+              >
+                Due soon:{" "}
+                {dueSoonItems
+                  .slice(0, 3)
+                  .map((item) => item.text)
+                  .join(" • ")}
+              </div>
+            )}
+          </div>
+
+          {/* Stats Display */}
+          {stats && (
+            <div
+              className="memory-stats-grid"
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(4, 1fr)",
+                gap: "12px",
+                marginBottom: "20px",
+              }}
+            >
+              <div
+                className="stat-card"
+                style={{
+                  padding: "12px",
+                  background: "var(--color-bg-tertiary)",
+                  borderRadius: "8px",
+                  textAlign: "center",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "24px",
+                    fontWeight: "600",
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  {(stats.count ?? 0).toLocaleString()}
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>
+                  Memories
+                </div>
+              </div>
+              <div
+                className="stat-card"
+                style={{
+                  padding: "12px",
+                  background: "var(--color-bg-tertiary)",
+                  borderRadius: "8px",
+                  textAlign: "center",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "24px",
+                    fontWeight: "600",
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  {(stats.totalTokens ?? 0).toLocaleString()}
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>Tokens</div>
+              </div>
+              <div
+                className="stat-card"
+                style={{
+                  padding: "12px",
+                  background: "var(--color-bg-tertiary)",
+                  borderRadius: "8px",
+                  textAlign: "center",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "24px",
+                    fontWeight: "600",
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  {(stats.compressedCount ?? 0).toLocaleString()}
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>
+                  Compressed
+                </div>
+              </div>
+              <div
+                className="stat-card"
+                style={{
+                  padding: "12px",
+                  background: "var(--color-bg-tertiary)",
+                  borderRadius: "8px",
+                  textAlign: "center",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "24px",
+                    fontWeight: "600",
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  {Math.round((stats.compressionRatio ?? 0) * 100)}%
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>Ratio</div>
+              </div>
+            </div>
+          )}
+
+          {/* Imported Memories Section */}
+          {importedStats && importedStats.count > 0 && (
+            <div
+              className="settings-form-group"
+              style={{
+                marginBottom: "20px",
+                paddingBottom: "16px",
+                borderBottom: "1px solid var(--color-border)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: "12px",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+                    Imported Memories
+                  </div>
+                  <span
+                    style={{
+                      background: "var(--color-accent, #3b82f6)",
+                      color: "white",
+                      fontSize: "11px",
+                      fontWeight: "600",
+                      padding: "2px 8px",
+                      borderRadius: "10px",
+                    }}
+                  >
+                    {importedStats.count.toLocaleString()}
+                  </span>
+                </div>
+                <button
+                  onClick={handleToggleImported}
+                  style={{
+                    background: "none",
+                    border: "1px solid var(--color-border)",
+                    color: "var(--color-text-secondary)",
+                    padding: "4px 12px",
+                    borderRadius: "6px",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                  }}
+                >
+                  {showImported ? "Hide" : "View"}
+                </button>
+              </div>
+
+              {/* Imported stats mini cards */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(2, 1fr)",
+                  gap: "8px",
+                  marginBottom: showImported ? "12px" : 0,
+                }}
+              >
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    background: "var(--color-bg-tertiary)",
+                    borderRadius: "6px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <span style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>
+                    Conversations
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "14px",
+                      fontWeight: "600",
+                      color: "var(--color-text-primary)",
+                    }}
+                  >
+                    {importedStats.count.toLocaleString()}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    background: "var(--color-bg-tertiary)",
+                    borderRadius: "6px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <span style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>
+                    Tokens
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "14px",
+                      fontWeight: "600",
+                      color: "var(--color-text-primary)",
+                    }}
+                  >
+                    {importedStats.totalTokens.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+
+              {/* Expanded imported memories list */}
+              {showImported && (
+                <div>
+                  <div
+                    style={{
+                      maxHeight: "300px",
+                      overflowY: "auto",
+                      border: "1px solid var(--color-border)",
+                      borderRadius: "6px",
+                    }}
+                  >
+                    {importedMemories.map((memory) => {
+                      const { title, preview } = parseImportTag(memory.content);
+                      return (
+                        <div
+                          key={memory.id}
+                          style={{
+                            padding: "10px 12px",
+                            borderBottom: "1px solid var(--color-border)",
+                            fontSize: "13px",
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              marginBottom: "4px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontWeight: 500,
+                                color: "var(--color-text-primary)",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                maxWidth: "70%",
+                              }}
+                            >
+                              {title}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "11px",
+                                color: "var(--color-text-tertiary)",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {new Date(memory.createdAt).toLocaleDateString()} · {memory.tokens}{" "}
+                              tokens
+                            </div>
+                          </div>
+                          <div
+                            style={{
+                              color: "var(--color-text-secondary)",
+                              fontSize: "12px",
+                              lineHeight: "1.4",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical" as const,
+                            }}
+                          >
+                            {preview}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {importedMemories.length === 0 && !loadingImported && (
+                      <div
+                        style={{
+                          padding: "20px",
+                          textAlign: "center",
+                          color: "var(--color-text-secondary)",
+                          fontSize: "13px",
+                        }}
+                      >
+                        No imported memories found.
+                      </div>
+                    )}
+                    {loadingImported && (
+                      <div
+                        style={{
+                          padding: "12px",
+                          textAlign: "center",
+                          color: "var(--color-text-secondary)",
+                          fontSize: "13px",
+                        }}
+                      >
+                        Loading...
+                      </div>
+                    )}
+                  </div>
+
+                  {importedHasMore && !loadingImported && (
+                    <button
+                      onClick={() => loadImportedMemories(importedOffset)}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "8px",
+                        padding: "6px",
+                        background: "none",
+                        border: "1px solid var(--color-border)",
+                        borderRadius: "6px",
+                        color: "var(--color-text-secondary)",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                      }}
+                    >
+                      Load more...
+                    </button>
+                  )}
+
+                  <button
+                    onClick={handleDeleteImported}
+                    disabled={deletingImported}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      marginTop: "8px",
+                      padding: "6px 12px",
+                      background: "var(--color-error)",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "6px",
+                      cursor: deletingImported ? "default" : "pointer",
+                      fontSize: "12px",
+                      opacity: deletingImported ? 0.6 : 1,
+                    }}
+                  >
+                    {deletingImported ? "Deleting..." : "Delete All Imported Memories"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Import from ChatGPT */}
+          <div
+            className="settings-form-group"
+            style={{
+              marginBottom: "20px",
+              paddingBottom: "16px",
+              borderBottom: "1px solid var(--color-border)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div
+                  style={{
+                    fontWeight: 500,
+                    color: "var(--color-text-primary)",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Import from ChatGPT (JSON export)
+                </div>
+                <p className="settings-form-hint" style={{ margin: 0 }}>
+                  {importedStats && importedStats.count > 0
+                    ? "Import more conversations to append to existing imported memories. Duplicates are automatically skipped."
+                    : "Import your ChatGPT conversation history to build richer context. Your data stays on your device."}
+                </p>
+              </div>
+              <button
+                className="chatgpt-import-btn chatgpt-import-btn-primary"
+                onClick={() => setShowImportWizard(true)}
+                disabled={!settings.enabled}
+                style={{ opacity: settings.enabled ? 1 : 0.5, whiteSpace: "nowrap" }}
+              >
+                {importedStats && importedStats.count > 0 ? "Import More" : "Import"}
+              </button>
+            </div>
+          </div>
+
+          {settings.enabled && (
+            <>
+              <div
+                className="settings-form-group"
+                style={{
+                  marginTop: "10px",
+                  paddingTop: "10px",
+                  borderTop: "1px solid var(--color-border)",
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: 500,
+                    color: "var(--color-text-primary)",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Advanced memory settings
+                </div>
+                <p className="settings-form-hint" style={{ margin: 0 }}>
+                  Tune memory quality, privacy, retention, and storage behavior.
+                </p>
+              </div>
+
+              {/* Compression Toggle */}
+              <ToggleRow
+                title="Enable compression"
+                description="Uses LLM to summarize memories, reducing token usage by ~10x."
+                checked={settings.compressionEnabled}
+                onChange={(checked) => handleSave({ compressionEnabled: checked })}
+                disabled={saving}
+              />
+
+              {/* Privacy Mode */}
+              <div className="settings-form-group">
+                <label className="settings-label">Privacy Mode</label>
+                <select
+                  value={settings.privacyMode}
+                  onChange={(e) => handleSave({ privacyMode: e.target.value as PrivacyMode })}
+                  disabled={saving}
+                  className="settings-select"
+                >
+                  <option value="normal">Normal - Auto-detect sensitive data</option>
+                  <option value="strict">Strict - Mark all as private</option>
+                  <option value="disabled">Disabled - No memory capture</option>
+                </select>
+                <p className="settings-form-hint">
+                  Controls how sensitive data is handled in memories.
+                </p>
+              </div>
+
+              {/* Retention Period */}
+              <div className="settings-form-group">
+                <label className="settings-label">Retention Period</label>
+                <select
+                  value={settings.retentionDays}
+                  onChange={(e) => handleSave({ retentionDays: parseInt(e.target.value) })}
+                  disabled={saving}
+                  className="settings-select"
+                >
+                  <option value="7">7 days</option>
+                  <option value="30">30 days</option>
+                  <option value="90">90 days</option>
+                  <option value="180">180 days</option>
+                  <option value="365">1 year</option>
+                </select>
+                <p className="settings-form-hint">
+                  Memories older than this will be automatically deleted.
+                </p>
+              </div>
+
+              {/* Storage Cap */}
+              <div className="settings-form-group">
+                <label className="settings-label">Storage Cap (MB)</label>
+                <input
+                  type="number"
+                  min={10}
+                  max={5000}
+                  step={10}
+                  value={settings.maxStorageMb}
+                  onChange={(e) => {
+                    const value = Math.max(
+                      10,
+                      Math.min(5000, parseInt(e.target.value || "0", 10) || 100),
+                    );
+                    handleSave({ maxStorageMb: value });
+                  }}
+                  disabled={saving}
+                  className="settings-input"
+                />
+                <p className="settings-form-hint">
+                  Oldest memories are pruned automatically when this limit is exceeded.
+                </p>
+              </div>
+
+              {/* Clear Button */}
+              <div
+                className="settings-form-group"
+                style={{
+                  marginTop: "24px",
+                  paddingTop: "16px",
+                  borderTop: "1px solid var(--color-border)",
+                }}
+              >
+                <button
+                  className="settings-button settings-button-danger"
+                  onClick={handleClear}
+                  disabled={saving || clearing}
+                  style={{
+                    background: "var(--color-error)",
+                    color: "white",
+                    border: "none",
+                    padding: "8px 16px",
+                    borderRadius: "6px",
+                    cursor: "pointer",
+                    opacity: clearing ? 0.6 : 1,
+                  }}
+                >
+                  {clearing ? "Clearing..." : "Clear All Memories"}
+                </button>
+                <p className="settings-form-hint" style={{ marginTop: "8px" }}>
+                  Permanently deletes all memories for this workspace.
+                </p>
+              </div>
+            </>
+          )}
         </>
+      )}
+      {showPromptImportWizard && (
+        <PromptMemoryImportWizard
+          workspaceId={workspaceId}
+          onClose={() => {
+            setShowPromptImportWizard(false);
+            loadData();
+          }}
+          onImportComplete={() => loadData()}
+        />
       )}
     </div>
   );
