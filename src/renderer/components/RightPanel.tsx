@@ -5,10 +5,11 @@ import { FileViewer } from "./FileViewer";
 import { useAgentContext } from "../hooks/useAgentContext";
 import {
   deriveTaskOutputSummaryFromEvents,
-  formatOutputLocationLabel,
   hasTaskOutputs,
   resolveTaskOutputSummaryFromCompletionEvent,
 } from "../utils/task-outputs";
+import { normalizeEventsForTimelineUi } from "../utils/timeline-projection";
+import { getEffectiveTaskEventType } from "../utils/task-event-compat";
 import {
   Cloud,
   Database,
@@ -182,7 +183,7 @@ interface ToolUsage {
 export function RightPanel({
   task,
   workspace,
-  events,
+  events: rawEvents,
   tasks = [],
   queueStatus,
   onSelectTask,
@@ -190,6 +191,7 @@ export function RightPanel({
   highlightOutputPath = null,
   onHighlightConsumed,
 }: RightPanelProps) {
+  const events = useMemo(() => normalizeEventsForTimelineUi(rawEvents), [rawEvents]);
   const [expandedSections, setExpandedSections] = useState({
     progress: true,
     queue: true,
@@ -249,7 +251,7 @@ export function RightPanel({
 
   // Extract plan steps from events
   const planSteps = useMemo((): PlanStep[] => {
-    const planEvent = events.find((e) => e.type === "plan_created");
+    const planEvent = events.find((event) => getEffectiveTaskEventType(event) === "plan_created");
     if (!planEvent?.payload?.plan?.steps) return [];
 
     // Get the base steps from the plan
@@ -257,22 +259,23 @@ export function RightPanel({
 
     // Update step statuses based on step events
     events.forEach((event) => {
-      if (event.type === "step_started" && event.payload.step) {
+      const effectiveType = getEffectiveTaskEventType(event);
+      if (effectiveType === "step_started" && event.payload.step) {
         const step = steps.find((s) => s.id === event.payload.step.id);
         if (step) step.status = "in_progress";
       }
-      if (event.type === "step_completed" && event.payload.step) {
+      if (effectiveType === "step_completed" && event.payload.step) {
         const step = steps.find((s) => s.id === event.payload.step.id);
         if (step) step.status = "completed";
       }
-      if (event.type === "step_failed" && event.payload.step) {
+      if (effectiveType === "step_failed" && event.payload.step) {
         const step = steps.find((s) => s.id === event.payload.step.id);
         if (step) {
           step.status = "failed";
           if (event.payload.reason && !step.error) step.error = String(event.payload.reason);
         }
       }
-      if (event.type === "step_skipped" && event.payload.step) {
+      if (effectiveType === "step_skipped" && event.payload.step) {
         const step = steps.find((s) => s.id === event.payload.step.id);
         if (step) step.status = "skipped";
       }
@@ -289,7 +292,8 @@ export function RightPanel({
     const fileMap = new Map<string, FileInfo>();
 
     events.forEach((event) => {
-      if (event.type === "file_created" && event.payload.path) {
+      const effectiveType = getEffectiveTaskEventType(event);
+      if (effectiveType === "file_created" && event.payload.path) {
         if (event.payload.type === "directory") return;
         fileMap.set(event.payload.path, {
           path: event.payload.path,
@@ -297,7 +301,7 @@ export function RightPanel({
           timestamp: event.timestamp,
         });
       }
-      if (event.type === "file_modified" && (event.payload.path || event.payload.from)) {
+      if (effectiveType === "file_modified" && (event.payload.path || event.payload.from)) {
         const path = event.payload.path || event.payload.from;
         fileMap.set(path, {
           path,
@@ -305,14 +309,14 @@ export function RightPanel({
           timestamp: event.timestamp,
         });
       }
-      if (event.type === "file_deleted" && event.payload.path) {
+      if (effectiveType === "file_deleted" && event.payload.path) {
         fileMap.set(event.payload.path, {
           path: event.payload.path,
           action: "deleted",
           timestamp: event.timestamp,
         });
       }
-      if (event.type === "artifact_created" && event.payload.path) {
+      if (effectiveType === "artifact_created" && event.payload.path) {
         fileMap.set(event.payload.path, {
           path: event.payload.path,
           action: "created",
@@ -323,7 +327,7 @@ export function RightPanel({
 
     const latestCompletionEvent = [...events]
       .reverse()
-      .find((event) => event.type === "task_completed");
+      .find((event) => getEffectiveTaskEventType(event) === "task_completed");
     const completionOutputSummary = latestCompletionEvent
       ? resolveTaskOutputSummaryFromCompletionEvent(latestCompletionEvent, events)
       : null;
@@ -350,7 +354,7 @@ export function RightPanel({
   const outputSummary = useMemo(() => {
     const latestCompletionEvent = [...events]
       .reverse()
-      .find((event) => event.type === "task_completed");
+      .find((event) => getEffectiveTaskEventType(event) === "task_completed");
     if (latestCompletionEvent) {
       const fromCompletion = resolveTaskOutputSummaryFromCompletionEvent(latestCompletionEvent, events);
       if (fromCompletion) return fromCompletion;
@@ -380,7 +384,7 @@ export function RightPanel({
     const toolMap = new Map<string, ToolUsage>();
 
     events.forEach((event) => {
-      if (event.type === "tool_call" && event.payload.tool) {
+      if (getEffectiveTaskEventType(event) === "tool_call" && event.payload.tool) {
         const existing = toolMap.get(event.payload.tool);
         if (existing) {
           existing.count++;
@@ -403,7 +407,7 @@ export function RightPanel({
     const files = new Set<string>();
 
     events.forEach((event) => {
-      if (event.type === "tool_call") {
+      if (getEffectiveTaskEventType(event) === "tool_call") {
         // Check if it's a read_file or list_directory call
         if (event.payload.tool === "read_file" && event.payload.input?.path) {
           files.add(event.payload.input.path);
@@ -421,14 +425,15 @@ export function RightPanel({
   const usedSkillIds = useMemo((): Set<string> => {
     const ids = new Set<string>();
     events.forEach((event) => {
+      const effectiveType = getEffectiveTaskEventType(event);
       if (
-        event.type === "tool_call" &&
+        effectiveType === "tool_call" &&
         event.payload.tool === "use_skill" &&
         event.payload.input?.skill_id
       ) {
         ids.add(event.payload.input.skill_id);
       }
-      if (event.type === "log" && event.payload.skillId) {
+      if (effectiveType === "log" && event.payload.skillId) {
         ids.add(event.payload.skillId);
       }
     });
@@ -439,7 +444,7 @@ export function RightPanel({
   const usedToolNames = useMemo((): Set<string> => {
     const names = new Set<string>();
     events.forEach((event) => {
-      if (event.type === "tool_call" && event.payload.tool) {
+      if (getEffectiveTaskEventType(event) === "tool_call" && event.payload.tool) {
         names.add(event.payload.tool);
       }
     });
@@ -606,10 +611,12 @@ export function RightPanel({
                       ? "◉ WORKING..."
                       : task?.status === "paused"
                         ? "⏸ WAITING"
-                        : task?.status === "blocked"
+                      : task?.status === "blocked"
                           ? "! NEEDS YOUR GO-AHEAD"
                           : task?.status === "completed"
-                            ? "✓ ALL DONE"
+                            ? task?.terminalStatus === "needs_user_action"
+                              ? "⚠ ACTION REQUIRED"
+                              : "✓ ALL DONE"
                             : "○ READY"}
                   </span>
                   <span className="modern-only">
@@ -620,7 +627,9 @@ export function RightPanel({
                         : task?.status === "blocked"
                           ? "Needs your go-ahead"
                           : task?.status === "completed"
-                            ? "All done"
+                            ? task?.terminalStatus === "needs_user_action"
+                              ? "Completed - action required"
+                              : "All done"
                             : "Ready"}
                   </span>
                 </div>
