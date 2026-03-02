@@ -20,6 +20,7 @@ import {
   ExecutionMode,
   TaskDomain,
 } from "../../shared/types";
+import { parseLeadingSkillSlashCommand } from "../../shared/skill-slash-commands";
 import { CollaborativeThoughtsPanel } from "./CollaborativeThoughtsPanel";
 import { DispatchedAgentsPanel } from "./DispatchedAgentsPanel";
 import { MultiLlmSelectionPanel } from "./MultiLlmSelectionPanel";
@@ -35,8 +36,10 @@ import {
 } from "../utils/task-outputs";
 import {
   ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES,
-  isImportantTaskEvent,
+  shouldShowTaskEventInSummaryMode,
 } from "../utils/task-event-visibility";
+import { normalizeEventsForTimelineUi } from "../utils/timeline-projection";
+import { getEffectiveTaskEventType } from "../utils/task-event-compat";
 import {
   ATTACHMENT_CONTENT_END_MARKER,
   ATTACHMENT_CONTENT_START_MARKER,
@@ -48,8 +51,6 @@ import {
   truncateTextForTaskPrompt,
 } from "./utils/attachment-content";
 
-// localStorage key for verbose mode
-const VERBOSE_STEPS_KEY = "cowork:verboseSteps";
 const CODE_PREVIEWS_EXPANDED_KEY = "cowork:codePreviewsExpanded";
 const TASK_TITLE_MAX_LENGTH = 50;
 const TITLE_ELLIPSIS_REGEX = /(\.\.\.|\u2026)$/u;
@@ -59,6 +60,7 @@ const ACTIVE_WORK_EVENT_TYPES: EventType[] = [
   "executing",
   "step_started",
   "step_completed",
+  "progress_update",
   "tool_call",
   "tool_result",
   "verification_started",
@@ -68,16 +70,22 @@ const ACTIVE_WORK_EVENT_TYPES: EventType[] = [
 
 // In non-verbose mode, hide verification noise (verification steps are still executed by the agent).
 const isVerificationNoiseEvent = (event: TaskEvent): boolean => {
-  if (event.type === "assistant_message") {
+  const effectiveType = getEffectiveTaskEventType(event);
+  if (effectiveType === "assistant_message") {
     return event.payload?.internal === true;
   }
 
-  if (event.type === "step_started" || event.type === "step_completed") {
+  if (
+    event.type === "timeline_step_started" ||
+    event.type === "timeline_step_finished" ||
+    effectiveType === "step_started" ||
+    effectiveType === "step_completed"
+  ) {
     return isVerificationStepDescription(event.payload?.step?.description);
   }
 
   // Verification events are shown on failure; success is kept quiet.
-  if (event.type === "verification_started" || event.type === "verification_passed") {
+  if (effectiveType === "verification_started" || effectiveType === "verification_passed") {
     return true;
   }
 
@@ -235,6 +243,13 @@ import { CommandOutput } from "./CommandOutput";
 import { CanvasPreview } from "./CanvasPreview";
 import { InlineImagePreview } from "./InlineImagePreview";
 import { InlineSpreadsheetPreview } from "./InlineSpreadsheetPreview";
+import { InlineDocumentPreview } from "./InlineDocumentPreview";
+import { StepFeed } from "./timeline/StepFeed";
+import {
+  resolveTimelineIndicator,
+  shouldShowTimelineBranchStub,
+} from "./timeline/timeline-indicators";
+import { getStepCompletionPreviewPath } from "../utils/step-document-preview";
 
 // Code block component with copy button
 interface CodeBlockProps {
@@ -1921,9 +1936,9 @@ export function MainContent({
   task,
   selectedTaskId,
   workspace,
-  events,
+  events: rawEvents,
   childTasks = [],
-  childEvents = [],
+  childEvents: rawChildEvents = [],
   onSelectChildTask,
   onSendMessage,
   onCreateTask,
@@ -1940,6 +1955,8 @@ export function MainContent({
   availableProviders = [],
   uiDensity = "focused",
 }: MainContentProps) {
+  const events = useMemo(() => normalizeEventsForTimelineUi(rawEvents), [rawEvents]);
+  const childEvents = useMemo(() => normalizeEventsForTimelineUi(rawChildEvents), [rawChildEvents]);
   // Agent personality context for personalized messages
   const agentContext = useAgentContext();
   const [inputValue, setInputValue] = useState("");
@@ -2231,8 +2248,28 @@ export function MainContent({
   const [viewerFilePath, setViewerFilePath] = useState<string | null>(null);
   // Extract citations from task events for inline badge rendering
   const citations = useMemo(() => {
-    const citEvent = [...events].reverse().find((e) => e.type === "citations_collected");
-    return citEvent?.payload?.citations || [];
+    const evidenceEvent = [...events]
+      .reverse()
+      .find((event) => event.type === "timeline_evidence_attached");
+    if (!evidenceEvent) return [];
+    const refs = Array.isArray(evidenceEvent.payload?.evidenceRefs)
+      ? (evidenceEvent.payload.evidenceRefs as Array<Record<string, unknown>>)
+      : [];
+    if (refs.length > 0) {
+      return refs
+        .map((ref) => {
+          const source = typeof ref?.sourceUrlOrPath === "string" ? ref.sourceUrlOrPath : "";
+          if (!source) return null;
+          return {
+            url: source,
+            source,
+            snippet: typeof ref?.snippet === "string" ? ref.snippet : undefined,
+            title: typeof ref?.snippet === "string" ? ref.snippet : undefined,
+          };
+        })
+        .filter(Boolean);
+    }
+    return Array.isArray(evidenceEvent.payload?.citations) ? evidenceEvent.payload.citations : [];
   }, [events]);
 
   const markdownComponents = useMemo(
@@ -2253,11 +2290,8 @@ export function MainContent({
   // Workspace dropdown state
   const [showWorkspaceDropdown, setShowWorkspaceDropdown] = useState(false);
   const [workspacesList, setWorkspacesList] = useState<Workspace[]>([]);
-  // Verbose mode - when false, only show important steps
-  const [verboseSteps, setVerboseSteps] = useState(() => {
-    const saved = localStorage.getItem(VERBOSE_STEPS_KEY);
-    return saved === "true";
-  });
+  // Verbose mode - default to summary and persist per user profile.
+  const [verboseSteps, setVerboseSteps] = useState(false);
   // Code previews expanded by default (true = open, false = collapsed)
   const [codePreviewsExpanded, setCodePreviewsExpanded] = useState(() => {
     const saved = localStorage.getItem(CODE_PREVIEWS_EXPANDED_KEY);
@@ -2276,19 +2310,57 @@ export function MainContent({
   const overflowToggleBtnRef = useRef<HTMLButtonElement>(null);
   const [showModelDropdownFromLabel, setShowModelDropdownFromLabel] = useState(false);
   const modelLabelRef = useRef<HTMLDivElement>(null);
+  const [guardrailDefaultMaxAutoContinuations, setGuardrailDefaultMaxAutoContinuations] =
+    useState<number | null>(null);
 
   // Filter events based on verbose mode
   const filteredEvents = useMemo(() => {
-    const baseEvents = verboseSteps ? events : events.filter(isImportantTaskEvent);
+    const baseEvents = verboseSteps
+      ? events
+      : events.filter((event) => shouldShowTaskEventInSummaryMode(event, task?.status));
     // Command output is rendered separately via CommandOutput component
-    const visibleEvents = baseEvents.filter((event) => event.type !== "command_output");
+    const visibleEvents = baseEvents.filter(
+      (event) => event.type !== "command_output" && event.type !== "timeline_command_output",
+    );
+    const terminalErrorDedupWindowMs = 10_000;
+    const lastErrorByFingerprint = new Map<string, number>();
+    const dedupedEvents = visibleEvents.filter((event) => {
+      if (getEffectiveTaskEventType(event) !== "error") return true;
+      const payload =
+        event.payload && typeof event.payload === "object"
+          ? (event.payload as Record<string, unknown>)
+          : {};
+      const fingerprint =
+        (typeof payload.terminal_failure_fingerprint === "string"
+          ? payload.terminal_failure_fingerprint
+          : typeof payload.terminalFailureFingerprint === "string"
+            ? payload.terminalFailureFingerprint
+            : typeof payload.errorFingerprint === "string"
+              ? payload.errorFingerprint
+              : typeof payload.message === "string"
+                ? payload.message
+                : typeof payload.error === "string"
+                  ? payload.error
+                  : "")
+          .trim();
+      if (!fingerprint) return true;
+      const previousTimestamp = lastErrorByFingerprint.get(fingerprint);
+      if (
+        typeof previousTimestamp === "number" &&
+        event.timestamp - previousTimestamp <= terminalErrorDedupWindowMs
+      ) {
+        return false;
+      }
+      lastErrorByFingerprint.set(fingerprint, event.timestamp);
+      return true;
+    });
     // Always keep explicit verification steps silent; surface failures elsewhere.
-    return visibleEvents.filter((event) => !isVerificationNoiseEvent(event));
-  }, [events, verboseSteps]);
+    return dedupedEvents.filter((event) => !isVerificationNoiseEvent(event));
+  }, [events, verboseSteps, task?.status]);
 
   const latestUserMessageTimestamp = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i].type === "user_message") {
+      if (getEffectiveTaskEventType(events[i]) === "user_message") {
         return events[i].timestamp;
       }
     }
@@ -2312,24 +2384,33 @@ export function MainContent({
     for (let i = events.length - 1; i >= 0; i--) {
       const event = events[i];
       if (event.taskId !== task.id) continue;
+      const effectiveType = getEffectiveTaskEventType(event);
 
       if (
-        event.type === "task_paused" ||
-        event.type === "approval_requested" ||
-        event.type === "task_completed" ||
-        event.type === "task_cancelled" ||
-        event.type === "follow_up_completed" ||
-        event.type === "error"
+        effectiveType === "task_paused" ||
+        effectiveType === "approval_requested" ||
+        effectiveType === "task_completed" ||
+        effectiveType === "task_cancelled" ||
+        effectiveType === "follow_up_completed" ||
+        effectiveType === "error"
       ) {
         return false;
       }
 
       const isActiveProgressSignal =
-        event.type === "progress_update" &&
+        effectiveType === "progress_update" &&
         (event.payload?.phase === "tool_execution" ||
           event.payload?.state === "active" ||
           event.payload?.heartbeat === true);
-      if (ACTIVE_WORK_EVENT_TYPES.includes(event.type) || isActiveProgressSignal) {
+      const isTimelineActiveLifecycle =
+        event.type === "timeline_group_started" ||
+        event.type === "timeline_step_started" ||
+        event.type === "timeline_step_updated";
+      if (
+        isTimelineActiveLifecycle ||
+        ACTIVE_WORK_EVENT_TYPES.includes(effectiveType as EventType) ||
+        isActiveProgressSignal
+      ) {
         return now - event.timestamp <= ACTIVE_WORK_SIGNAL_WINDOW_MS;
       }
     }
@@ -2351,10 +2432,29 @@ export function MainContent({
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (e.taskId !== task.id) continue;
-      if (e.type === "step_started" && e.payload?.step) {
-        return e.payload.step as { id: string; description: string };
+      if (e.type === "timeline_step_started" || e.type === "timeline_step_updated") {
+        const step = (e.payload?.step || {}) as Record<string, unknown>;
+        const id =
+          typeof e.stepId === "string" && e.stepId.length > 0
+            ? e.stepId
+            : typeof step?.id === "string" && step.id.length > 0
+              ? step.id
+              : "";
+        if (!id) continue;
+        const description =
+          (typeof step?.description === "string" && step.description) ||
+          (typeof e.payload?.message === "string" && e.payload.message) ||
+          "Working";
+        return { id, description };
       }
-      if (e.type === "step_completed" || e.type === "step_skipped") break;
+      const effectiveType = getEffectiveTaskEventType(e);
+      if (
+        e.type === "timeline_step_finished" ||
+        effectiveType === "step_completed" ||
+        effectiveType === "step_skipped"
+      ) {
+        break;
+      }
     }
     return null;
   }, [task, events, isTaskWorking]);
@@ -2395,15 +2495,82 @@ export function MainContent({
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (e.taskId !== task.id) continue;
-      if (e.type === "llm_streaming" && e.payload?.streaming === true) {
+      const isStreamingEvent =
+        (e.type === "timeline_step_updated" && e.payload?.legacyType === "llm_streaming") ||
+        e.type === "llm_streaming";
+      if (isStreamingEvent && e.payload?.streaming === true) {
         // Only show if the event is recent (within 2s)
         return Date.now() - e.timestamp <= 2000 ? e.payload : null;
       }
       // Any non-streaming event means streaming has ended
-      if (e.type !== "llm_streaming") return null;
+      if (!isStreamingEvent) return null;
     }
     return null;
   }, [task, events, isTaskWorking]);
+
+  const continuationStatusChip = useMemo(() => {
+    if (!task || !isTaskWorking) return null;
+    const continuationWindow =
+      typeof task.continuationWindow === "number" && task.continuationWindow > 0
+        ? task.continuationWindow
+        : typeof task.continuationCount === "number"
+          ? Math.max(1, task.continuationCount + 1)
+          : 1;
+
+    let latestDecisionEvent: TaskEvent | undefined;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.taskId !== task.id) continue;
+      const type = getEffectiveTaskEventType(event);
+      if (type === "continuation_decision" || type === "auto_continuation_started") {
+        latestDecisionEvent = event;
+        break;
+      }
+    }
+
+    if (continuationWindow <= 1 && !latestDecisionEvent && typeof task.lastProgressScore !== "number") {
+      return null;
+    }
+
+    const payload =
+      latestDecisionEvent?.payload && typeof latestDecisionEvent.payload === "object"
+        ? (latestDecisionEvent.payload as Record<string, unknown>)
+        : {};
+    const deepWorkMode = task.agentConfig?.deepWorkMode === true;
+    const configuredMaxContinuations = task.agentConfig?.maxAutoContinuations;
+    const eventMaxAutoContinuations =
+      typeof payload.maxAutoContinuations === "number"
+        ? Math.max(0, Math.floor(payload.maxAutoContinuations))
+        : null;
+    const maxAutoContinuations =
+      typeof configuredMaxContinuations === "number"
+        ? Math.max(0, Math.floor(configuredMaxContinuations))
+        : typeof eventMaxAutoContinuations === "number"
+          ? eventMaxAutoContinuations
+          : !deepWorkMode && typeof guardrailDefaultMaxAutoContinuations === "number"
+            ? Math.max(0, Math.floor(guardrailDefaultMaxAutoContinuations))
+            : deepWorkMode
+          ? 7
+          : 3;
+    const maxWindow = Math.max(1, maxAutoContinuations + 1, continuationWindow);
+    const progressScoreRaw =
+      typeof payload.progressScore === "number"
+        ? payload.progressScore
+        : typeof task.lastProgressScore === "number"
+          ? task.lastProgressScore
+          : null;
+    const loopRiskRaw = typeof payload.loopRiskIndex === "number" ? payload.loopRiskIndex : null;
+
+    return {
+      window: `Window ${continuationWindow}/${maxWindow}`,
+      progress:
+        typeof progressScoreRaw === "number"
+          ? `Progress ${formatSignedScore(progressScoreRaw)}`
+          : undefined,
+      loopRisk:
+        typeof loopRiskRaw === "number" ? `Loop risk ${describeLoopRisk(loopRiskRaw)}` : undefined,
+    };
+  }, [events, guardrailDefaultMaxAutoContinuations, isTaskWorking, task]);
 
   const latestCanvasSessionId = useMemo(() => {
     if (canvasSessions.length === 0) return null;
@@ -2507,13 +2674,17 @@ export function MainContent({
     return -1;
   }, [filteredEvents, activeCommand]);
 
-  // Toggle verbose mode and persist to localStorage
+  // Toggle verbose mode and persist to appearance settings
   const toggleVerboseSteps = () => {
-    setVerboseSteps((prev) => {
-      const newValue = !prev;
-      localStorage.setItem(VERBOSE_STEPS_KEY, String(newValue));
-      return newValue;
-    });
+    const nextVerbose = !verboseSteps;
+    setVerboseSteps(nextVerbose);
+    void window.electronAPI
+      .saveAppearanceSettings({
+        timelineVerbosity: nextVerbose ? "verbose" : "summary",
+      })
+      .catch((error) => {
+        console.error("Failed to save timeline verbosity:", error);
+      });
   };
 
   const toggleCodePreviews = () => {
@@ -2530,6 +2701,34 @@ export function MainContent({
       .getAppVersion()
       .then((info) => setAppVersion(info.version))
       .catch((err) => console.error("Failed to load version:", err));
+  }, []);
+
+  // Load summary/verbose timeline preference from persisted appearance settings.
+  useEffect(() => {
+    window.electronAPI
+      .getAppearanceSettings()
+      .then((settings) => {
+        setVerboseSteps(settings.timelineVerbosity === "verbose");
+      })
+      .catch(() => {
+        // Keep summary default on load failure
+      });
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    window.electronAPI
+      .getGuardrailSettings()
+      .then((settings) => {
+        if (disposed) return;
+        setGuardrailDefaultMaxAutoContinuations(settings.defaultMaxAutoContinuations);
+      })
+      .catch(() => {
+        // Keep built-in fallback when settings are unavailable.
+      });
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   // Load voice settings
@@ -2561,7 +2760,7 @@ export function MainContent({
     if (!voiceEnabled || voiceResponseMode === "manual") return;
 
     const assistantMessages = events.filter(
-      (e) => e.type === "assistant_message" && e.payload?.internal !== true,
+      (e) => getEffectiveTaskEventType(e) === "assistant_message" && e.payload?.internal !== true,
     );
     if (assistantMessages.length === 0) return;
 
@@ -2952,7 +3151,13 @@ export function MainContent({
   };
 
   const isImageFileEvent = (event: TaskEvent): boolean => {
-    if (event.type !== "file_created" && event.type !== "file_modified") return false;
+    const effectiveType = getEffectiveTaskEventType(event);
+    if (
+      effectiveType !== "file_created" &&
+      effectiveType !== "file_modified" &&
+      effectiveType !== "artifact_created"
+    )
+      return false;
     const filePath = String(event.payload?.path || event.payload?.from || "");
     const mimeType =
       typeof event.payload?.mimeType === "string" ? event.payload.mimeType.toLowerCase() : "";
@@ -2963,26 +3168,66 @@ export function MainContent({
   };
 
   const isSpreadsheetFileEvent = (event: TaskEvent): boolean => {
-    if (event.type !== "file_created" && event.type !== "file_modified") return false;
+    const effectiveType = getEffectiveTaskEventType(event);
+    if (
+      effectiveType !== "file_created" &&
+      effectiveType !== "file_modified" &&
+      effectiveType !== "artifact_created"
+    )
+      return false;
     const filePath = String(event.payload?.path || event.payload?.from || "");
     return event.payload?.type === "spreadsheet" || /\.xlsx?$/i.test(filePath);
   };
 
+  const shouldRenderTimelineEventInStepFeed = (event: TaskEvent): boolean => {
+    const effectiveType = getEffectiveTaskEventType(event);
+    if (effectiveType === "user_message" || effectiveType === "assistant_message") {
+      return false;
+    }
+    const showEvenWithoutSteps =
+      ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(event.type) ||
+      ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(effectiveType as EventType) ||
+      isImageFileEvent(event) ||
+      isSpreadsheetFileEvent(event) ||
+      (effectiveType === "tool_result" && event.payload?.tool === "schedule_task");
+    return showSteps || showEvenWithoutSteps;
+  };
+
   // Check if an event has details to show
   const hasEventDetails = (event: TaskEvent): boolean => {
+    const effectiveType = getEffectiveTaskEventType(event);
     if (isImageFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
-    if (event.type === "task_completed") {
+    if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
+    if (effectiveType === "task_completed") {
       return hasTaskOutputs(resolveTaskOutputSummaryFromCompletionEvent(event, events));
     }
-    if (event.type === "artifact_created" && typeof event.payload?.path === "string") return true;
     if (
-      event.type === "file_created" &&
+      !verboseSteps &&
+      (event.type === "timeline_group_started" || event.type === "timeline_group_finished")
+    ) {
+      return false;
+    }
+    if (
+      event.type === "timeline_group_started" ||
+      event.type === "timeline_group_finished" ||
+      event.type === "timeline_evidence_attached" ||
+      event.type === "timeline_error"
+    ) {
+      return true;
+    }
+    if (
+      (event.type === "timeline_artifact_emitted" || effectiveType === "artifact_created") &&
+      typeof event.payload?.path === "string"
+    )
+      return true;
+    if (
+      effectiveType === "file_created" &&
       (event.payload?.contentPreview || event.payload?.copiedFrom)
     )
       return true;
     if (
-      event.type === "file_modified" &&
+      effectiveType === "file_modified" &&
       (event.payload?.oldPreview || event.payload?.action === "rename")
     )
       return true;
@@ -2993,31 +3238,38 @@ export function MainContent({
       "assistant_message",
       "error",
       "step_failed",
-    ].includes(event.type);
+    ].includes(effectiveType);
   };
 
   // Determine if an event should be expanded by default
   // Important events (plan, assistant responses, errors) should be expanded
   // Verbose events (tool calls/results) should be collapsed
   const shouldDefaultExpand = (event: TaskEvent): boolean => {
+    const effectiveType = getEffectiveTaskEventType(event);
     if (isImageFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
-    if (event.type === "task_completed") return hasEventDetails(event);
-    if (event.type === "artifact_created") return true;
+    if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
+    if (effectiveType === "task_completed") return hasEventDetails(event);
+    if (
+      effectiveType === "artifact_created" ||
+      event.type === "timeline_evidence_attached" ||
+      event.type === "timeline_error"
+    )
+      return true;
     // Code previews: expand by default unless user opted for collapsed
     if (codePreviewsExpanded) {
       if (
-        event.type === "file_created" &&
+        effectiveType === "file_created" &&
         (event.payload?.contentPreview || event.payload?.copiedFrom)
       )
         return true;
       if (
-        event.type === "file_modified" &&
+        effectiveType === "file_modified" &&
         (event.payload?.oldPreview || event.payload?.action === "rename")
       )
         return true;
     }
-    return ["plan_created", "assistant_message", "error", "step_failed"].includes(event.type);
+    return ["plan_created", "assistant_message", "error", "step_failed"].includes(effectiveType);
   };
 
   // Check if an event is currently expanded using its ID
@@ -3116,7 +3368,9 @@ export function MainContent({
   // Process command_output events to track live command execution
   useEffect(() => {
     // Get the last command_output event
-    const commandOutputEvents = events.filter((e) => e.type === "command_output");
+    const commandOutputEvents = events.filter(
+      (event) => getEffectiveTaskEventType(event) === "command_output",
+    );
     if (commandOutputEvents.length === 0) {
       setActiveCommand(null);
       return;
@@ -4044,6 +4298,9 @@ export function MainContent({
           return;
         case "Enter":
         case "Tab":
+          if (parseLeadingSkillSlashCommand(inputValue).matched) {
+            break;
+          }
           e.preventDefault();
           handleSlashSelect(slashOptions[slashSelectedIndex]);
           return;
@@ -4080,30 +4337,11 @@ export function MainContent({
     });
   };
 
-  const getEventDotClass = (type: TaskEvent["type"]) => {
-    if (type === "error" || type === "step_failed" || type === "verification_failed")
-      return "error";
-    if (
-      type === "step_completed" ||
-      type === "task_completed" ||
-      type === "verification_passed" ||
-      type === "artifact_created"
-    )
-      return "success";
-    if (
-      type === "step_started" ||
-      type === "executing" ||
-      type === "verification_started" ||
-      type === "retry_started"
-    )
-      return "active";
-    return "";
-  };
-
   // Get the last assistant message to always show the response
   const lastAssistantMessage = useMemo(() => {
     const assistantMessages = events.filter(
-      (e) => e.type === "assistant_message" && e.payload?.internal !== true,
+      (event) =>
+        getEffectiveTaskEventType(event) === "assistant_message" && event.payload?.internal !== true,
     );
     return assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
   }, [events]);
@@ -5372,6 +5610,15 @@ export function MainContent({
     );
   }
 
+  const stepFeedTimelineIndexPosition = new Map<number, number>();
+  let stepFeedEventCount = 0;
+  timelineItems.forEach((timelineItem, timelineIndex) => {
+    if (timelineItem.kind !== "event") return;
+    if (!shouldRenderTimelineEventInStepFeed(timelineItem.event)) return;
+    stepFeedTimelineIndexPosition.set(timelineIndex, stepFeedEventCount);
+    stepFeedEventCount += 1;
+  });
+
   const displayPrompt = task.userPrompt || task.prompt;
   const trimmedPrompt = displayPrompt.trim();
   const baseTitle = task.title || buildTaskTitle(trimmedPrompt);
@@ -5382,10 +5629,16 @@ export function MainContent({
   const headerTitle =
     isTitleTruncated && !TITLE_ELLIPSIS_REGEX.test(baseTitle) ? `${baseTitle}...` : baseTitle;
   const headerTooltip = trimmedPrompt || baseTitle;
-  const latestPauseEvent = [...events].reverse().find((event) => event.type === "task_paused");
+  const latestPauseEvent = [...events]
+    .reverse()
+    .find((event) => getEffectiveTaskEventType(event) === "task_paused");
   const latestApprovalEvent = [...events]
     .reverse()
-    .find((event) => event.type === "approval_requested" && event.payload?.autoApproved !== true);
+    .find(
+      (event) =>
+        getEffectiveTaskEventType(event) === "approval_requested" &&
+        event.payload?.autoApproved !== true,
+    );
 
   // Task view
   return (
@@ -5430,6 +5683,19 @@ export function MainContent({
               agentContext.getMessage("taskWorking")
             )}
           </span>
+          {continuationStatusChip && (
+            <span className="header-continuation-chip" title="Adaptive continuation status">
+              <span>{continuationStatusChip.window}</span>
+              {continuationStatusChip.progress && (
+                <span className="header-continuation-chip-sep">·</span>
+              )}
+              {continuationStatusChip.progress && <span>{continuationStatusChip.progress}</span>}
+              {continuationStatusChip.loopRisk && (
+                <span className="header-continuation-chip-sep">·</span>
+              )}
+              {continuationStatusChip.loopRisk && <span>{continuationStatusChip.loopRisk}</span>}
+            </span>
+          )}
         </div>
       )}
 
@@ -5469,7 +5735,10 @@ export function MainContent({
           </div>
 
           {/* View steps toggle - show right after original prompt */}
-          {events.some((e) => e.type !== "user_message" && e.type !== "assistant_message") && (
+          {events.some((event) => {
+            const effectiveType = getEffectiveTaskEventType(event);
+            return effectiveType !== "user_message" && effectiveType !== "assistant_message";
+          }) && (
             <div className="timeline-controls">
               <button
                 className={`view-steps-btn ${showSteps ? "expanded" : ""}`}
@@ -5482,22 +5751,25 @@ export function MainContent({
               </button>
               {showSteps && (
                 <>
-                  <label
+                  <button
+                    type="button"
                     className="verbose-switch"
+                    role="switch"
+                    aria-checked={verboseSteps}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      toggleVerboseSteps();
+                    }}
                     title={verboseSteps ? "Show important steps only" : "Show all steps (verbose)"}
                   >
                     <span className="verbose-switch-label">
                       {verboseSteps ? "Verbose" : "Summary"}
                     </span>
-                    <button
-                      role="switch"
-                      aria-checked={verboseSteps}
-                      className={`verbose-switch-track ${verboseSteps ? "on" : ""}`}
-                      onClick={toggleVerboseSteps}
-                    >
+                    <span className={`verbose-switch-track ${verboseSteps ? "on" : ""}`}>
                       <span className="verbose-switch-thumb" />
-                    </button>
-                  </label>
+                    </span>
+                  </button>
                   <button
                     className={`verbose-toggle-btn ${codePreviewsExpanded ? "active" : ""}`}
                     onClick={toggleCodePreviews}
@@ -5552,7 +5824,7 @@ export function MainContent({
                   onClose={handleDismissCommandOutput}
                 />
               )}
-              {timelineItems.map((item) => {
+              {timelineItems.map((item, timelineIndex) => {
                 if (item.kind === "canvas") {
                   return (
                     <CanvasPreview
@@ -5579,8 +5851,9 @@ export function MainContent({
                 }
 
                 const event = item.event;
-                const isUserMessage = event.type === "user_message";
-                const isAssistantMessage = event.type === "assistant_message";
+                const effectiveType = getEffectiveTaskEventType(event);
+                const isUserMessage = effectiveType === "user_message";
+                const isAssistantMessage = effectiveType === "assistant_message";
                 // Check if CommandOutput should be rendered after this event
                 const shouldRenderCommandOutput =
                   activeCommand && item.eventIndex === commandOutputInsertIndex;
@@ -5652,7 +5925,9 @@ export function MainContent({
                             <div className="chat-bubble-header">
                               {task.status === "completed" && (
                                 <span className="chat-status">
-                                  {agentContext.getMessage("taskComplete")}
+                                  {task.terminalStatus === "needs_user_action"
+                                    ? "Completed - action required"
+                                    : agentContext.getMessage("taskComplete")}
                                 </span>
                               )}
                               {task.status === "paused" && (
@@ -5790,13 +6065,7 @@ export function MainContent({
                   );
                 }
 
-                // Technical events - only show when showSteps is true
-                const showEvenWithoutSteps =
-                  ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(event.type) ||
-                  isImageFileEvent(event) ||
-                  isSpreadsheetFileEvent(event) ||
-                  (event.type === "tool_result" && event.payload?.tool === "schedule_task");
-                if (!showSteps && !showEvenWithoutSteps) {
+                if (!shouldRenderTimelineEventInStepFeed(event)) {
                   // Even if we're not showing steps, we may still need to render CommandOutput here
                   if (shouldRenderCommandOutput) {
                     return (
@@ -5815,6 +6084,12 @@ export function MainContent({
                   return null;
                 }
 
+                const indicatorPosition = stepFeedTimelineIndexPosition.get(timelineIndex);
+                const showConnectorAbove =
+                  typeof indicatorPosition === "number" && indicatorPosition > 0;
+                const showConnectorBelow =
+                  typeof indicatorPosition === "number" &&
+                  indicatorPosition < stepFeedEventCount - 1;
                 const isExpandable = hasEventDetails(event);
                 const isExpanded = isEventExpanded(event);
                 const eventTitle = renderEventTitle(
@@ -5822,58 +6097,45 @@ export function MainContent({
                   workspace?.path,
                   setViewerFilePath,
                   agentContext,
+                  { summaryMode: !verboseSteps },
                 );
 
                 return (
                   <Fragment key={event.id || `event-${item.eventIndex}`}>
-                    <div className="timeline-event">
-                      <div className="event-indicator">
-                        <div className={`event-dot ${getEventDotClass(event.type)}`} />
-                      </div>
-                      <div className="event-content">
-                        <div
-                          className={`event-header ${isExpandable ? "expandable" : ""} ${isExpanded ? "expanded" : ""}`}
-                          onClick={isExpandable ? () => toggleEventExpanded(event.id) : undefined}
-                        >
-                          <div className="event-header-left">
-                            {isExpandable && (
-                              <svg
-                                className="event-expand-icon"
-                                width="12"
-                                height="12"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                              >
-                                <path d="M9 18l6-6-6-6" />
-                              </svg>
-                            )}
-                            <div className="event-title">
-                              {typeof eventTitle === "string" ? (
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
-                                  components={eventTitleMarkdownComponents}
-                                >
-                                  {normalizeMarkdownForDisplay(eventTitle)}
-                                </ReactMarkdown>
-                              ) : (
-                                eventTitle
-                              )}
-                            </div>
-                          </div>
-                          <div className="event-time">{formatTime(event.timestamp)}</div>
-                        </div>
-                        {isExpanded &&
-                          renderEventDetails(event, voiceEnabled, markdownComponents, {
-                            workspacePath: workspace?.path,
-                            onOpenViewer: setViewerFilePath,
-                            events,
-                            onViewOutputs: onViewTaskOutputs,
-                            hideVerificationSteps: true,
-                          })}
-                      </div>
-                    </div>
+                    <StepFeed
+                      title={
+                        typeof eventTitle === "string" ? (
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={eventTitleMarkdownComponents}
+                          >
+                            {normalizeMarkdownForDisplay(eventTitle)}
+                          </ReactMarkdown>
+                        ) : (
+                          eventTitle
+                        )
+                      }
+                      timeLabel={formatTime(event.timestamp)}
+                      indicator={resolveTimelineIndicator(event)}
+                      showConnectorAbove={showConnectorAbove}
+                      showConnectorBelow={showConnectorBelow}
+                      showBranchStub={shouldShowTimelineBranchStub(event)}
+                      expandable={isExpandable}
+                      expanded={isExpanded}
+                      onToggle={isExpandable ? () => toggleEventExpanded(event.id) : undefined}
+                      details={
+                        isExpanded
+                          ? renderEventDetails(event, voiceEnabled, markdownComponents, {
+                              workspacePath: workspace?.path,
+                              onOpenViewer: setViewerFilePath,
+                              events,
+                              onViewOutputs: onViewTaskOutputs,
+                              hideVerificationSteps: true,
+                              summaryMode: !verboseSteps,
+                            })
+                          : undefined
+                      }
+                    />
                     {shouldRenderCommandOutput && (
                       <CommandOutput
                         command={activeCommand.command}
@@ -5987,6 +6249,16 @@ export function MainContent({
                     {latestApprovalEvent.payload.approval.description}
                   </span>
                 )}
+              </div>
+            </div>
+          )}
+          {task.status === "completed" && task.terminalStatus === "needs_user_action" && (
+            <div className="task-status-banner task-status-banner-blocked">
+              <div className="task-status-banner-content">
+                <strong>Completed - action required</strong>
+                <span className="task-status-banner-detail">
+                  Verification is pending user evidence before this can be fully marked done.
+                </span>
               </div>
             </div>
           )}
@@ -6323,6 +6595,19 @@ function formatStreamElapsed(ms: number): string {
   return `${minutes}m${String(remainingSeconds).padStart(2, "0")}s`;
 }
 
+function formatSignedScore(value: number): string {
+  if (!Number.isFinite(value)) return "0.00";
+  const normalized = Math.max(-1, Math.min(1, value));
+  return `${normalized >= 0 ? "+" : ""}${normalized.toFixed(2)}`;
+}
+
+function describeLoopRisk(loopRisk: number): "low" | "medium" | "high" {
+  if (!Number.isFinite(loopRisk)) return "low";
+  if (loopRisk >= 0.7) return "high";
+  if (loopRisk >= 0.4) return "medium";
+  return "low";
+}
+
 /**
  * Truncate long text for display, with expand option handled via CSS
  */
@@ -6331,12 +6616,33 @@ function truncateForDisplay(text: string, maxLength: number = 2000): string {
   return text.slice(0, maxLength) + "\n\n... [content truncated for display]";
 }
 
+function getSummaryStageLabel(stage: string): string | null {
+  switch (stage.trim().toUpperCase()) {
+    case "DISCOVER":
+      return "Planning the approach";
+    case "BUILD":
+      return "Working on your request";
+    case "VERIFY":
+      return "Checking results";
+    case "FIX":
+      return "Applying fixes";
+    case "DELIVER":
+      return "Preparing final response";
+    default:
+      return null;
+  }
+}
+
 function renderEventTitle(
   event: TaskEvent,
   workspacePath?: string,
   onOpenViewer?: (path: string) => void,
   agentCtx?: AgentContext,
+  options?: {
+    summaryMode?: boolean;
+  },
 ): React.ReactNode {
+  const summaryMode = options?.summaryMode === true;
   // Build message context for personalized messages
   const msgCtx = agentCtx
     ? {
@@ -6355,12 +6661,67 @@ function renderEventTitle(
         emojiUsage: "minimal" as const,
         quirks: DEFAULT_QUIRKS,
       };
+  const effectiveType = getEffectiveTaskEventType(event);
 
-  switch (event.type) {
+  if (event.type === "timeline_group_started" || event.type === "timeline_group_finished") {
+    const stage =
+      typeof event.payload?.stage === "string" ? event.payload.stage.trim().toUpperCase() : "";
+    const label =
+      (typeof event.payload?.groupLabel === "string" && event.payload.groupLabel) ||
+      stage ||
+      "Group";
+    const summaryStageLabel = stage ? getSummaryStageLabel(stage) : null;
+    if (summaryMode && summaryStageLabel) {
+      return summaryStageLabel;
+    }
+
+    const maxParallel =
+      typeof event.payload?.maxParallel === "number" && Number.isFinite(event.payload.maxParallel)
+        ? Math.max(1, Math.floor(event.payload.maxParallel))
+        : null;
+    const base = event.type === "timeline_group_started" ? `Starting ${label}` : `Completed ${label}`;
+    return !summaryMode && maxParallel && event.type === "timeline_group_started"
+      ? `${base} (${maxParallel} parallel)`
+      : base;
+  }
+
+  if (event.type === "timeline_evidence_attached") {
+    const refs = Array.isArray(event.payload?.evidenceRefs) ? event.payload.evidenceRefs : [];
+    const count = refs.length;
+    return count > 0 ? `Attached ${count} evidence link${count === 1 ? "" : "s"}` : "Attached evidence";
+  }
+
+  if (event.type === "timeline_artifact_emitted") {
+    const path = typeof event.payload?.path === "string" ? event.payload.path : "";
+    const label =
+      typeof event.payload?.label === "string" && event.payload.label.trim().length > 0
+        ? event.payload.label
+        : path;
+    return path ? (
+      <span>
+        Artifact ready:{" "}
+        <ClickableFilePath path={path} workspacePath={workspacePath} onOpenViewer={onOpenViewer} />
+        {label && label !== path && <span className="event-title-meta"> ({label})</span>}
+      </span>
+    ) : "Artifact ready";
+  }
+
+  if (event.type === "timeline_error") {
+    const message = typeof event.payload?.message === "string" ? event.payload.message : "";
+    return message || getMessage("error", msgCtx);
+  }
+
+  if (event.type === "timeline_step_updated" && effectiveType === "progress_update") {
+    return typeof event.payload?.message === "string" ? event.payload.message : "Progress update";
+  }
+
+  switch (effectiveType) {
     case "task_created":
       return getMessage("taskStart", msgCtx);
     case "task_completed":
-      return getMessage("taskComplete", msgCtx);
+      return event.payload?.terminalStatus === "needs_user_action"
+        ? "Completed - action required"
+        : getMessage("taskComplete", msgCtx);
     case "plan_created":
       return getMessage("planCreated", msgCtx);
     case "step_started":
@@ -6377,6 +6738,28 @@ function renderEventTitle(
       );
     case "step_failed":
       return `Step failed: ${event.payload.step?.description || "Unknown step"}`;
+    case "continuation_decision":
+      return typeof event.payload?.reason === "string"
+        ? `Continuation decision: ${event.payload.reason}`
+        : "Continuation decision";
+    case "auto_continuation_started":
+      return "Auto continuation started";
+    case "auto_continuation_blocked":
+      return typeof event.payload?.reason === "string"
+        ? `Auto continuation blocked: ${event.payload.reason}`
+        : "Auto continuation blocked";
+    case "context_compaction_started":
+      return "Compacting context for continuation";
+    case "context_compaction_completed":
+      return "Context compaction completed";
+    case "context_compaction_failed":
+      return "Context compaction failed";
+    case "step_contract_escalated":
+      return typeof event.payload?.reason === "string"
+        ? `Step contract escalated: ${event.payload.reason}`
+        : "Step contract escalated";
+    case "no_progress_circuit_breaker":
+      return "Stopped by no-progress circuit breaker";
     case "tool_call": {
       const tcTool = event.payload.tool;
       const tcInput = event.payload.input;
@@ -6578,8 +6961,16 @@ function renderEventTitle(
       return getMessage("verifying", msgCtx);
     case "verification_passed":
       return `${getMessage("verifyPassed", msgCtx)} (attempt ${event.payload.attempt})`;
-    case "verification_failed":
-      return `${getMessage("verifyFailed", msgCtx)} (attempt ${event.payload.attempt}/${event.payload.maxAttempts})`;
+    case "verification_failed": {
+      const attempt = event.payload?.attempt;
+      const maxAttempts = event.payload?.maxAttempts;
+      if (typeof attempt === "number" && typeof maxAttempts === "number") {
+        return `${getMessage("verifyFailed", msgCtx)} (attempt ${attempt}/${maxAttempts})`;
+      }
+      return getMessage("verifyFailed", msgCtx);
+    }
+    case "verification_pending_user_action":
+      return "Verification requires user action";
     case "retry_started":
       return getMessage("retrying", msgCtx, String(event.payload.attempt));
     default:
@@ -6597,79 +6988,170 @@ function renderEventDetails(
     events?: TaskEvent[];
     onViewOutputs?: (taskId: string, primaryOutputPath?: string) => void;
     hideVerificationSteps?: boolean;
+    summaryMode?: boolean;
   },
 ) {
   const workspacePath = options?.workspacePath;
   const onOpenViewer = options?.onOpenViewer;
   const eventStream = options?.events || [];
   const onViewOutputs = options?.onViewOutputs;
+  const summaryMode = options?.summaryMode === true;
   const imageExt = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
+  const spreadsheetExt = /\.xlsx?$/i;
+  const documentPreviewExt = /\.(pdf|docx|md|markdown|txt)$/i;
+  const effectiveType = getEffectiveTaskEventType(event);
+  const stepCompletionPreviewPath = getStepCompletionPreviewPath(event);
 
-  switch (event.type) {
+  if (event.type === "timeline_group_started" || event.type === "timeline_group_finished") {
+    if (summaryMode) return null;
+    const stage =
+      typeof event.payload?.stage === "string" && event.payload.stage.trim().length > 0
+        ? event.payload.stage.trim()
+        : "";
+    const groupId = typeof event.groupId === "string" ? event.groupId : event.payload?.groupId;
+    const maxParallel =
+      typeof event.payload?.maxParallel === "number" && Number.isFinite(event.payload.maxParallel)
+        ? Math.max(1, Math.floor(event.payload.maxParallel))
+        : undefined;
+    return (
+      <div className="event-details">
+        {stage ? <div>Stage: {stage}</div> : null}
+        {groupId ? <div>Group: {String(groupId)}</div> : null}
+        {typeof maxParallel === "number" ? <div>Parallel lanes: {maxParallel}</div> : null}
+      </div>
+    );
+  }
+
+  if (event.type === "timeline_evidence_attached") {
+    const refs = Array.isArray(event.payload?.evidenceRefs) ? event.payload.evidenceRefs : [];
+    if (!refs.length) return null;
+    return (
+      <div className="event-details">
+        <div style={{ marginBottom: 8, fontWeight: 500 }}>Evidence</div>
+        <ul style={{ margin: 0, paddingLeft: 18 }}>
+          {refs.map((entry: Any, index: number) => {
+            const source =
+              typeof entry?.sourceUrlOrPath === "string" ? entry.sourceUrlOrPath.trim() : "";
+            if (!source) return null;
+            const snippet = typeof entry?.snippet === "string" ? entry.snippet : "";
+            const label = snippet || source;
+            const isWeb = /^https?:\/\//i.test(source);
+            return (
+              <li key={`${source}-${index}`} style={{ marginBottom: 4 }}>
+                {isWeb ? (
+                  <a href={source} target="_blank" rel="noreferrer">
+                    {label}
+                  </a>
+                ) : (
+                  <span>{label}</span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    );
+  }
+
+  if (event.type === "timeline_error") {
+    return (
+      <div
+        className="event-details"
+        style={{ background: "rgba(239, 68, 68, 0.1)", borderColor: "rgba(239, 68, 68, 0.2)" }}
+      >
+        {event.payload?.message || "Timeline error"}
+      </div>
+    );
+  }
+
+  switch (effectiveType) {
     case "task_completed": {
       const outputSummary = resolveTaskOutputSummaryFromCompletionEvent(event, eventStream);
-      if (!hasTaskOutputs(outputSummary)) return null;
+      const isNeedsUserAction = event.payload?.terminalStatus === "needs_user_action";
+      if (!hasTaskOutputs(outputSummary) && !isNeedsUserAction) return null;
 
-      const primaryOutputPath = outputSummary.primaryOutputPath;
+      const primaryOutputPath = outputSummary?.primaryOutputPath;
       const primaryOutputName = primaryOutputPath
         ? primaryOutputPath.split("/").pop() || primaryOutputPath
         : "";
+      const outputCount = outputSummary?.outputCount ?? 0;
       const outputLabel =
-        outputSummary.outputCount === 1
+        outputCount === 1
           ? `1 output ready`
-          : `${outputSummary.outputCount} outputs ready`;
+          : `${outputCount} outputs ready`;
 
+      const pendingChecklist: string[] = Array.isArray(event.payload?.pendingChecklist)
+        ? event.payload.pendingChecklist.filter((item: unknown): item is string => typeof item === "string")
+        : [];
       return (
         <div className="event-details completion-output-card">
-          <div className="completion-output-header">Output ready</div>
-          <div className="completion-output-subtitle">{outputLabel}</div>
-          {primaryOutputPath && (
-            <div className="completion-output-primary">
-              Primary file:{" "}
-              <ClickableFilePath
-                path={primaryOutputPath}
-                workspacePath={workspacePath}
-                onOpenViewer={onOpenViewer}
-              />
-              {primaryOutputName && <span className="event-title-meta"> ({primaryOutputName})</span>}
+          <div className="completion-output-header">
+            {isNeedsUserAction ? "Action required" : "Output ready"}
+          </div>
+          {isNeedsUserAction && (
+            <div className="completion-output-subtitle">
+              Complete the pending verification items to fully close this task.
             </div>
           )}
-          <div className="completion-output-actions">
-            <button
-              className="completion-output-btn"
-              disabled={!primaryOutputPath}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (!primaryOutputPath) return;
-                void window.electronAPI.openFile(primaryOutputPath, workspacePath);
-              }}
-            >
-              Open file
-            </button>
-            <button
-              className="completion-output-btn secondary"
-              disabled={!primaryOutputPath}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (!primaryOutputPath) return;
-                void window.electronAPI.showInFinder(primaryOutputPath, workspacePath);
-              }}
-            >
-              Show in Finder
-            </button>
-            <button
-              className="completion-output-btn secondary"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onViewOutputs?.(event.taskId, primaryOutputPath);
-              }}
-            >
-              View in Files
-            </button>
-          </div>
+          {hasTaskOutputs(outputSummary) && (
+            <>
+              <div className="completion-output-subtitle">{outputLabel}</div>
+              {primaryOutputPath && (
+                <div className="completion-output-primary">
+                  Primary file:{" "}
+                  <ClickableFilePath
+                    path={primaryOutputPath}
+                    workspacePath={workspacePath}
+                    onOpenViewer={onOpenViewer}
+                  />
+                  {primaryOutputName && <span className="event-title-meta"> ({primaryOutputName})</span>}
+                </div>
+              )}
+              <div className="completion-output-actions">
+                <button
+                  className="completion-output-btn"
+                  disabled={!primaryOutputPath}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!primaryOutputPath) return;
+                    void window.electronAPI.openFile(primaryOutputPath, workspacePath);
+                  }}
+                >
+                  Open file
+                </button>
+                <button
+                  className="completion-output-btn secondary"
+                  disabled={!primaryOutputPath}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!primaryOutputPath) return;
+                    void window.electronAPI.showInFinder(primaryOutputPath, workspacePath);
+                  }}
+                >
+                  Show in Finder
+                </button>
+                <button
+                  className="completion-output-btn secondary"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onViewOutputs?.(event.taskId, primaryOutputPath);
+                  }}
+                >
+                  View in Files
+                </button>
+              </div>
+            </>
+          )}
+          {pendingChecklist.length > 0 && (
+            <ul style={{ marginTop: 8, paddingLeft: 18 }}>
+              {pendingChecklist.map((item, idx) => (
+                <li key={`${idx}-${item}`}>{item}</li>
+              ))}
+            </ul>
+          )}
         </div>
       );
     }
@@ -6791,6 +7273,20 @@ function renderEventDetails(
         </div>
       );
     }
+    case "step_completed": {
+      if (stepCompletionPreviewPath && workspacePath) {
+        return (
+          <div className="event-details event-details-file-preview">
+            <InlineDocumentPreview
+              filePath={stepCompletionPreviewPath}
+              workspacePath={workspacePath}
+              onOpenViewer={onOpenViewer}
+            />
+          </div>
+        );
+      }
+      return null;
+    }
     case "step_failed":
       return (
         <div
@@ -6800,6 +7296,26 @@ function renderEventDetails(
           {event.payload?.reason || event.payload?.step?.error || "Step failed."}
         </div>
       );
+    case "verification_pending_user_action": {
+      const checklist: string[] = Array.isArray(event.payload?.pendingChecklist)
+        ? event.payload.pendingChecklist.filter((item: unknown): item is string => typeof item === "string")
+        : [];
+      return (
+        <div className="event-details">
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Verification pending user action</div>
+          {typeof event.payload?.message === "string" && event.payload.message.trim().length > 0 && (
+            <div style={{ marginBottom: checklist.length > 0 ? 6 : 0 }}>{event.payload.message}</div>
+          )}
+          {checklist.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {checklist.map((item, idx) => (
+                <li key={`${idx}-${item}`}>{item}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      );
+    }
     case "file_created": {
       const fcPayload = event.payload;
       const fcPath = fcPayload?.path;
@@ -6823,11 +7339,43 @@ function renderEventDetails(
 
       // Spreadsheet preview
       const fcIsSpreadsheet =
-        fcPayload?.type === "spreadsheet" || /\.xlsx?$/i.test(String(fcPath || ""));
+        fcPayload?.type === "spreadsheet" || spreadsheetExt.test(String(fcPath || ""));
       if (fcIsSpreadsheet && fcPath && workspacePath) {
         return (
           <div className="event-details event-details-file-preview">
             <InlineSpreadsheetPreview
+              filePath={fcPath}
+              workspacePath={workspacePath}
+              onOpenViewer={onOpenViewer}
+            />
+          </div>
+        );
+      }
+
+      const fcMimeType =
+        typeof fcPayload?.mimeType === "string" ? fcPayload.mimeType.toLowerCase() : "";
+      const fcIsMarkdown =
+        fcPayload?.type === "markdown" ||
+        fcMimeType === "text/markdown" ||
+        /\.md(?:own)?$/i.test(String(fcPath || "")) ||
+        String(fcPayload?.language || "").toLowerCase() === "md" ||
+        String(fcPayload?.language || "").toLowerCase() === "markdown";
+      const fcIsDocument =
+        fcPayload?.type === "pdf" ||
+        fcPayload?.type === "docx" ||
+        fcPayload?.type === "markdown" ||
+        fcPayload?.type === "text" ||
+        fcPayload?.type === "code" ||
+        fcMimeType === "application/pdf" ||
+        fcMimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        fcMimeType === "text/markdown" ||
+        documentPreviewExt.test(String(fcPath || ""));
+
+      // For markdown outputs, prefer rendered markdown over raw contentPreview syntax.
+      if (fcIsMarkdown && fcPath && workspacePath) {
+        return (
+          <div className="event-details event-details-file-preview">
+            <InlineDocumentPreview
               filePath={fcPath}
               workspacePath={workspacePath}
               onOpenViewer={onOpenViewer}
@@ -6850,6 +7398,18 @@ function renderEventDetails(
               )}
             </div>
             <HighlightedCodePreview code={fcPayload.contentPreview} language={fcPayload.language} />
+          </div>
+        );
+      }
+
+      if (fcIsDocument && fcPath && workspacePath) {
+        return (
+          <div className="event-details event-details-file-preview">
+            <InlineDocumentPreview
+              filePath={fcPath}
+              workspacePath={workspacePath}
+              onOpenViewer={onOpenViewer}
+            />
           </div>
         );
       }
@@ -6941,6 +7501,54 @@ function renderEventDetails(
     case "artifact_created": {
       const artifactPath = event.payload?.path;
       if (typeof artifactPath === "string" && artifactPath.trim().length > 0) {
+        const artifactMimeType =
+          typeof event.payload?.mimeType === "string" ? event.payload.mimeType.toLowerCase() : "";
+        const artifactIsImage =
+          artifactMimeType.startsWith("image/") || imageExt.test(String(artifactPath || ""));
+        const artifactIsSpreadsheet = spreadsheetExt.test(String(artifactPath || ""));
+        const artifactIsDocument =
+          artifactMimeType === "application/pdf" ||
+          artifactMimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+          artifactMimeType === "text/markdown" ||
+          artifactMimeType.startsWith("text/") ||
+          documentPreviewExt.test(String(artifactPath || ""));
+
+        if (artifactIsImage && workspacePath) {
+          return (
+            <div className="event-details event-details-file-preview">
+              <InlineImagePreview
+                filePath={artifactPath}
+                workspacePath={workspacePath}
+                onOpenViewer={onOpenViewer}
+              />
+            </div>
+          );
+        }
+
+        if (artifactIsSpreadsheet && workspacePath) {
+          return (
+            <div className="event-details event-details-file-preview">
+              <InlineSpreadsheetPreview
+                filePath={artifactPath}
+                workspacePath={workspacePath}
+                onOpenViewer={onOpenViewer}
+              />
+            </div>
+          );
+        }
+
+        if (artifactIsDocument && workspacePath) {
+          return (
+            <div className="event-details event-details-file-preview">
+              <InlineDocumentPreview
+                filePath={artifactPath}
+                workspacePath={workspacePath}
+                onOpenViewer={onOpenViewer}
+              />
+            </div>
+          );
+        }
+
         return (
           <div className="event-details">
             Saved artifact:{" "}
