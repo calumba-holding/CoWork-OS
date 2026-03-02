@@ -13,6 +13,12 @@
  */
 
 import * as path from "path";
+import {
+  canonicalizeToolName,
+  getToolDedupeClass,
+  isArtifactGenerationToolName,
+  isFileMutationToolName,
+} from "./tool-semantics";
 
 // ===== Custom Error =====
 
@@ -32,6 +38,8 @@ export type CompletionContract = {
   requiresArtifactEvidence: boolean;
   requiredArtifactExtensions: string[];
   requiresVerificationEvidence: boolean;
+  artifactKind: "none" | "file" | "canvas";
+  requiredSuccessfulTools: string[];
 };
 
 // ===== Constants =====
@@ -125,8 +133,8 @@ export const IMAGE_VERIFICATION_KEYWORDS = [
   "photo",
   "photograph",
   "picture",
-  "render",
   "illustration",
+  "screenshot",
   "png",
   "jpg",
   "jpeg",
@@ -388,19 +396,19 @@ export class ToolCallDeduplicator {
    */
   private getSemanticSignature(toolName: string, input: Any): string {
     if (!input) return toolName;
+    const canonicalToolName = canonicalizeToolName(toolName);
 
-    if (toolName === "browser_navigate") {
+    if (canonicalToolName === "browser_navigate") {
       const rawUrl = String(input.url || "").trim();
       const normalizedUrl = this.normalizeUrlForSemanticSignature(rawUrl);
-      return `${toolName}:url:${normalizedUrl}`;
+      return `${canonicalToolName}:url:${normalizedUrl}`;
     }
 
     // For file operations, normalize the filename to detect variants
     if (
-      toolName === "create_document" ||
-      toolName === "write_file" ||
-      toolName === "create_spreadsheet" ||
-      toolName === "create_presentation"
+      canonicalToolName === "write_file" ||
+      canonicalToolName === "copy_file" ||
+      isArtifactGenerationToolName(canonicalToolName)
     ) {
       const filename = input.filename || input.path || "";
       // Extract base name without version suffixes like _v2.4, _COMPLETE, _Final, etc.
@@ -408,20 +416,20 @@ export class ToolCallDeduplicator {
         .replace(/[_-]v?\d+(\.\d+)?/gi, "") // Remove version numbers
         .replace(/[_-](complete|final|updated|new|copy|backup|draft)/gi, "") // Remove common suffixes
         .replace(/\.[^.]+$/, ""); // Remove extension
-      return `${toolName}:file:${baseName}`;
+      return `${getToolDedupeClass(canonicalToolName)}:file:${baseName}`;
     }
 
-    if (toolName === "copy_file") {
+    if (canonicalToolName === "copy_file") {
       const destPath = input.destPath || input.destination || "";
       const baseName = destPath
         .replace(/[_-]v?\d+(\.\d+)?/gi, "")
         .replace(/[_-](complete|final|updated|new|copy|backup|draft)/gi, "")
         .replace(/\.[^.]+$/, "");
-      return `${toolName}:copy:${baseName}`;
+      return `${getToolDedupeClass(canonicalToolName)}:copy:${baseName}`;
     }
 
     // For web searches, normalize the query to detect similar searches
-    if (toolName === "web_search") {
+    if (canonicalToolName === "web_search") {
       const query = (input.query || input.search || "").toLowerCase();
       // Remove platform-specific modifiers to get the core search term
       const normalizedQuery = query
@@ -433,16 +441,16 @@ export class ToolCallDeduplicator {
         .replace(/["']/g, "")
         .replace(/\s+/g, " ")
         .trim();
-      return `${toolName}:search:${normalizedQuery}`;
+      return `${canonicalToolName}:search:${normalizedQuery}`;
     }
 
     // For read operations, just use tool name (reading same file repeatedly is OK)
-    if (toolName === "read_file" || toolName === "list_directory") {
-      return `${toolName}:${input.path || ""}`;
+    if (canonicalToolName === "read_file" || canonicalToolName === "list_directory") {
+      return `${canonicalToolName}:${input.path || ""}`;
     }
 
     // Default: use tool name only for semantic grouping
-    return toolName;
+    return canonicalToolName;
   }
 
   private normalizeUrlForSemanticSignature(rawUrl: string): string {
@@ -488,19 +496,45 @@ export class ToolCallDeduplicator {
   /**
    * Check rate limit for a tool
    */
-  private checkRateLimit(toolName: string): { exceeded: boolean; reason?: string } {
+  private resolveRateLimitForCall(toolName: string, input: Any): number {
+    // Some cloud listing APIs legitimately require many small paginated calls.
+    // Keep strict limits for mutating actions, but allow higher throughput for read-only actions.
+    if (toolName.endsWith("_action") && input && typeof input.action === "string") {
+      const action = String(input.action).trim().toLowerCase();
+      const mutatingAction =
+        /^(create_|update_|delete_|remove_|move_|copy_|rename_|upload_|write_|set_|add_|append_|patch_|modify_)/.test(
+          action,
+        );
+      if (!mutatingAction) {
+        const readOnlyAction =
+          /^(get_|list_|search|read_|query_|describe_|check_)/.test(action) ||
+          action === "get_current_user" ||
+          action === "list_folder_items";
+        if (readOnlyAction) {
+          return Math.max(this.rateLimit, 120);
+        }
+      }
+    }
+
+    return this.rateLimit;
+  }
+
+  private checkRateLimit(toolName: string, input: Any): { exceeded: boolean; reason?: string } {
     const now = Date.now();
     const counter = this.rateLimitCounters.get(toolName);
+    const effectiveRateLimit = this.resolveRateLimitForCall(toolName, input);
 
     if (!counter || now - counter.windowStart > 60000) {
       // New window or first call
       return { exceeded: false };
     }
 
-    if (counter.count >= this.rateLimit) {
+    if (counter.count >= effectiveRateLimit) {
       return {
         exceeded: true,
-        reason: `Rate limit exceeded: "${toolName}" called ${counter.count} times in the last minute. Max allowed: ${this.rateLimit}/min.`,
+        reason:
+          `Rate limit exceeded: "${toolName}" called ${counter.count} times in the last minute. ` +
+          `Max allowed: ${effectiveRateLimit}/min.`,
       };
     }
 
@@ -557,6 +591,7 @@ export class ToolCallDeduplicator {
     input: Any,
   ): { isDuplicate: boolean; reason?: string; cachedResult?: string } {
     const now = Date.now();
+    const canonicalToolName = canonicalizeToolName(toolName);
 
     // 0. Exclude stateful browser tools from duplicate detection
     const statefulTools = [
@@ -566,18 +601,18 @@ export class ToolCallDeduplicator {
       "browser_evaluate",
       "canvas_push",
     ];
-    if (statefulTools.includes(toolName)) {
+    if (statefulTools.includes(canonicalToolName)) {
       return { isDuplicate: false };
     }
 
     // 1. Check rate limit first
-    const rateLimitCheck = this.checkRateLimit(toolName);
+    const rateLimitCheck = this.checkRateLimit(canonicalToolName, input);
     if (rateLimitCheck.exceeded) {
       return { isDuplicate: true, reason: rateLimitCheck.reason };
     }
 
     // 2. Check exact duplicate
-    const callKey = this.getCallKey(toolName, input);
+    const callKey = this.getCallKey(canonicalToolName, input);
 
     // Clean up old entries outside the time window
     for (const [key, value] of this.recentCalls.entries()) {
@@ -594,23 +629,19 @@ export class ToolCallDeduplicator {
     ) {
       return {
         isDuplicate: true,
-        reason: `Tool "${toolName}" called ${existing.count + 1} times with identical parameters within ${this.windowMs / 1000}s. This appears to be a duplicate call.`,
+        reason: `Tool "${canonicalToolName}" called ${existing.count + 1} times with identical parameters within ${this.windowMs / 1000}s. This appears to be a duplicate call.`,
         cachedResult: existing.lastResult,
       };
     }
 
     // 3. Check semantic duplicate (for tools prone to retry loops)
-    const semanticTools = [
-      "create_document",
-      "write_file",
-      "copy_file",
-      "create_spreadsheet",
-      "create_presentation",
-      "web_search",
-      "browser_navigate",
-    ];
-    if (semanticTools.includes(toolName)) {
-      const semanticCheck = this.checkSemanticDuplicate(toolName, input);
+    const semanticTools = new Set(["write_file", "copy_file", "web_search", "browser_navigate"]);
+    if (
+      semanticTools.has(canonicalToolName) ||
+      isArtifactGenerationToolName(canonicalToolName) ||
+      isFileMutationToolName(canonicalToolName)
+    ) {
+      const semanticCheck = this.checkSemanticDuplicate(canonicalToolName, input);
       if (semanticCheck.isDuplicate) {
         return semanticCheck;
       }
@@ -624,9 +655,10 @@ export class ToolCallDeduplicator {
    */
   recordCall(toolName: string, input: Any, result?: string): void {
     const now = Date.now();
+    const canonicalToolName = canonicalizeToolName(toolName);
 
     // Record exact call
-    const callKey = this.getCallKey(toolName, input);
+    const callKey = this.getCallKey(canonicalToolName, input);
     const existing = this.recentCalls.get(callKey);
 
     if (existing && now - existing.lastCallTime <= this.windowMs) {
@@ -644,16 +676,16 @@ export class ToolCallDeduplicator {
     }
 
     // Record semantic pattern
-    const signature = this.getSemanticSignature(toolName, input);
+    const signature = this.getSemanticSignature(canonicalToolName, input);
     const patterns = this.semanticPatterns.get(signature) || [];
     patterns.push({ input, time: now });
     this.semanticPatterns.set(signature, patterns);
     this.semanticTotalCounts.set(signature, (this.semanticTotalCounts.get(signature) || 0) + 1);
 
     // Update rate limit counter
-    const counter = this.rateLimitCounters.get(toolName);
+    const counter = this.rateLimitCounters.get(canonicalToolName);
     if (!counter || now - counter.windowStart > 60000) {
-      this.rateLimitCounters.set(toolName, { count: 1, windowStart: now });
+      this.rateLimitCounters.set(canonicalToolName, { count: 1, windowStart: now });
     } else {
       counter.count++;
     }
@@ -988,6 +1020,8 @@ export class FileOperationTracker {
   > = new Map();
   // Track files that have been created (normalized name -> full path)
   private createdFiles: Map<string, string> = new Map();
+  // Track distinct created file paths in insertion order (normalized path -> original path)
+  private createdFilePaths: Map<string, string> = new Map();
   // Track file operation counts per type
   private operationCounts: Map<string, number> = new Map();
   // Track directory listings (path -> { files, lastListTime, count })
@@ -1174,6 +1208,8 @@ export class FileOperationTracker {
     const filename = path.basename(filePath) || filePath;
     const normalized = this.normalizeFilename(filename);
     this.createdFiles.set(normalized, filePath);
+    const normalizedPath = this.normalizePath(filePath);
+    this.createdFilePaths.set(normalizedPath, filePath);
     this.incrementOperation("create_file");
   }
 
@@ -1193,7 +1229,7 @@ export class FileOperationTracker {
       totalCreates: this.operationCounts.get("create_file") || 0,
       totalListings: this.operationCounts.get("list_directory") || 0,
       uniqueFilesRead: this.readFiles.size,
-      filesCreated: this.createdFiles.size,
+      filesCreated: this.createdFilePaths.size,
       dirsListed: this.directoryListings.size,
     };
   }
@@ -1209,15 +1245,19 @@ export class FileOperationTracker {
   }
 
   private normalizeFilename(filename: string): string {
-    // Remove path, extension, version numbers, and common suffixes
+    // Normalize base name while preserving extension so different output formats
+    // (for example report.csv vs report.json) are tracked independently.
     const name = filename.split("/").pop() || filename;
-    return name
+    const lower = name.toLowerCase();
+    const extension = path.extname(lower);
+    const stem = extension ? lower.slice(0, lower.length - extension.length) : lower;
+    const normalizedStem = stem
       .toLowerCase()
-      .replace(/\.[^.]+$/, "") // Remove extension
       .replace(/[_-]v?\d+(\.\d+)?/g, "") // Remove version numbers
       .replace(/[_-](updated|final|new|copy|backup|draft|section)/g, "") // Remove common suffixes
       .replace(/[_-]+/g, "_") // Normalize separators
       .trim();
+    return `${normalizedStem}${extension}`;
   }
 
   private areSimilarFilenames(name1: string, name2: string): boolean {
@@ -1258,6 +1298,7 @@ export class FileOperationTracker {
   reset(): void {
     this.readFiles.clear();
     this.createdFiles.clear();
+    this.createdFilePaths.clear();
     this.operationCounts.clear();
     this.directoryListings.clear();
   }
@@ -1266,10 +1307,11 @@ export class FileOperationTracker {
    * Get the most recently created document file (for parameter inference)
    */
   getLastCreatedDocument(): string | undefined {
-    // Find the most recent .docx file that was created
-    for (const [_, path] of this.createdFiles.entries()) {
-      if (path.endsWith(".docx") || path.endsWith(".pdf")) {
-        return path;
+    const created = Array.from(this.createdFilePaths.values());
+    for (let idx = created.length - 1; idx >= 0; idx--) {
+      const createdPath = created[idx];
+      if (createdPath.endsWith(".docx") || createdPath.endsWith(".pdf")) {
+        return createdPath;
       }
     }
     return undefined;
@@ -1279,7 +1321,7 @@ export class FileOperationTracker {
    * Get all created file paths
    */
   getCreatedFiles(): string[] {
-    return Array.from(this.createdFiles.values());
+    return Array.from(this.createdFilePaths.values());
   }
 
   /**
@@ -1295,8 +1337,8 @@ export class FileOperationTracker {
     }
 
     // List files that have been created
-    if (this.createdFiles.size > 0) {
-      const created = Array.from(this.createdFiles.values()).slice(0, 10);
+    if (this.createdFilePaths.size > 0) {
+      const created = Array.from(this.createdFilePaths.values()).slice(0, 10);
       parts.push(`Files created: ${created.join(", ")}`);
     }
 
@@ -1320,7 +1362,7 @@ export class FileOperationTracker {
   } {
     return {
       readFiles: Array.from(this.readFiles.keys()).slice(0, 50), // Limit to prevent huge snapshots
-      createdFiles: Array.from(this.createdFiles.values()).slice(0, 50),
+      createdFiles: Array.from(this.createdFilePaths.values()).slice(0, 50),
       directories: Array.from(this.directoryListings.keys()).slice(0, 20),
     };
   }
@@ -1344,6 +1386,7 @@ export class FileOperationTracker {
       for (const filePath of state.createdFiles) {
         const normalized = this.normalizeFilename(path.basename(filePath) || filePath);
         this.createdFiles.set(normalized, filePath);
+        this.createdFilePaths.set(this.normalizePath(filePath), filePath);
       }
     }
 
