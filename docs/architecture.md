@@ -424,12 +424,29 @@ CoWork OS is designed with **deny-wins** security policy precedence across multi
 2. Workspace permissions (read/write/delete/shell/network)
 3. Context restrictions (DM vs group)
 4. Tool-specific rules
+5. Workspace-level task policy: optional `agent-policy.toml` loaded from the workspace root
 
 Key code:
 - Policy engine: `src/electron/security/policy-manager.ts`
 - Guardrails settings: `src/electron/guardrails/guardrail-manager.ts`
 - Input/output sanitization: `src/electron/agent/security/`
 - Secure settings storage: `src/electron/database/SecureSettingsRepository.ts`
+- Workspace task policy parser/loaders: `src/electron/agent/agent-policy.ts`
+
+Workspace policy (`agent-policy.toml`) controls executor behavior when present:
+- Required tool families by step mode: `[required_tool_families]`
+- Tool allow/deny filtering: `[tool_filters]`
+- Disallowed fallback phrases: `[fallback]`
+- Loop threshold overrides:
+  - `[loop_thresholds.default]`
+  - `[loop_thresholds.mode.<analysis_only|artifact_presence_required|mutation_required>]`
+  - `[loop_thresholds.domain.<auto|code|operations|research|writing|general>]`
+- Runtime hooks:
+  - `[[hooks.on_pre_tool_use]]`
+  - `[[hooks.on_stop_attempt]]`
+  - `[[hooks.on_recovery_plan]]`
+
+The policy file is cached by path+mtime, supports optional hooks for forced tool/input fallback and stop-attempt blocking, and logs parse/load events to task logs for observability.
 
 Security docs:
 - `docs/security/README.md`
@@ -563,6 +580,9 @@ Core parts:
   - PR regression policy gate: `.github/workflows/ci.yml` + `scripts/qa/enforce_eval_regression_policy.cjs`
   - Nightly hardening: `.github/workflows/nightly-hardening.yml`
   - Release hardening gate: `.github/workflows/release.yml`
+  - Timeline completion telemetry hardening:
+    - `scripts/qa/backfill_timeline_completion_telemetry.cjs`
+    - `scripts/qa/enforce_timeline_reliability.cjs`
 
 For full operational details and commands, see:
 - `docs/reliability-flywheel.md`
