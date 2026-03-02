@@ -56,6 +56,24 @@ describe("ChannelGateway follow-up listeners", () => {
     agentDaemon = new EventEmitter();
   });
 
+  const emitTimeline = (
+    timelineType: string,
+    taskId: string,
+    legacyType: string,
+    payload: Record<string, unknown> = {},
+  ) => {
+    agentDaemon.emit(timelineType, {
+      taskId,
+      payload: {
+        legacyType,
+        ...payload,
+      },
+      timestamp: Date.now(),
+      schemaVersion: 2,
+      status: timelineType === "timeline_step_finished" ? "completed" : "in_progress",
+    });
+  };
+
   it("flushes + finalizes when a follow-up produced assistant output", async () => {
     const db = createMockDb();
     const gateway = new ChannelGateway(db, { agentDaemon: agentDaemon as Any });
@@ -66,9 +84,9 @@ describe("ChannelGateway follow-up listeners", () => {
     router.finalizeDraftStreamForTask = vi.fn().mockResolvedValue(undefined);
     router.sendArtifacts = vi.fn().mockResolvedValue(undefined);
 
-    agentDaemon.emit("user_message", { taskId: "t1", message: "follow-up" });
-    agentDaemon.emit("assistant_message", { taskId: "t1", message: "Follow-up response" });
-    agentDaemon.emit("follow_up_completed", { taskId: "t1" });
+    emitTimeline("timeline_step_updated", "t1", "user_message", { message: "follow-up" });
+    emitTimeline("timeline_step_updated", "t1", "assistant_message", { message: "Follow-up response" });
+    emitTimeline("timeline_step_updated", "t1", "follow_up_completed");
 
     await tick();
     await tick();
@@ -90,8 +108,8 @@ describe("ChannelGateway follow-up listeners", () => {
     router.finalizeDraftStreamForTask = vi.fn().mockResolvedValue(undefined);
     router.sendArtifacts = vi.fn().mockResolvedValue(undefined);
 
-    agentDaemon.emit("user_message", { taskId: "t2", message: "follow-up" });
-    agentDaemon.emit("follow_up_completed", { taskId: "t2" });
+    emitTimeline("timeline_step_updated", "t2", "user_message", { message: "follow-up" });
+    emitTimeline("timeline_step_updated", "t2", "follow_up_completed");
 
     await tick();
     await tick();
@@ -111,9 +129,9 @@ describe("ChannelGateway follow-up listeners", () => {
     router.flushStreamingUpdateForTask = vi.fn().mockResolvedValue(undefined);
     router.finalizeDraftStreamForTask = vi.fn().mockResolvedValue(undefined);
 
-    agentDaemon.emit("user_message", { taskId: "t3", message: "follow-up" });
-    agentDaemon.emit("assistant_message", { taskId: "t3", message: "Partial answer" });
-    agentDaemon.emit("follow_up_failed", { taskId: "t3", error: "boom" });
+    emitTimeline("timeline_step_updated", "t3", "user_message", { message: "follow-up" });
+    emitTimeline("timeline_step_updated", "t3", "assistant_message", { message: "Partial answer" });
+    emitTimeline("timeline_step_updated", "t3", "follow_up_failed", { error: "boom" });
 
     await tick();
     await tick();
@@ -132,8 +150,7 @@ describe("ChannelGateway follow-up listeners", () => {
     router.flushStreamingUpdateForTask = vi.fn().mockResolvedValue(undefined);
     router.finalizeDraftStreamForTask = vi.fn().mockResolvedValue(undefined);
 
-    agentDaemon.emit("task_paused", {
-      taskId: "t4",
+    emitTimeline("timeline_step_updated", "t4", "task_paused", {
       message: "Need more input",
       reason: "user_input",
     });
