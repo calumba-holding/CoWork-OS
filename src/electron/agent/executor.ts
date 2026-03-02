@@ -13,8 +13,20 @@ import {
   ImageAttachment,
   InfraStatus,
   TASK_ERROR_CODES,
+  EvidenceRef,
+  VerificationOutcome,
+  VerificationScope,
+  VerificationEvidenceMode,
+  GuardrailSettings,
+  WebSearchMode,
 } from "../../shared/types";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
+import {
+  parseInlineSkillSlashChain,
+  parseLeadingSkillSlashCommand,
+  type ParsedSkillSlashCommand,
+  type SkillSlashExternalMode,
+} from "../../shared/skill-slash-commands";
 import * as fs from "fs";
 import * as fsPromises from "fs/promises";
 import * as path from "path";
@@ -102,11 +114,13 @@ import {
   sleep,
 } from "./executor-helpers";
 import { ExecutorEventEmitter } from "./executor-event-emitter";
+import { createTimelineEmitter } from "./timeline-emitter";
 import { LifecycleMutex } from "./executor-lifecycle-mutex";
 import {
   maybeApplyQualityPasses as maybeApplyQualityPassesUtil,
   requestLLMResponseWithAdaptiveBudget as requestLLMResponseWithAdaptiveBudgetUtil,
 } from "./executor-llm-turn-utils";
+import { ProgressScoreEngine } from "./progress-score-engine";
 import { processAssistantResponseText as processAssistantResponseTextUtil } from "./executor-assistant-output-utils";
 import { sanitizeToolCallTextFromAssistant } from "./tool-call-text-sanitizer";
 import {
@@ -118,8 +132,18 @@ import {
 import {
   evaluateDomainCompletion,
   getLoopGuardrailConfig,
+  type LoopGuardrailConfig,
   shouldRequireExecutionEvidenceForDomain,
 } from "./completion-checks";
+import {
+  applyAgentPolicyLoopThresholds,
+  evaluateAgentPolicyHook,
+  filterToolsByAgentPolicy,
+  getPolicyRequiredToolsForMode,
+  loadAgentPolicyFromWorkspace,
+  sanitizeFallbackTextWithPolicy,
+  type AgentPolicyConfig,
+} from "./agent-policy";
 import {
   appendAssistantResponseToConversation as appendAssistantResponseToConversationUtil,
   computeToolFailureDecision as computeToolFailureDecisionUtil,
@@ -147,6 +171,7 @@ import {
   hasVerificationEvidence as hasVerificationEvidenceUtil,
   hasVerificationToolEvidence as hasVerificationToolEvidenceUtil,
   inferRequiredArtifactExtensions as inferRequiredArtifactExtensionsUtil,
+  normalizePromptForContracts as normalizePromptForContractsUtil,
   promptRequestsArtifactOutput as promptRequestsArtifactOutputUtil,
   responseDirectlyAddressesPrompt as responseDirectlyAddressesPromptUtil,
   responseHasDecisionSignal as responseHasDecisionSignalUtil,
@@ -155,6 +180,30 @@ import {
   responseLooksOperationalOnly as responseLooksOperationalOnlyUtil,
   shouldRequireExecutionEvidence as shouldRequireExecutionEvidenceUtil,
 } from "./executor-completion-utils";
+import {
+  CANONICAL_ARTIFACT_EXTENSION_REGEX,
+  deriveStepContractMode,
+  isArtifactPathLikeToken,
+  isLikelyCommandSnippet,
+  descriptionHasArtifactCue,
+  descriptionHasReadOnlyIntent,
+  descriptionHasScaffoldIntent,
+  descriptionHasSummaryCue,
+  descriptionHasWriteIntent,
+  extractArtifactExtensionsFromText,
+  extractArtifactPathCandidates,
+  hasArtifactExtensionMention,
+  type StepContractEnforcementLevel,
+  type StepContractMode,
+} from "./step-contract";
+import {
+  canonicalizeToolName as canonicalizeToolNameUtil,
+  getAliasesForCanonicalTool as getAliasesForCanonicalToolUtil,
+  getToolDedupeClass as getToolDedupeClassUtil,
+  isArtifactGenerationToolName as isArtifactGenerationToolNameUtil,
+  isFileMutationToolName as isFileMutationToolNameUtil,
+  normalizeToolName as normalizeToolNameFromSemantics,
+} from "./tool-semantics";
 import {
   buildCanvasFallbackHtml as buildCanvasFallbackHtmlUtil,
   isCanvasPlaceholderHtml as isCanvasPlaceholderHtmlUtil,
@@ -179,10 +228,11 @@ import {
   buildWatchSkipBlockedArtifactToolResult as buildWatchSkipBlockedArtifactToolResultUtil,
   formatToolInputForLog as formatToolInputForLogUtil,
   getToolFailureReason as getToolFailureReasonUtil,
-  getToolInputValidationError as getToolInputValidationErrorUtil,
   inferAndNormalizeToolInput as inferAndNormalizeToolInputUtil,
+  isEffectivelyIdempotentToolCall as isEffectivelyIdempotentToolCallUtil,
   isHardToolFailure as isHardToolFailureUtil,
   normalizeToolUseName as normalizeToolUseNameUtil,
+  preflightValidateAndRepairToolInput as preflightValidateAndRepairToolInputUtil,
   recordToolFailureOutcome as recordToolFailureOutcomeUtil,
 } from "./executor-tool-execution-utils";
 import {
@@ -208,6 +258,20 @@ const DEFAULT_PROMPT_SECTION_BUDGETS = {
 
 const PLAN_SYSTEM_PROMPT_TOTAL_BUDGET = 5600;
 const EXECUTION_SYSTEM_PROMPT_TOTAL_BUDGET = 6800;
+const BATCH_EXTERNAL_SIDE_EFFECT_TOOLS = new Set([
+  "x_action",
+  "notion_action",
+  "box_action",
+  "onedrive_action",
+  "google_drive_action",
+  "gmail_action",
+  "calendar_action",
+  "apple_calendar_action",
+  "apple_reminders_action",
+  "dropbox_action",
+  "sharepoint_action",
+  "voice_call",
+]);
 
 function isFeatureEnabled(envName: string, defaultValue = true): boolean {
   const raw = process.env[envName];
@@ -273,6 +337,14 @@ const EXECUTOR_BUDGET_CONTRACTS: Record<ExecutorBudgetProfile, ExecutorBudgetCon
   },
 };
 
+const WEB_SEARCH_PROFILE_MAX_USES_PER_TASK: Record<ExecutorBudgetProfile, number> = {
+  strict: 4,
+  balanced: 8,
+  aggressive: 16,
+};
+
+const WEB_SEARCH_MAX_USES_PER_STEP_DEFAULT = 3;
+
 function resolveExecutorBudgetProfile(
   requestedProfile: Task["budgetProfile"],
   requestedMaxTurns: number,
@@ -300,6 +372,48 @@ interface WebEvidenceEntry {
   title?: string;
   publishDate?: string;
   timestamp: number;
+}
+
+type StepVerificationMode = "none" | "image_file" | "canvas_session" | "artifact_file";
+type StepArtifactKind = "none" | "document" | "canvas" | "file";
+
+interface StepExecutionContract {
+  requiredTools: Set<string>;
+  mode: StepContractMode;
+  requiresMutation: boolean;
+  requiresArtifactEvidence: boolean;
+  targetPaths: string[];
+  requiredExtensions: string[];
+  enforcementLevel: StepContractEnforcementLevel;
+  contractReason: string;
+  verificationMode: StepVerificationMode;
+  artifactKind: StepArtifactKind;
+}
+
+interface MutationEvidence {
+  tool_success: boolean;
+  canonical_tool: string;
+  reported_path: string | null;
+  artifact_registered: boolean;
+  fs_exists: boolean;
+  mtime_after_step_start: boolean;
+  size_bytes: number | null;
+}
+
+interface VerificationAssessment {
+  outcome: Exclude<VerificationOutcome, "pass">;
+  scope: VerificationScope;
+  evidenceMode: VerificationEvidenceMode;
+  pendingChecklist: string[];
+  reason: string;
+}
+
+interface VerificationCompletionMetadata {
+  verificationOutcome: Exclude<VerificationOutcome, "pass">;
+  verificationScope: VerificationScope;
+  verificationEvidenceMode: VerificationEvidenceMode;
+  pendingChecklist: string[];
+  verificationMessage: string;
 }
 
 const isLLMImageContent = (block: LLMContent): block is LLMImageContent => {
@@ -344,6 +458,7 @@ export class TaskExecutor {
   // If the user confirms they want to proceed despite workspace preflight warnings,
   // we should not keep re-pausing on the same gate.
   private workspacePreflightAcknowledged = false;
+  private workspacePreflightSummaryEmitted = false;
   private lastPauseReason: string | null = null;
   private stepFeedbackSignal: {
     stepId: string;
@@ -363,6 +478,7 @@ export class TaskExecutor {
   private toolResultMemory: Array<{ tool: string; summary: string; timestamp: number }> = [];
   private webEvidenceMemory: WebEvidenceEntry[] = [];
   private toolUsageCounts: Map<string, number> = new Map();
+  private successfulToolUsageCounts: Map<string, number> = new Map();
   private toolUsageEventsSinceDecay = 0;
   private toolSelectionEpoch = 0;
   private lastAssistantOutput: string | null = null;
@@ -400,6 +516,7 @@ export class TaskExecutor {
   private observedOutputTokensPerSecond: number | null = null;
   private readonly infraContextProvider: InfraContextProvider;
   private readonly eventEmitter: ExecutorEventEmitter;
+  private readonly timelineEmitter: ReturnType<typeof createTimelineEmitter>;
   private readonly citationTracker: CitationTracker;
   private readonly lifecycleMutex: LifecycleMutex = new LifecycleMutex();
   private lifecycleMutexFallback?: LifecycleMutex;
@@ -407,6 +524,10 @@ export class TaskExecutor {
   private unifiedCompatModeNotified = false;
   /** Images attached to the initial task creation (not follow-up messages). */
   private initialImages?: ImageAttachment[];
+  private slashBatchExternalPolicy: SkillSlashExternalMode | null = null;
+  private slashBatchExternalConfirmGranted = false;
+  private currentToolBatchGroupId: string | null = null;
+  private canvasEvidenceObserved = false;
 
   // Deep work / progress journaling
   private journalIntervalHandle?: ReturnType<typeof setInterval>;
@@ -515,6 +636,57 @@ export class TaskExecutor {
     return this.recoveredFailureStepIds;
   }
 
+  private getBudgetConstrainedFailureStepIdSet(): Set<string> {
+    if (!(this.budgetConstrainedFailedStepIds instanceof Set)) {
+      this.budgetConstrainedFailedStepIds = new Set();
+    }
+    return this.budgetConstrainedFailedStepIds;
+  }
+
+  private static clampInt(
+    value: unknown,
+    fallback: number,
+    min: number,
+    max: number,
+  ): number {
+    if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+    const normalized = Math.floor(value);
+    if (normalized < min) return fallback;
+    return Math.max(min, Math.min(max, normalized));
+  }
+
+  private normalizeWebSearchMode(value: unknown, fallback: WebSearchMode = "cached"): WebSearchMode {
+    const mode = String(value || "")
+      .trim()
+      .toLowerCase();
+    if (mode === "disabled" || mode === "cached" || mode === "live") {
+      return mode;
+    }
+    return fallback;
+  }
+
+  private normalizeDomainPatternList(values: unknown): string[] {
+    if (!Array.isArray(values)) return [];
+    const normalized = new Set<string>();
+    for (const value of values) {
+      if (typeof value !== "string") continue;
+      const pattern = value.trim().toLowerCase();
+      if (!pattern) continue;
+      normalized.add(pattern);
+    }
+    return Array.from(normalized.values());
+  }
+
+  private supportsStrictCachedWebSearch(): boolean {
+    // Current providers return live index results. Keep this as a dedicated
+    // capability gate so future providers can advertise strict cached support.
+    return false;
+  }
+
+  private getProfileDefaultWebSearchMaxUsesPerTask(profile: ExecutorBudgetProfile): number {
+    return WEB_SEARCH_PROFILE_MAX_USES_PER_TASK[profile] ?? WEB_SEARCH_PROFILE_MAX_USES_PER_TASK.balanced;
+  }
+
   private static readonly PINNED_MEMORY_RECALL_TAG = "<cowork_memory_recall>";
   private static readonly PINNED_MEMORY_RECALL_CLOSE_TAG = "</cowork_memory_recall>";
   private static readonly PINNED_COMPACTION_SUMMARY_TAG = "<cowork_compaction_summary>";
@@ -616,7 +788,80 @@ export class TaskExecutor {
     }
   }
 
+  private startToolBatchGroup(
+    stepId: string,
+    toolUseCount: number,
+    phase: "step" | "follow_up",
+  ): string | null {
+    if (!Number.isFinite(toolUseCount) || toolUseCount <= 0) return null;
+    const timeline =
+      (this as Any).timelineEmitter &&
+      typeof (this as Any).timelineEmitter.startGroupLane === "function"
+        ? ((this as Any).timelineEmitter as ReturnType<typeof createTimelineEmitter>)
+        : null;
+    if (!timeline) return null;
+    const normalizedStepId = String(stepId || "").trim() || this.currentStepId || "task";
+    const groupId = `tools:${phase}:${normalizedStepId}:${Date.now()}:${Math.max(this.globalTurnCount, 0)}`;
+    const label = phase === "follow_up" ? `Follow-up tool batch (${toolUseCount})` : `Tool batch (${toolUseCount})`;
+    timeline.startGroupLane(groupId, {
+      label,
+      actor: "tool",
+      maxParallel: Math.max(1, Math.floor(toolUseCount)),
+      legacyType: "step_started",
+    });
+    return groupId;
+  }
+
+  private finishToolBatchGroup(
+    groupId: string | null,
+    toolResults: LLMToolResult[],
+    phase: "step" | "follow_up",
+  ): void {
+    if (!groupId) return;
+    const timeline =
+      (this as Any).timelineEmitter &&
+      typeof (this as Any).timelineEmitter.finishGroupLane === "function"
+        ? ((this as Any).timelineEmitter as ReturnType<typeof createTimelineEmitter>)
+        : null;
+    if (!timeline) return;
+    const successCount = toolResults.filter((result) => !result.is_error).length;
+    const failCount = toolResults.filter((result) => result.is_error).length;
+    const status: "completed" | "failed" =
+      failCount > 0 && successCount === 0 ? "failed" : "completed";
+    const label = phase === "follow_up" ? "Follow-up tool batch" : "Tool batch";
+    timeline.finishGroupLane(groupId, {
+      label,
+      actor: "tool",
+      status,
+      legacyType: status === "failed" ? "step_failed" : "step_completed",
+      message: `${label}: ${successCount} succeeded, ${failCount} failed`,
+    });
+  }
+
   private emitEvent(type: string, payload: Any): void {
+    let payloadObj: Record<string, unknown> =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {};
+    // Some tests instantiate TaskExecutor-like objects without running the constructor.
+    // In that case timelineEmitter can be absent; fall back to legacy event emission.
+    const timeline =
+      (this as Any).timelineEmitter &&
+      typeof (this as Any).timelineEmitter.startStep === "function"
+        ? ((this as Any).timelineEmitter as ReturnType<typeof createTimelineEmitter>)
+        : undefined;
+
+    if (
+      this.currentToolBatchGroupId &&
+      (type === "tool_call" || type === "tool_result" || type === "tool_error") &&
+      payloadObj.groupId === undefined
+    ) {
+      payloadObj = {
+        ...payloadObj,
+        groupId: this.currentToolBatchGroupId,
+      };
+    }
+
     if (type === "awaiting_user_input" && typeof payload?.reasonCode === "string") {
       this.lastAwaitingUserInputReasonCode = payload.reasonCode;
     } else if (type === "retry_started" && typeof payload?.retryReason === "string") {
@@ -632,6 +877,95 @@ export class TaskExecutor {
       (payload?.disabledScope === "provider" || payload?.disabledScope === "global")
     ) {
       this.lastToolDisabledScope = payload.disabledScope;
+    }
+
+    if (timeline && type === "step_started") {
+      const step = (payloadObj.step as { id?: string; description?: string } | undefined) || {
+        id: this.currentStepId || undefined,
+        description: "Step started",
+      };
+      timeline.startStep(step, {
+        legacyType: "step_started",
+        message: typeof payloadObj.message === "string" ? payloadObj.message : step.description,
+      });
+      return;
+    }
+
+    if (timeline && type === "step_completed") {
+      const step = (payloadObj.step as { id?: string; description?: string } | undefined) || {
+        id: this.currentStepId || undefined,
+        description: "Step completed",
+      };
+      timeline.finishStep(step, {
+        legacyType: "step_completed",
+        status: "completed",
+        message: typeof payloadObj.message === "string" ? payloadObj.message : step.description,
+      });
+      return;
+    }
+
+    if (timeline && type === "step_failed") {
+      const step = (payloadObj.step as { id?: string; description?: string } | undefined) || {
+        id: this.currentStepId || undefined,
+        description: "Step failed",
+      };
+      const reason =
+        (typeof payloadObj.reason === "string" && payloadObj.reason) ||
+        (typeof payloadObj.error === "string" && payloadObj.error) ||
+        "Step failed";
+      timeline.failStep(step, reason, {
+        legacyType: "step_failed",
+        message: reason,
+      });
+      return;
+    }
+
+    if (timeline && type === "command_output") {
+      timeline.emitCommandOutput(payloadObj);
+      return;
+    }
+
+    if (timeline && type === "artifact_created" && typeof payloadObj.path === "string") {
+      timeline.emitArtifact(payloadObj.path, {
+        mimeType: typeof payloadObj.mimeType === "string" ? payloadObj.mimeType : undefined,
+        label: typeof payloadObj.label === "string" ? payloadObj.label : undefined,
+      });
+      return;
+    }
+
+    if (timeline && type === "citations_collected") {
+      const citations = Array.isArray(payloadObj.citations) ? payloadObj.citations : [];
+      const refs: EvidenceRef[] = citations
+        .map((citation, index): EvidenceRef | null => {
+          if (!citation || typeof citation !== "object") return null;
+          const entry = citation as Record<string, unknown>;
+          const sourceUrlOrPath =
+            typeof entry.url === "string" && entry.url.trim().length > 0
+              ? entry.url.trim()
+              : typeof entry.source === "string" && entry.source.trim().length > 0
+                ? entry.source.trim()
+                : "";
+          if (!sourceUrlOrPath) return null;
+          return {
+            evidenceId: `citation-${index + 1}`,
+            sourceType: "url",
+            sourceUrlOrPath,
+            snippet:
+              typeof entry.snippet === "string"
+                ? entry.snippet
+                : typeof entry.title === "string"
+                  ? entry.title
+                  : undefined,
+            capturedAt: Date.now(),
+          };
+        })
+        .filter((entry): entry is EvidenceRef => entry !== null);
+      if (refs.length > 0) {
+        timeline.attachEvidence(refs, {
+          message: `Attached ${refs.length} citation reference(s)`,
+        });
+        return;
+      }
     }
 
     if (this.eventEmitter) {
@@ -650,7 +984,148 @@ export class TaskExecutor {
    * where the plan is reconstructed from persisted events.
    */
   setPlan(plan: Plan): void {
-    this.plan = plan;
+    this.plan = this.sanitizePlan(plan);
+  }
+
+  private isMetaOnlyPlanStepDescription(description: string): boolean {
+    const desc = String(description || "")
+      .trim()
+      .toLowerCase();
+    if (!desc) return true;
+
+    if (/^assumption lock\b/.test(desc)) return true;
+    if (/^(clarify|confirm)\s+(core\s+)?assumptions\b/.test(desc)) return true;
+    if (/^(analy[sz]e|analyzing)\s+task\s+requirements\b/.test(desc)) return true;
+    if (/^(create|creating)\s+execution\s+plan\b/.test(desc)) return true;
+    if (/^i sketched a path forward\b/.test(desc)) return true;
+    if (/^determine approach\b/.test(desc)) return true;
+
+    return false;
+  }
+
+  private descriptionIndicatesVerification(description: string): boolean {
+    const desc = String(description || "")
+      .trim()
+      .toLowerCase();
+    if (!desc) return false;
+    if (desc.startsWith("verify")) return true;
+    if (desc.startsWith("verification")) return true;
+    if (desc.startsWith("review")) {
+      const hasMutationVerb =
+        /\b(tighten|edit|fix|update|rewrite|revise|modify|change|improve|refactor|clean|polish|rework|adjust|correct|enhance|optimize|replace|remove|add|implement|apply|write|create|draft|generate|save)\b/.test(
+          desc,
+        );
+      return !hasMutationVerb;
+    }
+    return desc.includes("verify:") || desc.includes("verification") || desc.includes("verify ");
+  }
+
+  private normalizeScaffoldRootPath(rawPath: string): string {
+    return String(rawPath || "")
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/^\.\/+/, "")
+      .replace(/^\/+/, "")
+      .replace(/\/+$/, "");
+  }
+
+  private inferScaffoldRootFromPlanSteps(steps: PlanStep[]): string | null {
+    for (const step of steps) {
+      const description = String(step?.description || "");
+      if (!descriptionHasScaffoldIntent(description)) continue;
+
+      const underMatch = description.match(/\b(?:under|inside|within)\s+`([^`]+)`/i);
+      if (underMatch && underMatch[1]) {
+        const candidate = this.normalizeScaffoldRootPath(underMatch[1]);
+        if (candidate && !path.isAbsolute(candidate) && !isLikelyCommandSnippet(candidate)) {
+          return candidate;
+        }
+      }
+
+      const fallbackMatch = description.match(/\b(?:under|inside|within)\s+(\.?\/[A-Za-z0-9._/-]+)/i);
+      if (fallbackMatch && fallbackMatch[1]) {
+        const candidate = this.normalizeScaffoldRootPath(fallbackMatch[1]);
+        if (candidate && !path.isAbsolute(candidate) && !isLikelyCommandSnippet(candidate)) {
+          return candidate;
+        }
+      }
+    }
+    return null;
+  }
+
+  private anchorPathTokenToScaffoldRoot(token: string, scaffoldRoot: string): string {
+    const raw = String(token || "").trim();
+    if (!raw) return raw;
+    if (!isArtifactPathLikeToken(raw)) return raw;
+    if (path.isAbsolute(raw) || raw.startsWith("../")) return raw;
+
+    const normalizedRoot = this.normalizeScaffoldRootPath(scaffoldRoot);
+    if (!normalizedRoot) return raw;
+
+    const normalizedToken = raw.replace(/\\/g, "/");
+    const withoutDotPrefix = normalizedToken.startsWith("./")
+      ? normalizedToken.slice(2)
+      : normalizedToken;
+    if (
+      withoutDotPrefix === normalizedRoot ||
+      withoutDotPrefix.startsWith(`${normalizedRoot}/`) ||
+      withoutDotPrefix.startsWith("../")
+    ) {
+      return raw;
+    }
+
+    return `${normalizedRoot}/${withoutDotPrefix.replace(/^\/+/, "")}`;
+  }
+
+  private anchorDescriptionPathsToScaffoldRoot(description: string, scaffoldRoot: string): string {
+    const text = String(description || "");
+    if (!text.includes("`")) return text;
+    return text.replace(/`([^`]+)`/g, (match, inner) => {
+      const anchored = this.anchorPathTokenToScaffoldRoot(String(inner || ""), scaffoldRoot);
+      if (!anchored || anchored === String(inner || "").trim()) return match;
+      return `\`${anchored}\``;
+    });
+  }
+
+  private sanitizePlan(plan: Plan): Plan {
+    const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+    const normalizedSteps = steps.map((step, index) => {
+      const rawDescription = String(step?.description || "").trim();
+      let description = rawDescription || `Step ${index + 1}`;
+      if (this.isMetaOnlyPlanStepDescription(description)) {
+        description =
+          "Confirm concrete output constraints (format, exact limits, filename) and execute the required tool actions.";
+      }
+
+      const normalizedKind: PlanStep["kind"] =
+        this.descriptionIndicatesVerification(description)
+          ? "verification"
+          : step?.kind === "recovery" || step?.kind === "primary"
+            ? step.kind
+            : "primary";
+
+      return {
+        ...step,
+        id: String(step?.id || index + 1),
+        description,
+        kind: normalizedKind,
+      } as PlanStep;
+    });
+
+    const scaffoldRoot = this.inferScaffoldRootFromPlanSteps(normalizedSteps);
+    this.planScaffoldRoot = scaffoldRoot;
+    const rootedSteps = scaffoldRoot
+      ? normalizedSteps.map((step) => ({
+          ...step,
+          description: this.anchorDescriptionPathsToScaffoldRoot(step.description, scaffoldRoot),
+        }))
+      : normalizedSteps;
+
+    return {
+      ...plan,
+      description: String(plan?.description || "Execution plan"),
+      steps: rootedSteps,
+    };
   }
 
   private noteUnifiedCompatMode(entrypoint: "executeStep" | "sendMessage"): void {
@@ -1431,6 +1906,7 @@ ${transcript}
   // Plan revision tracking to prevent infinite revision loops
   private planRevisionCount: number = 0;
   private readonly maxPlanRevisions: number = 5;
+  private planScaffoldRoot: string | null = null;
 
   // Failed approach tracking to prevent retrying the same failed strategies
   private failedApproaches: Set<string> = new Set();
@@ -1449,27 +1925,68 @@ ${transcript}
   private totalToolCallCount = 0;
   private webSearchToolCallCount = 0;
   private duplicatesBlockedCount = 0;
+  private readonly webSearchMode: WebSearchMode;
+  private readonly webSearchMaxUsesPerTask: number;
+  private readonly webSearchMaxUsesPerStep: number;
+  private readonly webSearchAllowedDomains: string[];
+  private readonly webSearchBlockedDomains: string[];
   private consecutiveSearchStepCount = 0;
   private autoRecoveryStepsPlanned = 0;
   private terminalStatus: Task["terminalStatus"] = "ok";
   private failureClass: Task["failureClass"] = undefined;
 
   // Global turn tracking (across all steps) - similar to Claude Agent SDK's maxTurns
-  private globalTurnCount: number = 0;
-  private readonly maxGlobalTurns: number; // Configurable via AgentConfig.maxTurns
+  private globalTurnCount: number = 0; // Window turns
+  private lifetimeTurnCount: number = 0;
+  private readonly maxGlobalTurns: number; // Window cap (configurable via AgentConfig.maxTurns)
+  private readonly maxLifetimeTurns: number;
+  private continuationCount: number = 0;
+  private continuationWindow: number = 1;
+  private windowStartEventCount: number = 0;
+  private readonly autoContinueOnTurnLimit: boolean;
+  private readonly maxAutoContinuations: number;
+  private readonly minProgressScoreForAutoContinue: number;
+  private readonly continuationStrategy: "adaptive_progress" | "fixed_caps";
+  private readonly compactOnContinuation: boolean;
+  private readonly compactionThresholdRatio: number;
+  private readonly loopWarningThreshold: number;
+  private readonly loopCriticalThreshold: number;
+  private readonly globalNoProgressCircuitBreaker: number;
+  private noProgressStreak: number = 0;
+  private lastLoopFingerprint = "";
+  private compactionCount = 0;
+  private lastCompactionAt = 0;
+  private lastCompactionTokensBefore = 0;
+  private lastCompactionTokensAfter = 0;
+  private blockedLoopFingerprintForWindow: string | null = null;
+  private pendingLoopStrategySwitchMessage = "";
   private readonly budgetProfile: ExecutorBudgetProfile;
   private readonly budgetContract: ExecutorBudgetContract;
   private readonly budgetContractsEnabled: boolean;
   private readonly partialSuccessForCronEnabled: boolean;
+  private readonly toolSemanticsV2Enabled: boolean;
+  private readonly mutationEvidenceV2Enabled: boolean;
+  private readonly providerRetryV2Enabled: boolean;
+  private readonly mutationLoopStopV2Enabled: boolean;
+  private readonly verificationOutcomeV2Enabled: boolean;
   private readonly turnSoftLandingReserve: number = 2;
+  private readonly terminalFailureDedupWindowMs: number = 10_000;
+  private lastTerminalFailureFingerprint = "";
+  private lastTerminalFailureAt = 0;
   private budgetSoftLandingInjected = false;
   private readonly guardrailPhaseAEnabled: boolean;
   private readonly guardrailPhaseBEnabled: boolean;
   private llmCallSequence: number = 0;
   private softDeadlineTriggered: boolean = false;
   private wrapUpRequested: boolean = false;
+  private completionVerificationMetadata: VerificationCompletionMetadata | null = null;
+  private nonBlockingVerificationFailedStepIds: Set<string> = new Set();
+  private blockingVerificationFailedStepIds: Set<string> = new Set();
+  private budgetConstrainedFailedStepIds: Set<string> = new Set();
   /** Short log tag including first 8 chars of task ID for parent/child task traceability */
   private readonly logTag: string;
+  private agentPolicyConfig: AgentPolicyConfig | null = null;
+  private agentPolicyFilePath: string | null = null;
 
   constructor(
     private task: Task,
@@ -1478,6 +1995,9 @@ ${transcript}
     infraContextProvider?: InfraContextProvider,
   ) {
     this.eventEmitter = new ExecutorEventEmitter((type, payload) => {
+      this.daemon.logEvent(this.task.id, type, payload);
+    });
+    this.timelineEmitter = createTimelineEmitter(this.task.id, (type, payload) => {
       this.daemon.logEvent(this.task.id, type, payload);
     });
     this.useUnifiedTurnLoop = process.env.COWORK_EXECUTOR_ENGINE === "v2";
@@ -1494,11 +2014,158 @@ ${transcript}
     const rawBudgetProfile = resolveExecutorBudgetProfile(task.budgetProfile, requestedMaxTurns);
     this.budgetProfile = rawBudgetProfile;
     this.budgetContract = EXECUTOR_BUDGET_CONTRACTS[this.budgetProfile];
-    this.budgetContractsEnabled = isFeatureEnabled("COWORK_AGENT_BUDGET_CONTRACTS", true);
+    // Keep hard budget contracts opt-in. Product strategy now relies primarily on
+    // strategy-derived maxTurns + lifetime caps, and strict tool-call caps (e.g. 42)
+    // can prematurely terminate long execution tasks.
+    this.budgetContractsEnabled = isFeatureEnabled("COWORK_AGENT_BUDGET_CONTRACTS", false);
     this.partialSuccessForCronEnabled = isFeatureEnabled("COWORK_AGENT_PARTIAL_SUCCESS_FOR_CRON", true);
+    this.toolSemanticsV2Enabled = isFeatureEnabled("COWORK_TOOL_SEMANTICS_V2", true);
+    this.mutationEvidenceV2Enabled = isFeatureEnabled("COWORK_MUTATION_EVIDENCE_V2", true);
+    this.providerRetryV2Enabled = isFeatureEnabled("COWORK_PROVIDER_RETRY_V2", true);
+    this.mutationLoopStopV2Enabled = isFeatureEnabled("COWORK_MUTATION_LOOP_STOP_V2", true);
+    this.verificationOutcomeV2Enabled =
+      isFeatureEnabled("COWORK_VERIFICATION_OUTCOME_V2", false) ||
+      isFeatureEnabled("verification_outcome_v2", false);
     this.maxGlobalTurns = this.budgetContractsEnabled
       ? Math.min(requestedMaxTurns, this.budgetContract.maxTurns)
       : requestedMaxTurns;
+    const guardrailSettings = GuardrailManager.loadSettings();
+    const profileWebSearchTaskCap = this.getProfileDefaultWebSearchMaxUsesPerTask(this.budgetProfile);
+    const guardrailWebSearchMode = this.normalizeWebSearchMode(
+      (guardrailSettings as Partial<GuardrailSettings>).webSearchMode,
+      "cached",
+    );
+    const configuredWebSearchMode = this.normalizeWebSearchMode(
+      task.agentConfig?.webSearchMode,
+      guardrailWebSearchMode,
+    );
+    let effectiveWebSearchMode = configuredWebSearchMode;
+    if (configuredWebSearchMode === "cached" && !this.supportsStrictCachedWebSearch()) {
+      effectiveWebSearchMode = "live";
+      this.emitEvent("log", {
+        metric: "web_search_mode_fallback_live",
+        requestedMode: configuredWebSearchMode,
+        effectiveMode: effectiveWebSearchMode,
+        reason: "strict_cached_not_supported",
+      });
+    }
+    this.webSearchMode = effectiveWebSearchMode;
+    const guardrailWebSearchTaskCap = TaskExecutor.clampInt(
+      (guardrailSettings as Partial<GuardrailSettings>).webSearchMaxUsesPerTask,
+      profileWebSearchTaskCap,
+      1,
+      500,
+    );
+    this.webSearchMaxUsesPerTask = TaskExecutor.clampInt(
+      task.agentConfig?.webSearchMaxUsesPerTask,
+      guardrailWebSearchTaskCap,
+      1,
+      500,
+    );
+    const guardrailWebSearchStepCap = TaskExecutor.clampInt(
+      (guardrailSettings as Partial<GuardrailSettings>).webSearchMaxUsesPerStep,
+      WEB_SEARCH_MAX_USES_PER_STEP_DEFAULT,
+      1,
+      100,
+    );
+    this.webSearchMaxUsesPerStep = TaskExecutor.clampInt(
+      task.agentConfig?.webSearchMaxUsesPerStep,
+      guardrailWebSearchStepCap,
+      1,
+      100,
+    );
+    this.webSearchAllowedDomains = this.normalizeDomainPatternList(
+      (guardrailSettings as Partial<GuardrailSettings>).webSearchAllowedDomains,
+    );
+    this.webSearchBlockedDomains = this.normalizeDomainPatternList(
+      (guardrailSettings as Partial<GuardrailSettings>).webSearchBlockedDomains,
+    );
+    const isDeepWorkTask = task.agentConfig?.deepWorkMode === true;
+    const derivedLifetimeMaxTurns = isDeepWorkTask
+      ? Math.max(320, Math.min(1200, this.maxGlobalTurns * 6))
+      : Math.max(120, Math.min(320, this.maxGlobalTurns * 4));
+    const settingsLifetimeCap =
+      guardrailSettings.lifetimeTurnCapEnabled && guardrailSettings.defaultLifetimeTurnCap > 0
+        ? Math.floor(guardrailSettings.defaultLifetimeTurnCap)
+        : null;
+    const configuredLifetimeCap =
+      typeof task.agentConfig?.lifetimeMaxTurns === "number" && task.agentConfig.lifetimeMaxTurns > 0
+        ? Math.floor(task.agentConfig.lifetimeMaxTurns)
+        : null;
+    const fallbackLifetimeCap = settingsLifetimeCap ?? derivedLifetimeMaxTurns;
+    // Match Codex/Claude-style layered budgets: adaptive defaults with optional
+    // tighter explicit caps. The tightest active budget must win.
+    this.maxLifetimeTurns = Math.max(
+      this.maxGlobalTurns,
+      configuredLifetimeCap ?? fallbackLifetimeCap,
+    );
+    this.lifetimeTurnCount =
+      typeof task.lifetimeTurnsUsed === "number" && task.lifetimeTurnsUsed > 0
+        ? task.lifetimeTurnsUsed
+        : 0;
+    this.continuationCount =
+      typeof task.continuationCount === "number" && task.continuationCount > 0
+        ? task.continuationCount
+        : 0;
+    this.continuationWindow =
+      typeof task.continuationWindow === "number" && task.continuationWindow > 0
+        ? task.continuationWindow
+        : this.continuationCount + 1;
+    this.compactionCount =
+      typeof task.compactionCount === "number" && task.compactionCount > 0
+        ? task.compactionCount
+        : 0;
+    this.lastCompactionAt =
+      typeof task.lastCompactionAt === "number" && task.lastCompactionAt > 0
+        ? task.lastCompactionAt
+        : 0;
+    this.lastCompactionTokensBefore =
+      typeof task.lastCompactionTokensBefore === "number" && task.lastCompactionTokensBefore > 0
+        ? task.lastCompactionTokensBefore
+        : 0;
+    this.lastCompactionTokensAfter =
+      typeof task.lastCompactionTokensAfter === "number" && task.lastCompactionTokensAfter > 0
+        ? task.lastCompactionTokensAfter
+        : 0;
+    this.noProgressStreak =
+      typeof task.noProgressStreak === "number" && task.noProgressStreak > 0
+        ? task.noProgressStreak
+        : 0;
+    this.lastLoopFingerprint =
+      typeof task.lastLoopFingerprint === "string" ? task.lastLoopFingerprint : "";
+    this.autoContinueOnTurnLimit =
+      task.agentConfig?.autoContinueOnTurnLimit ?? guardrailSettings.autoContinuationEnabled;
+    this.maxAutoContinuations =
+      typeof task.agentConfig?.maxAutoContinuations === "number"
+        ? Math.max(0, Math.floor(task.agentConfig.maxAutoContinuations))
+        : isDeepWorkTask
+          ? 7
+          : guardrailSettings.defaultMaxAutoContinuations;
+    this.minProgressScoreForAutoContinue =
+      typeof task.agentConfig?.minProgressScoreForAutoContinue === "number"
+        ? Math.max(-1, Math.min(1, task.agentConfig.minProgressScoreForAutoContinue))
+        : isDeepWorkTask
+          ? 0.15
+          : guardrailSettings.defaultMinProgressScore;
+    this.continuationStrategy = task.agentConfig?.continuationStrategy || "adaptive_progress";
+    this.compactOnContinuation =
+      task.agentConfig?.compactOnContinuation ?? guardrailSettings.compactOnContinuation;
+    this.compactionThresholdRatio =
+      typeof task.agentConfig?.compactionThresholdRatio === "number"
+        ? Math.max(0.5, Math.min(0.95, task.agentConfig.compactionThresholdRatio))
+        : Math.max(0.5, Math.min(0.95, guardrailSettings.compactionThresholdRatio));
+    this.loopWarningThreshold =
+      typeof task.agentConfig?.loopWarningThreshold === "number"
+        ? Math.max(1, Math.floor(task.agentConfig.loopWarningThreshold))
+        : Math.max(1, Math.floor(guardrailSettings.loopWarningThreshold));
+    this.loopCriticalThreshold =
+      typeof task.agentConfig?.loopCriticalThreshold === "number"
+        ? Math.max(1, Math.floor(task.agentConfig.loopCriticalThreshold))
+        : Math.max(1, Math.floor(guardrailSettings.loopCriticalThreshold));
+    this.globalNoProgressCircuitBreaker =
+      typeof task.agentConfig?.globalNoProgressCircuitBreaker === "number"
+        ? Math.max(1, Math.floor(task.agentConfig.globalNoProgressCircuitBreaker))
+        : Math.max(1, Math.floor(guardrailSettings.globalNoProgressCircuitBreaker));
     this.guardrailPhaseAEnabled = isFeatureEnabled("COWORK_GUARDRAIL_PHASE_A", true);
     this.guardrailPhaseBEnabled = isFeatureEnabled("COWORK_GUARDRAIL_PHASE_B", true);
     this.lastUserMessage = task.prompt;
@@ -1520,6 +2187,7 @@ ${transcript}
     // Required-input decisions must remain pausable even in autonomous/deep-work mode.
     this.shouldPauseForRequiredDecision =
       allowUserInput && pauseForRequiredDecision && !task.parentTaskId && (task.agentType ?? "main") === "main";
+    this.windowStartEventCount = this.daemon.getTaskEvents(this.task.id).length;
     const llmSelection = LLMProviderFactory.resolveTaskModelSelection(task.agentConfig, {
       isVerificationTask:
         task.agentConfig?.verificationAgent === true ||
@@ -1555,6 +2223,10 @@ ${transcript}
       task.agentConfig?.gatewayContext,
       task.agentConfig?.toolRestrictions,
     );
+    this.toolRegistry.setWebSearchDomainPolicy({
+      allowedDomains: this.webSearchAllowedDomains,
+      blockedDomains: this.webSearchBlockedDomains,
+    });
 
     // Wire citation tracker into tool registry for web_search/web_fetch
     this.citationTracker = new CitationTracker(task.id);
@@ -1562,6 +2234,7 @@ ${transcript}
     if (task.agentConfig?.deepWorkMode) {
       this.toolRegistry.setDeepWorkMode(true);
     }
+    this.reloadAgentPolicy();
 
     // Set up plan revision handler
     this.toolRegistry.setPlanRevisionHandler((newSteps, reason, clearRemaining) => {
@@ -1968,6 +2641,7 @@ ${transcript}
         // Check if it's a retryable error (rate limit, timeout, network error)
         const errorText = String(error?.message || "").toLowerCase();
         const isRetryable =
+          (this.providerRetryV2Enabled && error?.retryable === true) ||
           errorText.includes("timeout") ||
           errorText.includes("timed out") ||
           errorText.includes("429") ||
@@ -1977,6 +2651,11 @@ ${transcript}
           errorText.includes("enotfound") ||
           errorText.includes("eai_again") ||
           errorText.includes("econnrefused") ||
+          (this.providerRetryV2Enabled && errorText.includes("terminated")) ||
+          (this.providerRetryV2Enabled && errorText.includes("stream disconnected")) ||
+          (this.providerRetryV2Enabled && errorText.includes("connection reset")) ||
+          (this.providerRetryV2Enabled && errorText.includes("unexpected eof")) ||
+          (this.providerRetryV2Enabled && errorText.includes("socket hang up")) ||
           errorText.includes("network") ||
           error.status === 429 ||
           error.status === 408 ||
@@ -1991,6 +2670,25 @@ ${transcript}
           );
           throw error;
         }
+
+        this.emitEvent("log", {
+          metric: "llm_retry_reason",
+          operation,
+          attempt: attemptNumber,
+          reason:
+            String(error?.code || error?.cause?.code || "").trim() ||
+            (errorText.includes("terminated")
+              ? "terminated"
+              : errorText.includes("stream disconnected")
+                ? "stream_disconnected"
+                : errorText.includes("socket hang up")
+                  ? "socket_hang_up"
+                  : errorText.includes("connection reset")
+                    ? "connection_reset"
+                    : errorText.includes("timeout")
+                      ? "timeout"
+                      : "transient_error"),
+        });
 
         console.log(
           `${this.logTag} ${operation} failed (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message}`,
@@ -2322,7 +3020,15 @@ ${transcript}
    * @throws Error if any budget is exceeded
    */
   private checkBudgets(): void {
-    // Check global turn limit (similar to Claude Agent SDK's maxTurns)
+    // Check lifetime turn limit first (across all continuation windows).
+    if (this.lifetimeTurnCount >= this.maxLifetimeTurns) {
+      throw new TurnLimitExceededError(
+        `Lifetime turn limit exceeded: ${this.lifetimeTurnCount}/${this.maxLifetimeTurns} turns. ` +
+          `Task stopped to prevent runaway execution.`,
+      );
+    }
+
+    // Check per-window turn limit (similar to Claude Agent SDK's maxTurns)
     if (this.globalTurnCount >= this.maxGlobalTurns) {
       throw new TurnLimitExceededError(
         `Global turn limit exceeded: ${this.globalTurnCount}/${this.maxGlobalTurns} turns. ` +
@@ -2340,17 +3046,17 @@ ${transcript}
     }
 
     // Check token budget
-    const totalTokens = this.totalInputTokens + this.totalOutputTokens;
+    const totalTokens = this.getCumulativeInputTokens() + this.getCumulativeOutputTokens();
     const tokenCheck = GuardrailManager.isTokenBudgetExceeded(totalTokens);
     if (tokenCheck.exceeded) {
       throw new Error(
         `Token budget exceeded: ${tokenCheck.used.toLocaleString()}/${tokenCheck.limit.toLocaleString()} tokens. ` +
-          `Estimated cost: ${formatCost(this.totalCost)}`,
+          `Estimated cost: ${formatCost(this.getCumulativeCost())}`,
       );
     }
 
     // Check cost budget
-    const costCheck = GuardrailManager.isCostBudgetExceeded(this.totalCost);
+    const costCheck = GuardrailManager.isCostBudgetExceeded(this.getCumulativeCost());
     if (costCheck.exceeded) {
       throw new Error(
         `Cost budget exceeded: ${formatCost(costCheck.cost)}/${formatCost(costCheck.limit)}. ` +
@@ -2360,12 +3066,15 @@ ${transcript}
   }
 
   private getRemainingTurnBudget(): number {
-    return Math.max(0, this.maxGlobalTurns - this.globalTurnCount);
+    const remainingWindowTurns = Math.max(0, this.maxGlobalTurns - this.globalTurnCount);
+    const remainingLifetimeTurns = Math.max(0, this.maxLifetimeTurns - this.lifetimeTurnCount);
+    return Math.min(remainingWindowTurns, remainingLifetimeTurns);
   }
 
   private getBudgetUsage(): NonNullable<Task["budgetUsage"]> {
     return {
       turns: this.globalTurnCount,
+      lifetimeTurns: this.lifetimeTurnCount,
       toolCalls: this.totalToolCallCount,
       webSearchCalls: this.webSearchToolCallCount,
       duplicatesBlocked: this.duplicatesBlockedCount,
@@ -2415,14 +3124,185 @@ ${transcript}
         `Tool-call budget exhausted: ${this.totalToolCallCount}/${this.budgetContract.maxToolCalls}.`,
       );
     }
-    if (
-      toolName === "web_search" &&
-      this.webSearchToolCallCount >= this.budgetContract.maxWebSearchCalls
-    ) {
-      throw new BudgetLimitExceededError(
-        `web_search budget exhausted: ${this.webSearchToolCallCount}/${this.budgetContract.maxWebSearchCalls}.`,
-      );
+  }
+
+  private resolveRequestedWebSearchMaxUses(input: Any): number | null {
+    if (!input || typeof input !== "object") return null;
+    const candidate = TaskExecutor.clampInt(input.maxUses, -1, 1, 500);
+    return candidate > 0 ? candidate : null;
+  }
+
+  private getEffectiveWebSearchTaskLimit(input: Any): number {
+    let limit = this.webSearchMaxUsesPerTask;
+    if (this.budgetContractsEnabled) {
+      limit = Math.min(limit, this.budgetContract.maxWebSearchCalls);
     }
+    const requestedMaxUses = this.resolveRequestedWebSearchMaxUses(input);
+    if (requestedMaxUses) {
+      limit = Math.min(limit, requestedMaxUses);
+    }
+    return Math.max(1, limit);
+  }
+
+  private getEffectiveWebSearchStepLimit(input: Any): number {
+    let limit = this.webSearchMaxUsesPerStep;
+    const requestedMaxUses = this.resolveRequestedWebSearchMaxUses(input);
+    if (requestedMaxUses) {
+      limit = Math.min(limit, requestedMaxUses);
+    }
+    return Math.max(1, limit);
+  }
+
+  private evaluateWebSearchPolicyAndBudget(
+    input: Any,
+    stepWebSearchCallCount: number,
+  ): {
+    blocked: boolean;
+    reason?: string;
+    failureClass?: NonNullable<Task["failureClass"]>;
+    scope?: "mode" | "task" | "step";
+    used: number;
+    limit: number;
+    remaining: number;
+    stepUsed: number;
+    stepLimit: number;
+    stepRemaining: number;
+  } {
+    if (this.webSearchMode === "disabled") {
+      return {
+        blocked: true,
+        reason:
+          "web_search is disabled by policy mode. Set Guardrails > Web Search Policy > Mode to cached or live to enable it.",
+        failureClass: "contract_error",
+        scope: "mode",
+        used: this.webSearchToolCallCount,
+        limit: 0,
+        remaining: 0,
+        stepUsed: stepWebSearchCallCount,
+        stepLimit: 0,
+        stepRemaining: 0,
+      };
+    }
+
+    const taskLimit = this.getEffectiveWebSearchTaskLimit(input);
+    const stepLimit = this.getEffectiveWebSearchStepLimit(input);
+    const taskRemaining = Math.max(0, taskLimit - this.webSearchToolCallCount);
+    const stepRemaining = Math.max(0, stepLimit - stepWebSearchCallCount);
+
+    if (this.webSearchToolCallCount >= taskLimit) {
+      return {
+        blocked: true,
+        reason: `web_search budget exhausted: ${this.webSearchToolCallCount}/${taskLimit}.`,
+        failureClass: "budget_exhausted",
+        scope: "task",
+        used: this.webSearchToolCallCount,
+        limit: taskLimit,
+        remaining: taskRemaining,
+        stepUsed: stepWebSearchCallCount,
+        stepLimit,
+        stepRemaining,
+      };
+    }
+
+    if (stepWebSearchCallCount >= stepLimit) {
+      return {
+        blocked: true,
+        reason: `web_search step budget exhausted: ${stepWebSearchCallCount}/${stepLimit}.`,
+        failureClass: "budget_exhausted",
+        scope: "step",
+        used: this.webSearchToolCallCount,
+        limit: taskLimit,
+        remaining: taskRemaining,
+        stepUsed: stepWebSearchCallCount,
+        stepLimit,
+        stepRemaining,
+      };
+    }
+
+    return {
+      blocked: false,
+      used: this.webSearchToolCallCount,
+      limit: taskLimit,
+      remaining: taskRemaining,
+      stepUsed: stepWebSearchCallCount,
+      stepLimit,
+      stepRemaining,
+    };
+  }
+
+  private getWebFetchRequestCorpus(): string {
+    return [
+      this.lastUserMessage || "",
+      this.task.rawPrompt || "",
+      this.task.userPrompt || "",
+      this.task.prompt || "",
+    ]
+      .join("\n")
+      .toLowerCase();
+  }
+
+  private normalizeUrlForCorpusMatch(url: string): string[] {
+    const raw = String(url || "").trim().toLowerCase();
+    if (!raw) return [];
+    const variants = new Set<string>([raw]);
+    variants.add(raw.replace(/\/+$/, ""));
+    variants.add(raw.replace(/^https?:\/\//, ""));
+    variants.add(raw.replace(/^https?:\/\/www\./, ""));
+    return Array.from(variants.values()).filter(Boolean);
+  }
+
+  private evaluateWebFetchPolicy(input: Any): {
+    blocked: boolean;
+    reason?: string;
+    failureClass?: NonNullable<Task["failureClass"]>;
+    scope?: "mode";
+  } {
+    if (this.webSearchMode !== "cached") {
+      return { blocked: false };
+    }
+
+    const url = String(input?.url || "").trim();
+    if (!url) {
+      return {
+        blocked: true,
+        reason:
+          "web_fetch is restricted in cached mode unless the user explicitly requests a specific URL or exact page content.",
+        failureClass: "contract_error",
+        scope: "mode",
+      };
+    }
+
+    const corpus = this.getWebFetchRequestCorpus();
+    const urlVariants = this.normalizeUrlForCorpusMatch(url);
+    if (urlVariants.some((variant) => variant && corpus.includes(variant))) {
+      return { blocked: false };
+    }
+
+    let hostname = "";
+    try {
+      hostname = new URL(url).hostname.toLowerCase();
+    } catch {
+      // Invalid URL format should be treated as not-explicit in cached mode.
+    }
+    const explicitFetchIntent =
+      /\b(specific|exact)\s+(url|link|page|article)\b/.test(corpus) ||
+      /\b(read|fetch|get|open|inspect|summari(?:ze|se)|extract)\b.{0,40}\b(url|link|page|article|webpage)\b/.test(
+        corpus,
+      ) ||
+      /\bexact page content\b/.test(corpus) ||
+      /\bsource page\b/.test(corpus) ||
+      /\bweb_fetch\b/.test(corpus);
+    if (hostname && corpus.includes(hostname) && explicitFetchIntent) {
+      return { blocked: false };
+    }
+
+    return {
+      blocked: true,
+      reason:
+        "web_fetch is restricted in cached mode unless the user explicitly requests a specific URL or exact page content.",
+      failureClass: "contract_error",
+      scope: "mode",
+    };
   }
 
   private isBudgetExhaustionError(error: unknown): boolean {
@@ -2430,7 +3310,7 @@ ${transcript}
     if (error instanceof TurnLimitExceededError) return true;
     const message = String((error as Any)?.message || error || "");
     return (
-      /Global turn limit exceeded/i.test(message) ||
+      /Global turn limit exceeded|Lifetime turn limit exceeded/i.test(message) ||
       /budget exhausted/i.test(message) ||
       /Token budget exceeded/i.test(message) ||
       /Cost budget exceeded/i.test(message)
@@ -2469,6 +3349,8 @@ ${transcript}
   private classifyFailure(error: unknown): NonNullable<Task["failureClass"]> {
     if (this.isBudgetExhaustionError(error)) return "budget_exhausted";
     const message = String((error as Any)?.message || error || "");
+    if (/contract_unmet_write_required|artifact_write_checkpoint_failed|required artifact mutation/i.test(message))
+      return "contract_unmet_write_required";
     if (/tool|web_search|web_fetch|run_command|tool call/i.test(message)) return "tool_error";
     if (/final response|directly address|completion contract|verification/i.test(message))
       return "contract_error";
@@ -2481,7 +3363,8 @@ ${transcript}
   ): void {
     if (!this.guardrailPhaseAEnabled || this.budgetSoftLandingInjected) return;
     const remainingTurns = this.getRemainingTurnBudget();
-    if (remainingTurns > this.turnSoftLandingReserve) return;
+    const softLandingReserve = this.getAdaptiveSoftLandingReserve();
+    if (remainingTurns > softLandingReserve) return;
 
     const softLandingMessage =
       "[TURN_SOFT_LANDING]\n" +
@@ -2498,8 +3381,12 @@ ${transcript}
     this.emitEvent("budget_soft_landing", {
       phase,
       remainingTurns,
+      reserveTurns: softLandingReserve,
       maxTurns: this.maxGlobalTurns,
       usedTurns: this.globalTurnCount,
+      lifetimeRemainingTurns: Math.max(0, this.maxLifetimeTurns - this.lifetimeTurnCount),
+      lifetimeMaxTurns: this.maxLifetimeTurns,
+      lifetimeUsedTurns: this.lifetimeTurnCount,
     });
     console.log(
       `${this.logTag} Injected turn-budget soft-landing guidance | phase=${phase} | remainingTurns=${remainingTurns}`,
@@ -2534,7 +3421,329 @@ ${transcript}
           ? (errorLike as Any).message
           : undefined;
 
+    return /Global turn limit exceeded|Lifetime turn limit exceeded/i.test(String(message || ""));
+  }
+
+  private isWindowTurnLimitExceededError(errorLike: unknown): boolean {
+    const message =
+      typeof errorLike === "string"
+        ? errorLike
+        : typeof errorLike === "object" && errorLike !== null
+          ? (errorLike as Any).message
+          : undefined;
     return /Global turn limit exceeded/i.test(String(message || ""));
+  }
+
+  private getAdaptiveSoftLandingReserve(): number {
+    if (this.autoContinueOnTurnLimit && this.continuationCount < this.maxAutoContinuations) {
+      return this.turnSoftLandingReserve;
+    }
+    return 4;
+  }
+
+  private getWindowEventsSinceLastReset(): TaskEvent[] {
+    const events = this.daemon.getTaskEvents(this.task.id);
+    if (this.windowStartEventCount <= 0) return events;
+    return events.slice(Math.max(0, this.windowStartEventCount));
+  }
+
+  private assessContinuationWindow(): ReturnType<typeof ProgressScoreEngine.assessWindow> {
+    return ProgressScoreEngine.assessWindow(this.getWindowEventsSinceLastReset());
+  }
+
+  private emitTerminalFailureOnce(payload: Record<string, unknown>): boolean {
+    const message =
+      typeof payload.message === "string" ? payload.message : JSON.stringify(payload).slice(0, 500);
+    const failureClass = typeof payload.failureClass === "string" ? payload.failureClass : "";
+    const errorCode = typeof payload.errorCode === "string" ? payload.errorCode : "";
+    const fingerprint = `${message}|${failureClass}|${errorCode}`.slice(0, 1000);
+    const now = Date.now();
+    if (
+      this.lastTerminalFailureFingerprint === fingerprint &&
+      now - this.lastTerminalFailureAt <= this.terminalFailureDedupWindowMs
+    ) {
+      return false;
+    }
+    this.lastTerminalFailureFingerprint = fingerprint;
+    this.lastTerminalFailureAt = now;
+    this.emitEvent("error", {
+      ...payload,
+      terminal_failure_fingerprint: fingerprint,
+    });
+    return true;
+  }
+
+  private getRenderedContextRatio(): number {
+    try {
+      const systemPromptTokens = estimateTokens(this.systemPrompt || "");
+      return this.contextManager.getContextUtilization(this.conversationHistory, systemPromptTokens)
+        .utilization;
+    } catch {
+      return 0;
+    }
+  }
+
+  private hasWindowMutationEvidence(events: TaskEvent[]): boolean {
+    return events.some((event) => {
+      const type = this.getReplayEventType(event);
+      return (
+        type === "file_created" ||
+        type === "file_modified" ||
+        type === "file_deleted" ||
+        type === "artifact_created" ||
+        type === "timeline_artifact_emitted"
+      );
+    });
+  }
+
+  private getWindowToolUseStopStreak(events: TaskEvent[]): number {
+    let maxStreak = 0;
+    for (const event of events) {
+      const type = this.getReplayEventType(event);
+      if (type !== "stop_reason_nudge") continue;
+      const payload =
+        event.payload && typeof event.payload === "object"
+          ? (event.payload as Record<string, unknown>)
+          : {};
+      if (payload.stopReason !== "tool_use") continue;
+      const count = typeof payload.consecutiveCount === "number" ? payload.consecutiveCount : 0;
+      if (count > maxStreak) maxStreak = count;
+    }
+    return maxStreak;
+  }
+
+  private stableLoopSignature(value: unknown): string {
+    if (value === null || value === undefined) return "";
+    if (typeof value !== "object") return String(value);
+    if (Array.isArray(value)) {
+      return `[${value.map((entry) => this.stableLoopSignature(entry)).join(",")}]`;
+    }
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    return `{${keys.map((key) => `${key}:${this.stableLoopSignature(obj[key])}`).join(",")}}`;
+  }
+
+  private getToolInputSignature(tool: string, input: unknown): string {
+    return `${tool}::${this.stableLoopSignature(input)}`.slice(0, 1000);
+  }
+
+  private getSignatureFromLoopFingerprint(fingerprint?: string): string {
+    if (!fingerprint) return "";
+    const parts = String(fingerprint).split("::");
+    if (parts.length < 2) return "";
+    return `${parts[0]}::${parts[1]}`.slice(0, 1000);
+  }
+
+  private async maybeCompactBeforeContinuation(
+    assessment: ReturnType<typeof ProgressScoreEngine.assessWindow>,
+  ): Promise<void> {
+    if (!this.compactOnContinuation) return;
+
+    const windowEvents = this.getWindowEventsSinceLastReset();
+    const contextRatio = this.getRenderedContextRatio();
+    const noMutation = !this.hasWindowMutationEvidence(windowEvents);
+    const toolUseStopStreak = this.getWindowToolUseStopStreak(windowEvents);
+    const shouldCompact =
+      contextRatio >= this.compactionThresholdRatio || (toolUseStopStreak >= 6 && noMutation);
+    if (!shouldCompact) return;
+
+    const systemPromptTokens = estimateTokens(this.systemPrompt || "");
+    const tokensBefore = estimateTotalTokens(this.conversationHistory);
+    this.emitEvent("context_compaction_started", {
+      continuationWindow: this.continuationWindow,
+      contextRatio,
+      thresholdRatio: this.compactionThresholdRatio,
+      toolUseStopStreak,
+      noMutation,
+      tokensBefore,
+    });
+
+    try {
+      const compacted = this.contextManager.compactMessagesWithMeta(
+        this.conversationHistory,
+        systemPromptTokens,
+      );
+      this.updateConversationHistory(compacted.messages);
+      const tokensAfter = estimateTotalTokens(this.conversationHistory);
+      this.compactionCount += 1;
+      this.lastCompactionAt = Date.now();
+      this.lastCompactionTokensBefore = tokensBefore;
+      this.lastCompactionTokensAfter = tokensAfter;
+      this.daemon.updateTask(this.task.id, {
+        compactionCount: this.compactionCount,
+        lastCompactionAt: this.lastCompactionAt,
+        lastCompactionTokensBefore: this.lastCompactionTokensBefore,
+        lastCompactionTokensAfter: this.lastCompactionTokensAfter,
+      });
+      this.emitEvent("context_compaction_completed", {
+        continuationWindow: this.continuationWindow,
+        tokensBefore,
+        tokensAfter,
+        removedMessages: compacted.meta.removedMessages.count,
+      });
+    } catch (error: Any) {
+      this.emitEvent("context_compaction_failed", {
+        continuationWindow: this.continuationWindow,
+        reason: error?.message || String(error),
+        tokensBefore,
+      });
+    }
+  }
+
+  private async maybeAutoContinueAfterTurnLimit(error: unknown): Promise<boolean> {
+    if (!this.isWindowTurnLimitExceededError(error)) return false;
+    if (!this.autoContinueOnTurnLimit) return false;
+
+    while (true) {
+      const pendingSteps = this.plan?.steps?.filter((step) => step.status === "pending").length || 0;
+      const assessment = this.assessContinuationWindow();
+      const threshold = this.minProgressScoreForAutoContinue;
+      const continuationBudgetRemaining = Math.max(0, this.maxAutoContinuations - this.continuationCount);
+      const reachedContinuationCap = continuationBudgetRemaining <= 0;
+      const hasLoopRisk =
+        assessment.loopRiskIndex >= 0.7 || assessment.repeatedFingerprintCount >= 3;
+      const reachedLoopWarning = assessment.repeatedFingerprintCount >= this.loopWarningThreshold;
+      const reachedLoopCritical = assessment.repeatedFingerprintCount >= this.loopCriticalThreshold;
+      const belowProgressThreshold =
+        this.continuationStrategy === "adaptive_progress" &&
+        assessment.progressScore < threshold;
+      const noPendingSteps = pendingSteps <= 0;
+      const lifetimeCapHit = this.lifetimeTurnCount >= this.maxLifetimeTurns;
+      this.noProgressStreak = assessment.progressScore <= 0 ? this.noProgressStreak + 1 : 0;
+      this.lastLoopFingerprint = assessment.dominantFingerprint || this.lastLoopFingerprint;
+      const noProgressCircuitBreak =
+        this.noProgressStreak >= this.globalNoProgressCircuitBreaker;
+
+      let blockReason = "";
+      if (lifetimeCapHit) {
+        blockReason = `Lifetime turn limit reached (${this.lifetimeTurnCount}/${this.maxLifetimeTurns}).`;
+      } else if (noPendingSteps) {
+        blockReason = "No pending plan steps remain to continue.";
+      } else if (noProgressCircuitBreak) {
+        blockReason =
+          `No-progress circuit breaker reached (${this.noProgressStreak}/${this.globalNoProgressCircuitBreaker}).`;
+      } else if (reachedContinuationCap) {
+        blockReason = `Auto continuation limit reached (${this.continuationCount}/${this.maxAutoContinuations}).`;
+      } else if (reachedLoopCritical) {
+        this.blockedLoopFingerprintForWindow = this.getSignatureFromLoopFingerprint(
+          assessment.dominantFingerprint,
+        );
+        blockReason =
+          `Loop fingerprint repeated too often (${assessment.repeatedFingerprintCount}/${this.loopCriticalThreshold}).`;
+      } else if (hasLoopRisk) {
+        blockReason = `Loop risk is high (${assessment.loopRiskIndex.toFixed(2)}). Try changing strategy or constraints.`;
+      } else if (belowProgressThreshold) {
+        blockReason =
+          `Recent progress score (${assessment.progressScore.toFixed(2)}) is below threshold (${threshold.toFixed(2)}).`;
+      }
+
+      this.emitEvent("continuation_decision", {
+        policy: this.continuationStrategy,
+        continuationWindow: this.continuationWindow,
+        continuationCount: this.continuationCount,
+        maxAutoContinuations: this.maxAutoContinuations,
+        progressScore: assessment.progressScore,
+        progressThreshold: threshold,
+        loopRiskIndex: assessment.loopRiskIndex,
+        repeatedFingerprintCount: assessment.repeatedFingerprintCount,
+        dominantFingerprint: assessment.dominantFingerprint,
+        noProgressStreak: this.noProgressStreak,
+        loopWarningThreshold: this.loopWarningThreshold,
+        loopCriticalThreshold: this.loopCriticalThreshold,
+        allowed: !blockReason,
+        reason: blockReason || "Continuation approved.",
+      });
+
+      if (reachedLoopWarning && !blockReason) {
+        this.pendingLoopStrategySwitchMessage =
+          "Loop warning: switch strategy now. Use a different tool family or change input class before retrying the same operation.";
+        this.emitEvent("step_contract_escalated", {
+          reason: "loop_warning_threshold_reached",
+          repeatedFingerprintCount: assessment.repeatedFingerprintCount,
+          threshold: this.loopWarningThreshold,
+          dominantFingerprint: assessment.dominantFingerprint,
+        });
+      }
+
+      this.daemon.updateTask(this.task.id, {
+        continuationCount: this.continuationCount,
+        continuationWindow: this.continuationWindow,
+        lifetimeTurnsUsed: this.lifetimeTurnCount,
+        lastProgressScore: assessment.progressScore,
+        autoContinueBlockReason: blockReason || undefined,
+        noProgressStreak: this.noProgressStreak,
+        lastLoopFingerprint: assessment.dominantFingerprint || this.lastLoopFingerprint,
+      });
+
+      if (blockReason) {
+        if (noProgressCircuitBreak) {
+          this.terminalStatus = "needs_user_action";
+          this.failureClass = "budget_exhausted";
+          this.emitEvent("no_progress_circuit_breaker", {
+            noProgressStreak: this.noProgressStreak,
+            threshold: this.globalNoProgressCircuitBreaker,
+            dominantFingerprint: assessment.dominantFingerprint,
+            nextActions: [
+              "Narrow the requested scope",
+              "Provide exact target paths/commands",
+              "Change strategy constraints before continuing",
+            ],
+          });
+          this.daemon.updateTask(this.task.id, {
+            terminalStatus: "needs_user_action",
+            failureClass: "budget_exhausted",
+          });
+        }
+        this.emitEvent("auto_continuation_blocked", {
+          reason: blockReason,
+          suggestion:
+            "Try narrowing scope, providing precise constraints, or giving a different approach before continuing manually.",
+          progressScore: assessment.progressScore,
+          loopRiskIndex: assessment.loopRiskIndex,
+          noProgressStreak: this.noProgressStreak,
+        });
+        return false;
+      }
+
+      await this.maybeCompactBeforeContinuation(assessment);
+      this.continuationCount += 1;
+      this.continuationWindow += 1;
+      this.emitEvent("auto_continuation_started", {
+        mode: "auto",
+        continuationCount: this.continuationCount,
+        continuationWindow: this.continuationWindow,
+        maxAutoContinuations: this.maxAutoContinuations,
+        progressScore: assessment.progressScore,
+        loopRiskIndex: assessment.loopRiskIndex,
+      });
+      this.daemon.updateTask(this.task.id, {
+        continuationCount: this.continuationCount,
+        continuationWindow: this.continuationWindow,
+        lifetimeTurnsUsed: this.lifetimeTurnCount,
+        lastProgressScore: assessment.progressScore,
+        autoContinueBlockReason: undefined,
+        noProgressStreak: this.noProgressStreak,
+        lastLoopFingerprint: assessment.dominantFingerprint || this.lastLoopFingerprint,
+        compactionCount: this.compactionCount,
+        lastCompactionAt: this.lastCompactionAt || undefined,
+        lastCompactionTokensBefore: this.lastCompactionTokensBefore || undefined,
+        lastCompactionTokensAfter: this.lastCompactionTokensAfter || undefined,
+      });
+
+      try {
+        await this.continueAfterBudgetExhaustedUnlocked({
+          mode: "auto",
+          rethrowOnError: true,
+          continuationAssessment: assessment,
+        });
+        return true;
+      } catch (continuationError) {
+        if (this.isWindowTurnLimitExceededError(continuationError)) {
+          continue;
+        }
+        throw continuationError;
+      }
+    }
   }
 
   /**
@@ -2550,6 +3759,13 @@ ${transcript}
     this.totalCost += deltaCost;
     this.iterationCount++;
     this.globalTurnCount++; // Track global turns across all steps
+    this.lifetimeTurnCount++; // Track lifetime turns across continuation windows
+
+    if (this.lifetimeTurnCount % 5 === 0) {
+      this.daemon.updateTask(this.task.id, {
+        lifetimeTurnsUsed: this.lifetimeTurnCount,
+      });
+    }
 
     // Persist usage to task events so it can be exported/audited later.
     // Store totals (not just deltas) so consumers can just take the most recent record.
@@ -2811,14 +4027,8 @@ ${transcript}
     }
 
     // Check for duplicate file creations
-    const fileCreationTools = [
-      "create_document",
-      "write_file",
-      "copy_file",
-      "create_spreadsheet",
-      "create_presentation",
-    ];
-    if (fileCreationTools.includes(toolName)) {
+    const fileCreationTools = new Set(["write_file", "copy_file"]);
+    if (fileCreationTools.has(toolName) || isArtifactGenerationToolNameUtil(toolName)) {
       const filename = input?.filename || input?.path || input?.destPath || input?.destination;
       if (filename) {
         // Guard: don't write tiny HTML placeholders right after a failed fetch
@@ -2909,14 +4119,8 @@ ${transcript}
     }
 
     // Record file creations
-    const fileCreationTools = [
-      "create_document",
-      "write_file",
-      "copy_file",
-      "create_spreadsheet",
-      "create_presentation",
-    ];
-    if (toolSucceeded && fileCreationTools.includes(toolName)) {
+    const fileCreationTools = new Set(["write_file", "copy_file"]);
+    if (toolSucceeded && (fileCreationTools.has(toolName) || isArtifactGenerationToolNameUtil(toolName))) {
       const filename =
         result?.path || result?.filename || input?.filename || input?.path || input?.destPath;
       if (filename) {
@@ -2925,16 +4129,8 @@ ${transcript}
     }
 
     // A successful mutation invalidates stale read/list dedupe/cache state.
-    const mutatingTools = [
-      "create_document",
-      "write_file",
-      "copy_file",
-      "edit_file",
-      "edit_document",
-      "create_spreadsheet",
-      "create_presentation",
-    ];
-    if (toolSucceeded && mutatingTools.includes(toolName)) {
+    const mutatingTools = new Set(["write_file", "copy_file", "edit_file", "edit_document"]);
+    if (toolSucceeded && (mutatingTools.has(toolName) || this.isFileMutationTool(toolName))) {
       const changedPath =
         result?.path ||
         input?.path ||
@@ -2996,12 +4192,215 @@ ${transcript}
   }
 
   private stepRequiresImageVerification(step: PlanStep): boolean {
-    const description = (step.description || "").toLowerCase();
-    if (!description.includes("verify")) return false;
-    // Canvas snapshots are in-memory (base64), not file-based images —
-    // skip file-based image verification for canvas-related steps.
-    if (description.includes("canvas") || description.includes("snapshot")) return false;
-    return IMAGE_VERIFICATION_KEYWORDS.some((keyword: string) => description.includes(keyword));
+    return this.resolveVerificationModeForStep(step) === "image_file";
+  }
+
+  private extractRequiredToolsFromStepDescription(description: string): Set<string> {
+    const desc = String(description || "").toLowerCase();
+    const required = new Set<string>();
+    const hasWriteIntent =
+      /\b(write|create|build|generate|produce|save|author|implement|configure|add)\b/.test(desc);
+
+    const knownTools = [
+      "create_document",
+      "generate_document",
+      "create_spreadsheet",
+      "generate_spreadsheet",
+      "create_presentation",
+      "generate_presentation",
+      "canvas_create",
+      "canvas_push",
+      "create_directory",
+      "write_file",
+      "edit_file",
+      "count_text",
+      "text_metrics",
+    ];
+
+    const viaAllowedTools = new Set<string>(
+      [
+        ...knownTools,
+        "read_file",
+        "read_files",
+        "list_directory",
+        "list_directory_with_sizes",
+        "glob",
+        "grep",
+        "run_command",
+        "web_search",
+        "web_fetch",
+        "infra_status",
+        "system_info",
+      ].map((toolName) =>
+        canonicalizeToolNameUtil(this.normalizeToolName(toolName).name),
+      ),
+    );
+
+    const availableTools = new Set<string>();
+    try {
+      const tools =
+        typeof (this as Any).getAvailableTools === "function"
+          ? ((this as Any).getAvailableTools() as Any[])
+          : [];
+      for (const tool of tools) {
+        const name = typeof tool?.name === "string" ? tool.name : "";
+        if (!name) continue;
+        availableTools.add(canonicalizeToolNameUtil(this.normalizeToolName(name).name));
+      }
+    } catch {
+      // Best-effort only; malformed test doubles or unavailable registries should not break parsing.
+    }
+
+    const explicitViaMatches = desc.match(/\bvia\s+([a-z0-9_]+)/g) || [];
+    for (const match of explicitViaMatches) {
+      const toolName = String(match.split(/\s+/).pop() || "").trim();
+      if (!toolName) continue;
+      const normalizedToolName = canonicalizeToolNameUtil(this.normalizeToolName(toolName).name);
+      if (!viaAllowedTools.has(normalizedToolName) && !availableTools.has(normalizedToolName)) {
+        continue;
+      }
+      required.add(normalizedToolName);
+    }
+    for (const tool of knownTools) {
+      if (!desc.includes(tool)) continue;
+      const normalizedToolName = canonicalizeToolNameUtil(this.normalizeToolName(tool).name);
+      required.add(normalizedToolName);
+    }
+
+    const documentIntent =
+      /\b(word document|docx|pdf)\b/.test(desc) &&
+      /\b(create|generate|write|save|produce|export)\b/.test(desc);
+    if (documentIntent) {
+      required.add(canonicalizeToolNameUtil(this.normalizeToolName("create_document").name));
+    }
+
+    const canvasIntent =
+      /\b(canvas_create|canvas_push|canvas_show|canvas_open_url|in-app canvas|app canvas)\b/.test(
+        desc,
+      ) ||
+      /\b(show|render|display|open|preview|present|push)\b[\s\S]{0,40}\b(?:in(?:-app)?\s+)?canvas\b/.test(
+        desc,
+      );
+    if (canvasIntent) {
+      required.add(canonicalizeToolNameUtil("canvas_push"));
+      required.add(canonicalizeToolNameUtil("canvas_create"));
+    }
+
+    const scaffoldIntent =
+      /\b(scaffold|bootstrap|initialize|set up project|setup project|create widget)\b/.test(desc);
+    if (scaffoldIntent) {
+      required.add(canonicalizeToolNameUtil("create_directory"));
+      required.add(canonicalizeToolNameUtil("write_file"));
+    }
+
+    const fileArtifactMentioned = hasArtifactExtensionMention(desc);
+    const summaryLike = descriptionHasSummaryCue(desc);
+    const readOnlyLike = descriptionHasReadOnlyIntent(desc);
+    const specializedArtifactMention =
+      /\.(docx|pdf|xlsx|pptx)\b/.test(desc) ||
+      /\b(word document|docx|pdf|spreadsheet|excel|slides?|powerpoint)\b/.test(desc);
+    if (fileArtifactMentioned && hasWriteIntent && !summaryLike && !readOnlyLike && !specializedArtifactMention) {
+      required.add(canonicalizeToolNameUtil("write_file"));
+    }
+
+    return required;
+  }
+
+  private resolveVerificationModeForStep(step: PlanStep): StepVerificationMode {
+    if (!this.isVerificationStep(step)) return "none";
+    const description = String(step.description || "").toLowerCase();
+
+    const canvasOrHtmlContext =
+      /\b(canvas|html|web app|interactive|in-app|session)\b/.test(description) ||
+      description.includes("canvas_push") ||
+      description.includes("canvas_create") ||
+      description.includes("rendering");
+    if (canvasOrHtmlContext) {
+      return "canvas_session";
+    }
+
+    if (IMAGE_VERIFICATION_KEYWORDS.some((keyword: string) => description.includes(keyword))) {
+      return "image_file";
+    }
+
+    const artifactVerificationCue =
+      hasArtifactExtensionMention(description) ||
+      /\b(file|document|artifact|output|project|workspace|widget|scheme)\b/.test(description);
+    if (artifactVerificationCue) {
+      return "artifact_file";
+    }
+
+    return "none";
+  }
+
+  private resolveStepExecutionContract(step: PlanStep): StepExecutionContract {
+    const descriptionRaw = String(step.description || "");
+    const description = descriptionRaw.toLowerCase();
+    const requiredTools = this.extractRequiredToolsFromStepDescription(description);
+    const verificationMode = this.resolveVerificationModeForStep(step);
+    const requiresArtifactEvidence = this.stepRequiresArtifactEvidence(step);
+    const artifactContractMode = requiresArtifactEvidence
+      ? this.resolveStepArtifactContractMode(step)
+      : null;
+    const artifactWriteRequired = artifactContractMode === "artifact_write_required";
+    const softwareArtifactExtensionMentioned = hasArtifactExtensionMention(description);
+    const scaffoldIntent = descriptionHasScaffoldIntent(description);
+    const hasWriteIntent = descriptionHasWriteIntent(description);
+    const summaryCue = descriptionHasSummaryCue(description);
+    const inferredMutation =
+      artifactWriteRequired ||
+      ((softwareArtifactExtensionMentioned || scaffoldIntent) && hasWriteIntent && !summaryCue) ||
+      requiredTools.has("create_document") ||
+      requiredTools.has("create_spreadsheet") ||
+      requiredTools.has("create_presentation") ||
+      requiredTools.has("canvas_push") ||
+      requiredTools.has("write_file") ||
+      requiredTools.has("edit_file") ||
+      requiredTools.has("edit_document");
+    const modeDetails = deriveStepContractMode({
+      description: descriptionRaw,
+      requiresMutation: inferredMutation,
+      requiresArtifactEvidence,
+      requiresWriteByArtifactMode: artifactWriteRequired,
+    });
+    const policyRequiredTools = getPolicyRequiredToolsForMode(
+      this.agentPolicyConfig,
+      modeDetails.mode,
+    );
+    for (const policyRequiredTool of policyRequiredTools) {
+      requiredTools.add(canonicalizeToolNameUtil(policyRequiredTool));
+    }
+    const targetPaths = this.extractStepPathCandidates(step);
+    const requiredExtensions = new Set<string>(extractArtifactExtensionsFromText(description));
+    for (const targetPath of targetPaths) {
+      const ext = path.extname(String(targetPath || "")).trim().toLowerCase();
+      if (ext) requiredExtensions.add(ext);
+    }
+    const requiresMutation = modeDetails.mode === "mutation_required";
+
+    let artifactKind: StepArtifactKind = "none";
+    if (requiredTools.has("canvas_push") || requiredTools.has("canvas_create")) {
+      artifactKind = "canvas";
+    } else if (requiredTools.has("create_document") || /\b(docx|pdf|word document)\b/.test(description)) {
+      artifactKind = "document";
+    } else if (requiredTools.has("create_spreadsheet") || requiredTools.has("create_presentation")) {
+      artifactKind = "file";
+    } else if (requiresArtifactEvidence || requiredTools.has("write_file") || requiredTools.has("edit_file")) {
+      artifactKind = "file";
+    }
+
+    return {
+      requiredTools,
+      mode: modeDetails.mode,
+      requiresMutation,
+      requiresArtifactEvidence,
+      targetPaths,
+      requiredExtensions: Array.from(requiredExtensions.values()),
+      enforcementLevel: modeDetails.enforcementLevel,
+      contractReason: modeDetails.contractReason,
+      verificationMode,
+      artifactKind,
+    };
   }
 
   private hasNewImageFromGlobResult(result: Any, since: number): boolean {
@@ -3034,7 +4433,9 @@ ${transcript}
     toolName: string,
     input: Any,
   ): { input: Any; modified: boolean; inference?: string } {
-    if (toolName === "create_document") {
+    const canonicalToolName = canonicalizeToolNameUtil(toolName);
+
+    if (canonicalToolName === "create_document") {
       let modified = false;
       let inference = "";
       input = input || {};
@@ -3051,7 +4452,7 @@ ${transcript}
         }
       }
 
-      if (!input.format) {
+      if (toolName === "create_document" && !input.format) {
         const ext = input.filename ? path.extname(String(input.filename)).toLowerCase() : "";
         if (ext === ".pdf") {
           input.format = "pdf";
@@ -3220,6 +4621,23 @@ ${transcript}
         }
       }
 
+      if (typeof input?.maxUses === "string" && input.maxUses.trim()) {
+        const parsed = Number.parseInt(input.maxUses.trim(), 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          input.maxUses = parsed;
+          modified = true;
+          inference = `${inference ? `${inference}; ` : ""}Normalized maxUses string -> number`;
+        }
+      }
+      if (typeof input?.maxUses === "number" && Number.isFinite(input.maxUses)) {
+        const normalized = Math.max(1, Math.min(500, Math.floor(input.maxUses)));
+        if (normalized !== input.maxUses) {
+          input.maxUses = normalized;
+          modified = true;
+          inference = `${inference ? `${inference}; ` : ""}Clamped maxUses to ${normalized}`;
+        }
+      }
+
       if (modified) {
         return { input, modified, inference };
       }
@@ -3263,6 +4681,12 @@ ${transcript}
     return undefined;
   }
 
+  private getReplayEventType(event: TaskEvent): string {
+    return typeof event.legacyType === "string" && event.legacyType.length > 0
+      ? event.legacyType
+      : event.type;
+  }
+
   private buildTaskOutputSummary(): TaskOutputSummary | undefined {
     const normalizePath = (raw: string): string => raw.trim().replace(/\\/g, "/");
     const createdMap = new Map<string, number>();
@@ -3289,12 +4713,13 @@ ${transcript}
         typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
           ? event.timestamp
           : 0;
-      if (event.type === "file_created") {
+      const eventType = this.getReplayEventType(event);
+      if (eventType === "file_created") {
         if (event.payload?.type === "directory") continue;
         addPath(createdMap, event.payload?.path, ts);
-      } else if (event.type === "artifact_created") {
+      } else if (eventType === "artifact_created") {
         addPath(createdMap, event.payload?.path, ts);
-      } else if (event.type === "file_modified") {
+      } else if (eventType === "file_modified") {
         addPath(modifiedMap, event.payload?.path || event.payload?.to || event.payload?.from, ts);
       }
     }
@@ -3329,33 +4754,43 @@ ${transcript}
   }
 
   private promptRequiresDirectAnswer(): boolean {
-    return promptRequiresDirectAnswerUtil(this.task.title, this.task.prompt);
+    return promptRequiresDirectAnswerUtil(this.task.title, this.getContractPrompt());
   }
 
   private promptRequestsDecision(): boolean {
-    return promptRequestsDecisionUtil(this.task.title, this.task.prompt);
+    return promptRequestsDecisionUtil(this.task.title, this.getContractPrompt());
   }
 
   private promptIsWatchSkipRecommendationTask(): boolean {
-    return promptIsWatchSkipRecommendationTaskUtil(this.task.title, this.task.prompt);
+    return promptIsWatchSkipRecommendationTaskUtil(this.task.title, this.getContractPrompt());
   }
 
   private shouldRequireExecutionEvidence(): boolean {
-    return shouldRequireExecutionEvidenceUtil(this.task.title, this.task.prompt);
+    return shouldRequireExecutionEvidenceUtil(this.task.title, this.getContractPrompt());
   }
 
   private promptRequestsArtifactOutput(): boolean {
-    return promptRequestsArtifactOutputUtil(this.task.title, this.task.prompt);
+    return promptRequestsArtifactOutputUtil(this.task.title, this.getContractPrompt());
   }
 
   private inferRequiredArtifactExtensions(): string[] {
-    return inferRequiredArtifactExtensionsUtil(this.task.title, this.task.prompt);
+    return inferRequiredArtifactExtensionsUtil(this.task.title, this.getContractPrompt());
+  }
+
+  private getContractPrompt(): string {
+    const rawPrompt = String(this.task.rawPrompt || "").trim();
+    if (rawPrompt) return rawPrompt;
+
+    const prompt = String(this.task.prompt || "").trim();
+    if (prompt) return prompt;
+
+    return String(this.task.userPrompt || "");
   }
 
   private buildCompletionContract(): CompletionContract {
     return buildCompletionContractUtil({
       taskTitle: this.task.title,
-      taskPrompt: this.task.prompt,
+      taskPrompt: this.getContractPrompt(),
       requiresDirectAnswer: this.promptRequiresDirectAnswer(),
       requiresDecisionSignal: this.promptRequestsDecision(),
       isWatchSkipRecommendationTask: this.promptIsWatchSkipRecommendationTask(),
@@ -3421,12 +4856,132 @@ ${transcript}
     return hasArtifactEvidenceUtil({ contract, createdFiles });
   }
 
+  private hasSuccessfulToolEvidence(toolName: string): boolean {
+    const normalized = canonicalizeToolNameUtil(String(toolName || "").trim().toLowerCase());
+    if (!normalized) return false;
+
+    if (!(this.successfulToolUsageCounts instanceof Map)) {
+      this.successfulToolUsageCounts = new Map();
+    }
+    const count = this.successfulToolUsageCounts.get(normalized) || 0;
+    if (count > 0) return true;
+
+    const memory = Array.isArray(this.toolResultMemory) ? this.toolResultMemory : [];
+    return memory.some(
+      (entry) =>
+        canonicalizeToolNameUtil(String(entry?.tool || "").trim().toLowerCase()) === normalized,
+    );
+  }
+
+  private getMissingRequiredToolEvidence(contract: CompletionContract): string[] {
+    const requiredTools = Array.isArray(contract.requiredSuccessfulTools)
+      ? contract.requiredSuccessfulTools
+      : [];
+    if (requiredTools.length === 0) return [];
+
+    return requiredTools.filter((toolName) => !this.hasSuccessfulToolEvidence(toolName));
+  }
+
   private hasVerificationEvidence(bestCandidate: string): boolean {
     return hasVerificationEvidenceUtil({
       bestCandidate,
       planSteps: this.plan?.steps || [],
       toolResultMemory: this.toolResultMemory,
     });
+  }
+
+  private isVerificationStepForCompletion(step: PlanStep): boolean {
+    if (this.descriptionIndicatesVerification(step.description)) return true;
+    if (step.kind === "verification") return true;
+    if (step.kind === "recovery") return false;
+    return this.isVerificationStep(step);
+  }
+
+  private isMutationRequiredStepForCompletion(step: PlanStep): boolean {
+    const contract = this.resolveStepExecutionContract(step);
+    return contract.mode === "mutation_required";
+  }
+
+  /**
+   * Returns failed step IDs that can be safely waived at completion.
+   * We only waive explicit verification failures (or heuristic fallback when kind is absent)
+   * when all non-verification work steps completed successfully.
+   */
+  private getWaivableFailedStepIdsAtCompletion(): string[] {
+    if (!this.plan?.steps?.length) return [];
+    const failedSteps = this.plan.steps.filter((step) => step.status === "failed");
+    if (failedSteps.length === 0) return [];
+    const waivable = new Set<string>();
+
+    // Verification-only waivers: preserve existing behavior.
+    if (failedSteps.every((step) => this.isVerificationStepForCompletion(step))) {
+      const nonVerificationSteps = this.plan.steps.filter(
+        (step) => !this.isVerificationStepForCompletion(step),
+      );
+      if (
+        nonVerificationSteps.length > 0 &&
+        nonVerificationSteps.every((step) => step.status === "completed")
+      ) {
+        for (const step of failedSteps) {
+          const id = String(step.id || "").trim();
+          if (id) waivable.add(id);
+        }
+      }
+    }
+
+    // Budget-constrained web_search failures: waive when completion evidence indicates
+    // meaningful progress (final step completed or majority steps completed), and no
+    // blocking verification failures remain.
+    const hasBlockingVerificationFailure = failedSteps.some((step) =>
+      this.blockingVerificationFailedStepIds.has(step.id),
+    );
+    const completedSteps = this.plan.steps.filter((step) => step.status === "completed");
+    const finalStep = this.plan.steps[this.plan.steps.length - 1];
+    const finalStepCompleted = finalStep?.status === "completed";
+    const majorityCompleted = completedSteps.length > failedSteps.length;
+    if (!hasBlockingVerificationFailure && (finalStepCompleted || majorityCompleted)) {
+      const budgetFailedStepIds = this.getBudgetConstrainedFailureStepIdSet();
+      for (const step of failedSteps) {
+        const id = String(step.id || "").trim();
+        if (!id) continue;
+        if (this.isMutationRequiredStepForCompletion(step)) continue;
+        if (budgetFailedStepIds.has(id)) {
+          waivable.add(id);
+        }
+      }
+    }
+
+    return Array.from(waivable.values());
+  }
+
+  private getFailedMutationRequiredStepIdsAtCompletion(): string[] {
+    if (!this.plan?.steps?.length) return [];
+    return this.plan.steps
+      .filter((step) => step.status === "failed" && this.isMutationRequiredStepForCompletion(step))
+      .map((step) => String(step.id || "").trim())
+      .filter((stepId) => stepId.length > 0);
+  }
+
+  private resolveWaiverFailureClass(stepIds: string[]): Task["failureClass"] | undefined {
+    if (!Array.isArray(stepIds) || stepIds.length === 0) return undefined;
+    const budgetFailedStepIds = this.getBudgetConstrainedFailureStepIdSet();
+    const normalized = stepIds
+      .map((stepId) => String(stepId || "").trim())
+      .filter((stepId) => stepId.length > 0);
+    if (normalized.length === 0) return undefined;
+    const budgetCount = normalized.filter((stepId) => budgetFailedStepIds.has(stepId)).length;
+    if (budgetCount === 0) return "contract_error";
+    if (budgetCount === normalized.length) return "budget_exhausted";
+    return "contract_error";
+  }
+
+  private getVerificationStepIds(stepIds: string[]): string[] {
+    if (!Array.isArray(stepIds) || stepIds.length === 0 || !this.plan?.steps?.length) return [];
+    const allow = new Set(stepIds.map((stepId) => String(stepId || "").trim()));
+    return this.plan.steps
+      .filter((step) => allow.has(String(step.id || "").trim()) && this.isVerificationStepForCompletion(step))
+      .map((step) => String(step.id || "").trim())
+      .filter((stepId) => stepId.length > 0);
   }
 
   private getFinalOutcomeGuardError(): string | null {
@@ -3450,7 +5005,26 @@ ${transcript}
         this.fallbackContainsDirectAnswer(completionContract),
       hasVerificationEvidence: (candidate) => this.hasVerificationEvidence(candidate),
     });
-    if (baseGuardError) return baseGuardError;
+    if (baseGuardError) {
+      if (/Task missing artifact evidence/i.test(baseGuardError)) {
+        this.emitEvent("log", {
+          message:
+            "Completion guard blocked finalization due to artifact contract mismatch.",
+          requiredArtifactExtensions: contract.requiredArtifactExtensions,
+          createdFilesSample: createdFiles.slice(0, 10),
+          normalizedContractPromptSnippet: normalizePromptForContractsUtil(
+            this.getContractPrompt(),
+          ).slice(0, 600),
+          guardError: baseGuardError,
+        });
+      }
+      return baseGuardError;
+    }
+
+    const missingRequiredToolEvidence = this.getMissingRequiredToolEvidence(contract);
+    if (missingRequiredToolEvidence.length > 0) {
+      return `Task missing required tool evidence: expected successful calls to ${missingRequiredToolEvidence.join(", ")} before completion.`;
+    }
 
     if (
       this.requiresStrictResearchClaimValidation(bestCandidate) &&
@@ -3475,29 +5049,71 @@ ${transcript}
 
     this.saveConversationSnapshot();
     this.taskCompleted = true;
+    const waivableFailedStepIds = this.getWaivableFailedStepIdsAtCompletion();
+    const nonBlockingFailedStepIds = this.getNonBlockingFailedStepIdsAtCompletion();
+    const failedMutationRequiredStepIds = this.getFailedMutationRequiredStepIdsAtCompletion();
+    const waivedVerificationStepIds = this.getVerificationStepIds(waivableFailedStepIds);
+    const baseTerminalStatus: NonNullable<Task["terminalStatus"]> =
+      waivableFailedStepIds.length > 0 ? "partial_success" : "ok";
+    const baseFailureClass: Task["failureClass"] | undefined =
+      baseTerminalStatus === "ok"
+        ? undefined
+        : this.resolveWaiverFailureClass(waivableFailedStepIds) || "contract_error";
+    const statusWithVerification = this.applyVerificationOutcomeToTerminalStatus(
+      baseTerminalStatus,
+      baseFailureClass,
+    );
+    const terminalStatus: Task["terminalStatus"] = statusWithVerification.terminalStatus;
+    const failureClass: Task["failureClass"] = statusWithVerification.failureClass;
     const summary =
       typeof resultSummary === "string" && resultSummary.trim()
         ? resultSummary.trim()
         : this.buildResultSummary();
     this.task.status = "completed";
     this.task.completedAt = Date.now();
-    this.task.terminalStatus = "ok";
-    this.task.failureClass = undefined;
+    this.task.terminalStatus = terminalStatus;
+    this.task.failureClass = failureClass;
     this.task.budgetUsage = this.getBudgetUsage();
+    this.task.continuationCount = this.continuationCount;
+    this.task.continuationWindow = this.continuationWindow;
+    this.task.lifetimeTurnsUsed = this.lifetimeTurnCount;
     this.task.resultSummary = summary;
     const outputSummary = this.buildTaskOutputSummary();
+    const verificationMetadata =
+      this.verificationOutcomeV2Enabled && this.completionVerificationMetadata
+        ? {
+            verificationOutcome: this.completionVerificationMetadata.verificationOutcome,
+            verificationScope: this.completionVerificationMetadata.verificationScope,
+            verificationEvidenceMode: this.completionVerificationMetadata.verificationEvidenceMode,
+            pendingChecklist: this.completionVerificationMetadata.pendingChecklist,
+            verificationMessage: this.completionVerificationMetadata.verificationMessage,
+          }
+        : {};
     // Attach citations to task completion event
     const citations = this.citationTracker?.getCitations();
     if (citations?.length) {
       this.emitEvent("citations_collected", { citations });
     }
     this.daemon.completeTask(this.task.id, summary, {
-      terminalStatus: "ok",
+      terminalStatus,
+      failureClass: this.task.failureClass,
       budgetUsage: this.getBudgetUsage(),
       outputSummary,
+      waiveFailedStepIds: waivableFailedStepIds,
+      failedMutationRequiredStepIds,
+      waivedVerificationStepIds,
+      terminalStatusReason: this.task.failureClass
+        ? `executor_terminal_${terminalStatus}_with_${this.task.failureClass}`
+        : `executor_terminal_${terminalStatus}`,
+      ...(this.verificationOutcomeV2Enabled && nonBlockingFailedStepIds.length > 0
+        ? { nonBlockingFailedStepIds }
+        : {}),
+      ...verificationMetadata,
     });
-    this.emitRunSummary("completed", "ok");
-    this.capturePlaybookOutcome("success");
+    this.emitRunSummary("completed", terminalStatus);
+    if (terminalStatus === "ok") {
+      this.capturePlaybookOutcome("success");
+    }
     // Fire-and-forget: generate a markdown report for deep work / workflow tasks
     this.autoGenerateReport().catch(() => {
       /* best-effort */
@@ -3515,17 +5131,62 @@ ${transcript}
     this.stopProgressJournal();
     this.saveConversationSnapshot();
     this.taskCompleted = true;
+    const waivableFailedStepIds = this.getWaivableFailedStepIdsAtCompletion();
+    const nonBlockingFailedStepIds = this.getNonBlockingFailedStepIdsAtCompletion();
+    const failedMutationRequiredStepIds = this.getFailedMutationRequiredStepIdsAtCompletion();
+    const waivedVerificationStepIds = this.getVerificationStepIds(waivableFailedStepIds);
     const summary =
       typeof resultSummary === "string" && resultSummary.trim()
         ? resultSummary.trim()
         : this.buildResultSummary();
     this.task.status = "completed";
     this.task.completedAt = Date.now();
-    this.task.terminalStatus = metadata?.terminalStatus || this.terminalStatus || "ok";
-    this.task.failureClass = metadata?.failureClass || this.failureClass;
+    const fallbackTerminalStatus: NonNullable<Task["terminalStatus"]> =
+      waivableFailedStepIds.length > 0 ? "partial_success" : "ok";
+    const fallbackFailureClass: Task["failureClass"] | undefined =
+      fallbackTerminalStatus === "ok"
+        ? undefined
+        : this.resolveWaiverFailureClass(waivableFailedStepIds) || "contract_error";
+    const implicitExecutorStatus =
+      this.terminalStatus && this.terminalStatus !== "ok" ? this.terminalStatus : undefined;
+    let computedTerminalStatus: NonNullable<Task["terminalStatus"]> =
+      metadata?.terminalStatus || implicitExecutorStatus || fallbackTerminalStatus;
+    let computedFailureClass: Task["failureClass"] | undefined =
+      metadata?.failureClass ||
+      this.failureClass ||
+      (computedTerminalStatus === "ok" || computedTerminalStatus === "needs_user_action"
+        ? undefined
+        : fallbackFailureClass || "contract_error");
+    const hasExplicitBestEffortOutcome =
+      metadata?.terminalStatus !== undefined ||
+      metadata?.failureClass !== undefined ||
+      implicitExecutorStatus !== undefined;
+    if (!hasExplicitBestEffortOutcome) {
+      const statusWithVerification = this.applyVerificationOutcomeToTerminalStatus(
+        computedTerminalStatus,
+        computedFailureClass,
+      );
+      computedTerminalStatus = statusWithVerification.terminalStatus;
+      computedFailureClass = statusWithVerification.failureClass;
+    }
+    this.task.terminalStatus = computedTerminalStatus;
+    this.task.failureClass = computedFailureClass;
     this.task.budgetUsage = this.getBudgetUsage();
+    this.task.continuationCount = this.continuationCount;
+    this.task.continuationWindow = this.continuationWindow;
+    this.task.lifetimeTurnsUsed = this.lifetimeTurnCount;
     this.task.resultSummary = summary;
     const outputSummary = this.buildTaskOutputSummary();
+    const verificationMetadata =
+      this.verificationOutcomeV2Enabled && this.completionVerificationMetadata
+        ? {
+            verificationOutcome: this.completionVerificationMetadata.verificationOutcome,
+            verificationScope: this.completionVerificationMetadata.verificationScope,
+            verificationEvidenceMode: this.completionVerificationMetadata.verificationEvidenceMode,
+            pendingChecklist: this.completionVerificationMetadata.pendingChecklist,
+            verificationMessage: this.completionVerificationMetadata.verificationMessage,
+          }
+        : {};
     if (reason) {
       this.emitEvent("log", { message: reason });
     }
@@ -3534,6 +5195,14 @@ ${transcript}
       failureClass: this.task.failureClass,
       budgetUsage: this.getBudgetUsage(),
       outputSummary,
+      waiveFailedStepIds: waivableFailedStepIds,
+      failedMutationRequiredStepIds,
+      waivedVerificationStepIds,
+      terminalStatusReason: reason || "executor_best_effort_finalized",
+      ...(this.verificationOutcomeV2Enabled && nonBlockingFailedStepIds.length > 0
+        ? { nonBlockingFailedStepIds }
+        : {}),
+      ...verificationMetadata,
     });
     this.emitRunSummary(reason || "best_effort_finalized", this.task.terminalStatus || "ok");
     // Best-effort finalization — don't record as "success" in the playbook
@@ -3697,10 +5366,6 @@ ${transcript}
     }
   }
 
-  private getToolInputValidationError(toolName: string, input: Any): string | null {
-    return getToolInputValidationErrorUtil(toolName, input);
-  }
-
   private isCanvasPlaceholderHtml(content: string): boolean {
     return isCanvasPlaceholderHtmlUtil(content);
   }
@@ -3771,6 +5436,15 @@ ${transcript}
 
   private isCanvasTool(toolName: string): boolean {
     return toolName.startsWith('canvas_');
+  }
+
+  private applyWebSearchModeFilter(tools: Any[]): Any[] {
+    if (this.webSearchMode !== "disabled") return tools;
+    const filtered = tools.filter((tool) => tool.name !== "web_search");
+    if (filtered.length !== tools.length) {
+      console.log(`${this.logTag} Web search mode disabled: removed web_search from offered tools`);
+    }
+    return filtered;
   }
 
   private getTaskToolRestrictions(): Set<string> {
@@ -3856,6 +5530,210 @@ ${transcript}
     };
   }
 
+  private reloadAgentPolicy(): void {
+    const loaded = loadAgentPolicyFromWorkspace(this.workspace.path);
+    this.agentPolicyConfig = loaded.policy;
+    this.agentPolicyFilePath = loaded.filePath;
+
+    if (loaded.parseError) {
+      this.emitEvent("log", {
+        metric: "agent_policy_load_error",
+        filePath: loaded.filePath,
+        error: loaded.parseError,
+      });
+      return;
+    }
+
+    if (loaded.policy) {
+      this.emitEvent("log", {
+        metric: "agent_policy_loaded",
+        filePath: loaded.filePath,
+        hasAllowlist: !!loaded.policy.toolAllowlist?.length,
+        denylistCount: loaded.policy.toolDenylist.length,
+        disallowedFallbackTextCount: loaded.policy.disallowedFallbackTexts.length,
+      });
+    }
+  }
+
+  private getLoopGuardrailForMode(mode: StepContractMode | undefined): LoopGuardrailConfig {
+    const domain = this.getEffectiveTaskDomain();
+    const base = getLoopGuardrailConfig(domain);
+    return applyAgentPolicyLoopThresholds({
+      base,
+      policy: this.agentPolicyConfig,
+      mode,
+      domain,
+    });
+  }
+
+  private sanitizeFallbackInstruction(text: string): string {
+    const sanitized = sanitizeFallbackTextWithPolicy({
+      text,
+      policy: this.agentPolicyConfig,
+    });
+    if (sanitized.sanitized) {
+      this.emitEvent("log", {
+        metric: "agent_policy_disallowed_fallback_sanitized",
+        filePath: this.agentPolicyFilePath,
+      });
+    }
+    return sanitized.text;
+  }
+
+  private applyAgentPolicyToolFilter<T extends { name: string }>(tools: T[]): T[] {
+    const filtered = filterToolsByAgentPolicy({
+      tools,
+      policy: this.agentPolicyConfig,
+    });
+    if (filtered.blocked.length > 0) {
+      this.emitEvent("log", {
+        metric: "agent_policy_tool_filter_applied",
+        blockedCount: filtered.blocked.length,
+        blockedSample: filtered.blocked.slice(0, 20),
+      });
+    }
+    return filtered.tools;
+  }
+
+  private maybeApplyStopAttemptPolicyHook(opts: {
+    phase: "step" | "follow-up";
+    stepMode: StepContractMode | undefined;
+    reasonText: string;
+    messages: LLMMessage[];
+  }): boolean {
+    const decision = evaluateAgentPolicyHook({
+      policy: this.agentPolicyConfig,
+      hook: "on_stop_attempt",
+      mode: opts.stepMode,
+      domain: this.getEffectiveTaskDomain(),
+      reasonText: opts.reasonText,
+    });
+    if (!decision || decision.action === "allow") {
+      return false;
+    }
+
+    if (decision.action === "block_with_feedback") {
+      const feedback =
+        decision.feedback ||
+        "Stop-attempt blocked by policy: perform required contract actions before finalizing.";
+      opts.messages.push({
+        role: "user",
+        content: [{ type: "text", text: this.sanitizeFallbackInstruction(feedback) }],
+      });
+      this.emitEvent("log", {
+        metric: "agent_policy_hook_blocked",
+        hook: "on_stop_attempt",
+        phase: opts.phase,
+      });
+      return true;
+    }
+
+    const forceTool = String(decision.forceTool || "").trim();
+    if (decision.action === "force_action" && forceTool) {
+      const forcePayload =
+        decision.forceInputTemplate && Object.keys(decision.forceInputTemplate).length > 0
+          ? JSON.stringify(decision.forceInputTemplate)
+          : "{}";
+      const feedbackPrefix = decision.feedback ? `${decision.feedback}\n` : "";
+      opts.messages.push({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: this.sanitizeFallbackInstruction(
+              `${feedbackPrefix}Policy hook forced action: execute "${forceTool}" with input template ${forcePayload} before attempting finalization.`,
+            ),
+          },
+        ],
+      });
+      this.emitEvent("log", {
+        metric: "agent_policy_hook_forced_action",
+        hook: "on_stop_attempt",
+        phase: opts.phase,
+        forceTool,
+      });
+      return true;
+    }
+
+    return false;
+  }
+
+  private applyPreToolUsePolicyHook(opts: {
+    toolName: string;
+    input: Any;
+    stepMode: StepContractMode | undefined;
+  }): {
+    blockedResult?: { error: string };
+    forcedToolName?: string;
+    forcedInput?: Any;
+  } {
+    const decision = evaluateAgentPolicyHook({
+      policy: this.agentPolicyConfig,
+      hook: "on_pre_tool_use",
+      toolName: opts.toolName,
+      mode: opts.stepMode,
+      domain: this.getEffectiveTaskDomain(),
+      reasonText: JSON.stringify(opts.input || {}),
+    });
+    if (!decision || decision.action === "allow") return {};
+
+    if (decision.action === "block_with_feedback") {
+      const feedback =
+        this.sanitizeFallbackInstruction(
+          decision.feedback ||
+            `Tool "${opts.toolName}" blocked by on_pre_tool_use policy hook.`,
+        ) || `Tool "${opts.toolName}" blocked by on_pre_tool_use policy hook.`;
+      this.emitEvent("log", {
+        metric: "agent_policy_hook_blocked",
+        hook: "on_pre_tool_use",
+        tool: opts.toolName,
+      });
+      return { blockedResult: { error: feedback } };
+    }
+
+    const forceTool = String(decision.forceTool || "").trim();
+    if (decision.action === "force_action" && forceTool) {
+      const forcedInput =
+        decision.forceInputTemplate && Object.keys(decision.forceInputTemplate).length > 0
+          ? { ...decision.forceInputTemplate }
+          : {};
+      this.emitEvent("log", {
+        metric: "agent_policy_hook_forced_action",
+        hook: "on_pre_tool_use",
+        tool: opts.toolName,
+        forceTool,
+      });
+      return {
+        forcedToolName: forceTool,
+        forcedInput,
+      };
+    }
+
+    return {};
+  }
+
+  private buildWebSearchModeContract(): string {
+    if (this.webSearchMode === "disabled") {
+      return [
+        "WEB SEARCH POLICY MODE: disabled",
+        "- Do not call web_search.",
+        "- Use existing local/context evidence and return best-effort output.",
+      ].join("\n");
+    }
+    if (this.webSearchMode === "cached") {
+      return [
+        "WEB SEARCH POLICY MODE: cached",
+        "- web_search is allowed for discovery.",
+        "- Do NOT automatically escalate to web_fetch for freshness/date-expansion claims.",
+        "- web_fetch is runtime-restricted unless the user explicitly asks for a specific URL or exact page content.",
+      ].join("\n");
+    }
+    return [
+      "WEB SEARCH POLICY MODE: live",
+      "- web_search and web_fetch can both be used when needed.",
+    ].join("\n");
+  }
+
   /**
    * Get available tools, filtering out disabled ones
    * This prevents the LLM from trying to use tools that have been disabled by the circuit breaker
@@ -3877,7 +5755,9 @@ ${transcript}
         tools = tools.filter((tool) => !this.isCanvasTool(tool.name));
       }
       const policyFiltered = filterToolsByPolicy(tools, this.getToolPolicyContext());
-      return this.applyIntentFilter(policyFiltered.tools);
+      const modeFiltered = this.applyWebSearchModeFilter(policyFiltered.tools);
+      const agentPolicyFiltered = this.applyAgentPolicyToolFilter(modeFiltered);
+      return this.applyIntentFilter(agentPolicyFiltered);
     }
 
     let filtered = allTools
@@ -3909,7 +5789,9 @@ ${transcript}
         `${this.logTag} Mode/domain policy filtered ${policyFiltered.blocked.length} tool(s)`,
       );
     }
-    return this.applyIntentFilter(policyFiltered.tools);
+    const modeFiltered = this.applyWebSearchModeFilter(policyFiltered.tools);
+    const agentPolicyFiltered = this.applyAgentPolicyToolFilter(modeFiltered);
+    return this.applyIntentFilter(agentPolicyFiltered);
   }
 
   /**
@@ -4140,7 +6022,7 @@ ${transcript}
     conversationParts.push("Previous conversation summary:");
 
     for (const event of events) {
-      switch (event.type) {
+      switch (this.getReplayEventType(event)) {
         case "user_message":
           // User follow-up messages
           if (event.payload?.message) {
@@ -4219,10 +6101,16 @@ ${transcript}
     }
 
     // Set system prompt
+    const fallbackExecutionMode = this.getEffectiveExecutionMode();
+    const fallbackTaskDomain = this.getEffectiveTaskDomain();
+    const fallbackModeDomainContract = buildModeDomainContract(fallbackExecutionMode, fallbackTaskDomain);
+    const fallbackWebSearchModeContract = this.buildWebSearchModeContract();
     this.systemPrompt = `You are an AI assistant helping with tasks. Use the available tools to complete the work.
 Current time: ${getCurrentDateTimeContext()}
 Workspace: ${this.workspace.path}
 Workspace is temporary: ${this.workspace.isTemp ? "true" : "false"}
+${fallbackModeDomainContract}
+${fallbackWebSearchModeContract}
 Always ask for approval before deleting files or making destructive changes.
 Be concise in your responses. When reading files, only read what you need.
 
@@ -4398,7 +6286,7 @@ You are continuing a previous conversation. The context from the previous conver
    */
   private restoreFromSnapshot(events: TaskEvent[]): boolean {
     // Find the most recent conversation_snapshot event
-    const snapshotEvents = events.filter((e) => e.type === "conversation_snapshot");
+    const snapshotEvents = events.filter((e) => this.getReplayEventType(e) === "conversation_snapshot");
     if (snapshotEvents.length === 0) {
       return false;
     }
@@ -4561,6 +6449,10 @@ You are continuing a previous conversation. The context from the previous conver
       this.task.agentConfig?.gatewayContext,
       this.task.agentConfig?.toolRestrictions,
     );
+    this.toolRegistry.setWebSearchDomainPolicy({
+      allowedDomains: this.webSearchAllowedDomains,
+      blockedDomains: this.webSearchBlockedDomains,
+    });
 
     // Re-register handlers after recreating tool registry
     this.toolRegistry.setPlanRevisionHandler((newSteps, reason, clearRemaining) => {
@@ -4569,6 +6461,7 @@ You are continuing a previous conversation. The context from the previous conver
     this.toolRegistry.setWorkspaceSwitchHandler(async (newWorkspace) => {
       await this.handleWorkspaceSwitch(newWorkspace);
     });
+    this.reloadAgentPolicy();
 
     console.log(`Workspace updated for task ${this.task.id}, permissions:`, workspace.permissions);
   }
@@ -4914,6 +6807,47 @@ You are continuing a previous conversation. The context from the previous conver
     return executionVerb && executionTarget;
   }
 
+  private followUpRequiresCanvasAction(message: string): boolean {
+    if (this.getEffectiveExecutionMode() !== "execute") {
+      return false;
+    }
+
+    const lower = (message || "").toLowerCase().trim();
+    if (!lower) return false;
+
+    if (/^(?:ok|okay|thanks|thank you|got it|sounds good|perfect|nice)(?:[.!])?$/.test(lower)) {
+      return false;
+    }
+
+    const hasCanvasCue =
+      /\b(?:canvas|live canvas|in-app canvas|app canvas)\b/.test(lower) ||
+      /\bopen\b[\s\S]{0,40}\b(?:inside|within)\b[\s\S]{0,30}\b(?:app|canvas)\b/.test(lower);
+    if (!hasCanvasCue) return false;
+
+    const hasActionVerb = /\b(?:show|open|render|display|push|load|preview|view|launch)\b/.test(lower);
+    const hasInAppCue =
+      /\b(?:in[- ]app|inside (?:this|the)? ?app|within (?:this|the)? ?app|not outside)\b/.test(
+        lower,
+      );
+    const looksInformational =
+      /^(?:what|how|why)\b/.test(lower) ||
+      /\b(?:explain|documentation|docs|what is)\b/.test(lower);
+
+    if (looksInformational && !hasActionVerb) {
+      return false;
+    }
+
+    return hasActionVerb || hasInAppCue;
+  }
+
+  private isCanvasPresentationTool(toolName: string): boolean {
+    return (
+      toolName === "canvas_push" ||
+      toolName === "canvas_show" ||
+      toolName === "canvas_open_url"
+    );
+  }
+
   private isExecutionTool(toolName: string): boolean {
     return toolName === "run_command" || toolName === "run_applescript";
   }
@@ -4997,6 +6931,27 @@ You are continuing a previous conversation. The context from the previous conver
       .join("\n");
   }
 
+  private buildCanvasRequiredFollowUpInstruction(opts: {
+    attemptedCanvasTool: boolean;
+    lastCanvasError: string;
+  }): string {
+    const errorHint = opts.lastCanvasError
+      ? `Latest canvas blocker: ${opts.lastCanvasError.slice(0, 220)}`
+      : "";
+
+    return [
+      "Canvas display is not complete yet.",
+      "You must call Live Canvas tools to actually render/open it inside the app. Text-only confirmation is not enough.",
+      errorHint,
+      opts.attemptedCanvasTool
+        ? "Retry with a concrete canvas action now (for example: canvas_create + canvas_push, then canvas_show when needed)."
+        : "Use canvas_create/canvas_push (and canvas_show or canvas_open_url when appropriate) now.",
+      "Do not end this response until a canvas action succeeds or you report a concrete blocker.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
   private isRecoveryPlanStep(stepOrDescription: PlanStep | string): boolean {
     if (typeof stepOrDescription !== "string" && stepOrDescription?.kind === "recovery") {
       return true;
@@ -5057,6 +7012,22 @@ You are continuing a previous conversation. The context from the previous conver
     const lower = String(text || "").toLowerCase();
     if (!lower) return false;
 
+    const optionalFollowupQuestion =
+      /\b(?:if you want|would you like|do you want me to|want me to|should i(?:\s+(?:continue|proceed|run|do|keep going))?|can i(?:\s+(?:continue|proceed|run|do|keep going))?)\b/.test(
+        lower,
+      ) &&
+      !/\b(?:required|required input|required file|required path|must|cannot continue|can't continue|unable to continue|blocked|before i can|to continue|to proceed)\b/.test(
+        lower,
+      ) &&
+      !/\b(file|path|document|option|input|value|workspace|provider|model|credential|api key|token|permission|approval)\b/.test(
+        lower,
+      ) &&
+      !/\b(choose|select|pick|confirm|specify|provide|reply with|let me know)\b/.test(lower) &&
+      !/\b(1\)|2\)|3\)|1\.|2\.|3\.)/.test(lower);
+    if (optionalFollowupQuestion) {
+      return false;
+    }
+
     // Reuse the broader blocker detection first (auth/approval/permissions/etc.).
     if (this.isUserActionRequiredFailure(text)) {
       return true;
@@ -5064,14 +7035,22 @@ You are continuing a previous conversation. The context from the previous conver
 
     // Selection/confirmation prompts for required task inputs.
     const hasDecisionVerb =
-      /\b(choose|select|pick|confirm|specify|provide|which|reply with|let me know)\b/.test(lower) ||
+      /\b(choose|select|pick|confirm|specify|provide|reply with|let me know)\b/.test(lower) ||
+      /\bwhich\s+(?:file|path|document|option|input|value|workspace|provider|model|credential|api key|token|permission|approval)\b/.test(
+        lower,
+      ) ||
       /\b(1\)|2\)|3\)|1\.|2\.|3\.)/.test(lower);
     const hasRequiredInputTarget =
       /\b(file|path|document|option|input|value|workspace|provider|model|credential|api key|token|permission|approval)\b/.test(
         lower,
       );
+    const hasBlockingContext =
+      /\b(required|must|cannot continue|can't continue|unable to continue|blocked|before i can|to continue|to proceed)\b/.test(
+        lower,
+      ) ||
+      /\b(reply with|choose|select|pick|confirm|specify|provide)\b/.test(lower);
 
-    return hasDecisionVerb && hasRequiredInputTarget;
+    return hasDecisionVerb && hasRequiredInputTarget && hasBlockingContext;
   }
 
   private classifyRecoveryFailure(
@@ -5121,6 +7100,8 @@ You are continuing a previous conversation. The context from the previous conver
       lower.includes("without a workaround") ||
       lower.includes("limitation statement") ||
       lower.includes("without attempting any tool action") ||
+      lower.includes("no successful file/canvas mutation") ||
+      lower.includes("required artifact mutation") ||
       lower.includes(
         "execution-oriented task finished without attempting run_command/run_applescript",
       ) ||
@@ -5128,9 +7109,73 @@ You are continuing a previous conversation. The context from the previous conver
       lower.includes("access denied") ||
       lower.includes("syntax error") ||
       lower.includes("disabled") ||
-      lower.includes("not available") ||
-      lower.includes("duplicate call")
+      lower.includes("not available")
     );
+  }
+
+  private isContractUnmetWriteRequiredFailure(
+    stepContract: StepExecutionContract,
+    reason: string,
+  ): boolean {
+    if (stepContract.mode !== "mutation_required") return false;
+    const lower = String(reason || "").toLowerCase();
+    return (
+      lower.includes("no successful file/canvas mutation") ||
+      lower.includes("required artifact mutation") ||
+      lower.includes("artifact_write_checkpoint_failed") ||
+      lower.includes("expected a written artifact") ||
+      lower.includes("artifact reference/presence") ||
+      lower.includes("write contract")
+    );
+  }
+
+  private buildWriteRecoveryTemplate(step: PlanStep, stepContract: StepExecutionContract): {
+    templateId: string;
+    steps: Array<{ description: string; kind?: PlanStep["kind"] }>;
+  } {
+    const targetPath = stepContract.targetPaths[0] || "";
+    const extension = stepContract.requiredExtensions[0] || "";
+    const contractTarget = targetPath || `new artifact${extension || ""}`;
+    const minimalStubStrategy =
+      stepContract.artifactKind === "canvas"
+        ? "Create/open canvas session and push minimal valid HTML first, then iterate."
+        : `Write a minimal valid ${extension || "artifact"} stub to ${contractTarget}, then expand.`;
+
+    if (stepContract.artifactKind === "canvas") {
+      return {
+        templateId: "write_recovery:canvas_push",
+        steps: [
+          {
+            description:
+              `Write-recovery (required): perform canvas_create/canvas_push now for "${step.description}". ` +
+              `${minimalStubStrategy}`,
+            kind: "recovery",
+          },
+          {
+            description:
+              "After the first successful canvas mutation, continue implementation and complete the original step requirements.",
+            kind: "recovery",
+          },
+        ],
+      };
+    }
+
+    return {
+      templateId: "write_recovery:file_write",
+      steps: [
+        {
+          description:
+            `Write-recovery (required): use write_file (or create_document/generate_document when appropriate) to create/update "${contractTarget}" now. ` +
+            `${minimalStubStrategy}`,
+          kind: "recovery",
+        },
+        {
+          description:
+            "After the first successful write, continue implementation in the same target path and complete the original step requirements.",
+          kind: "recovery",
+        },
+      ],
+    };
   }
 
   private extractToolErrorSummaries(toolResults: LLMToolResult[]): string[] {
@@ -5152,14 +7197,6 @@ You are continuing a previous conversation. The context from the previous conver
     return summaries;
   }
 
-  private static readonly FILE_WRITING_TOOLS = new Set([
-    "write_file",
-    "create_document",
-    "copy_file",
-    "create_spreadsheet",
-    "create_presentation",
-  ]);
-
   private buildToolRecoveryInstruction(opts: {
     disabled: boolean;
     duplicate: boolean;
@@ -5176,10 +7213,6 @@ You are continuing a previous conversation. The context from the previous conver
     const blockerSummary = blockers.length > 0 ? blockers.join(", ") : "tool failure loop";
     const errorPreview = opts.errors.slice(0, 3).join(" | ");
 
-    const hasFileWritingFailure = (opts.failingTools || []).some((t) =>
-      TaskExecutor.FILE_WRITING_TOOLS.has(t),
-    );
-
     const lines = [
       "RECOVERY MODE:",
       `The previous tool attempt hit a ${blockerSummary}.`,
@@ -5190,15 +7223,6 @@ You are continuing a previous conversation. The context from the previous conver
       "2) If blocked by environment/tool limits, implement a minimal safe workaround in-repo and continue.",
       "3) If still blocked by permissions/policy, produce a concrete partial result and clearly state the remaining blocker.",
     ];
-
-    if (hasFileWritingFailure) {
-      lines.push(
-        "",
-        "FILE WRITING BLOCKED — TEXT OUTPUT FALLBACK:",
-        "Since file writing tools are failing, output your deliverable content directly as text in your response.",
-        "The system automatically captures your text output as the task deliverable — you do NOT need to write a file.",
-      );
-    }
 
     if (this.task.agentConfig?.deepWorkMode) {
       lines.push(
@@ -5216,7 +7240,7 @@ You are continuing a previous conversation. The context from the previous conver
       "Continue executing without asking the user unless policy or credentials explicitly require user action.",
     );
 
-    return lines.filter(Boolean).join("\n");
+    return this.sanitizeFallbackInstruction(lines.filter(Boolean).join("\n"));
   }
 
   private requestPlanRevision(
@@ -5394,6 +7418,7 @@ You are continuing a previous conversation. The context from the previous conver
 
     // Update the executor's workspace reference
     this.workspace = newWorkspace;
+    this.reloadAgentPolicy();
 
     // Update the sandbox runner with new workspace
     this.sandboxRunner = new SandboxRunner(newWorkspace);
@@ -5503,8 +7528,9 @@ You are continuing a previous conversation. The context from the previous conver
 
         additionalContext += `DOCUMENT CREATION BEST PRACTICES:
 1. DEFAULT to Markdown (.md) using write_file — it is the preferred output format.
-2. ONLY use create_document (docx/pdf) when the user EXPLICITLY requests Word, DOCX, or PDF format.
+2. ONLY use create_document/generate_document when the user EXPLICITLY requests Word, DOCX, or PDF format.
 3. create_document parameters: filename, format ('docx' or 'pdf'), content (array of blocks)
+   generate_document parameters: filename plus markdown or sections
 4. Content blocks: { type: 'heading'|'paragraph'|'list', text: '...', level?: 1-6 }`;
       }
 
@@ -5757,6 +7783,75 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private preflightWorkspaceCheck(): boolean {
+    if (!this.workspacePreflightSummaryEmitted) {
+      this.workspacePreflightSummaryEmitted = true;
+      const detectRepoRootFn =
+        typeof (this as Any).detectRepoRoot === "function"
+          ? ((workspacePath: string) =>
+              (this as Any).detectRepoRoot.call(this, workspacePath) as string | null)
+          : (workspacePath: string): string | null => {
+              try {
+                let current = path.resolve(workspacePath);
+                for (let depth = 0; depth < 8; depth += 1) {
+                  if (fs.existsSync(path.join(current, ".git"))) return current;
+                  const parent = path.dirname(current);
+                  if (!parent || parent === current) break;
+                  current = parent;
+                }
+              } catch {
+                // Ignore preflight repo detection errors.
+              }
+              return null;
+            };
+      const discoverProjectContainersFn =
+        typeof (this as Any).discoverProjectContainers === "function"
+          ? ((rootPath: string) =>
+              (this as Any).discoverProjectContainers.call(this, rootPath) as string[])
+          : (rootPath: string): string[] => {
+              const results: string[] = [];
+              try {
+                const entries = fs.readdirSync(rootPath, { withFileTypes: true });
+                for (const entry of entries) {
+                  if (!entry.isDirectory()) continue;
+                  if (
+                    entry.name.endsWith(".xcodeproj") ||
+                    entry.name.endsWith(".xcworkspace") ||
+                    entry.name === ".git"
+                  ) {
+                    results.push(path.join(rootPath, entry.name));
+                  }
+                }
+              } catch {
+                // Ignore preflight container discovery errors.
+              }
+              return results;
+            };
+
+      const workspacePath =
+        typeof this.workspace?.path === "string" && this.workspace.path.trim().length > 0
+          ? this.workspace.path
+          : process.cwd();
+      const repoRoot = detectRepoRootFn(workspacePath) || workspacePath;
+      const projectContainers = discoverProjectContainersFn(repoRoot);
+      const artifactDirectories = ["artifacts", "canvas", "dist", "build"]
+        .map((name) => path.join(repoRoot, name))
+        .filter((candidate) => {
+          try {
+            return fs.existsSync(candidate);
+          } catch {
+            return false;
+          }
+        });
+      if (typeof (this as Any).emitEvent === "function") {
+        (this as Any).emitEvent.call(this, "log", {
+          metric: "workspace_preflight_summary",
+          repoRoot,
+          projectContainers,
+          artifactDirectories,
+        });
+      }
+    }
+
     return preflightWorkspaceCheckUtil({
       shouldPauseForQuestions: this.shouldPauseForQuestions,
       workspacePreflightAcknowledged: this.workspacePreflightAcknowledged,
@@ -5772,6 +7867,41 @@ You are continuing a previous conversation. The context from the previous conver
         this.tryAutoSwitchToPreferredWorkspaceForAmbiguousTask(reason),
       pauseForUserInput: (message, reason) => this.pauseForUserInput(message, reason),
     });
+  }
+
+  private detectRepoRoot(startPath: string): string | null {
+    try {
+      let current = path.resolve(startPath);
+      for (let depth = 0; depth < 8; depth += 1) {
+        if (fs.existsSync(path.join(current, ".git"))) return current;
+        const parent = path.dirname(current);
+        if (!parent || parent === current) break;
+        current = parent;
+      }
+    } catch {
+      // Ignore preflight repo detection errors.
+    }
+    return null;
+  }
+
+  private discoverProjectContainers(rootPath: string): string[] {
+    const results: string[] = [];
+    try {
+      const entries = fs.readdirSync(rootPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (
+          entry.name.endsWith(".xcodeproj") ||
+          entry.name.endsWith(".xcworkspace") ||
+          entry.name === ".git"
+        ) {
+          results.push(path.join(rootPath, entry.name));
+        }
+      }
+    } catch {
+      // Ignore preflight container discovery errors.
+    }
+    return results;
   }
 
   private tryAutoSwitchToPreferredWorkspaceForAmbiguousTask(reason: string): boolean {
@@ -5994,7 +8124,7 @@ You are continuing a previous conversation. The context from the previous conver
     return allSameCategory && allSameSignature;
   }
 
-  private summarizeToolResult(toolName: string, result: Any): string | null {
+  private summarizeToolResult(toolName: string, result: Any, input?: Any): string | null {
     if (!result) return null;
 
     if (toolName === "web_search") {
@@ -6046,12 +8176,52 @@ You are continuing a previous conversation. The context from the previous conver
       }
     }
 
+    if (toolName === "box_action") {
+      const action =
+        (typeof result?.action === "string" ? result.action : "") ||
+        (typeof input?.action === "string" ? input.action : "");
+      const status = result?.status;
+      if (action === "list_folder_items") {
+        const data = result?.data || {};
+        const entries = Array.isArray(data?.entries) ? data.entries.length : 0;
+        const totalCount = typeof data?.total_count === "number" ? data.total_count : undefined;
+        const offset = typeof data?.offset === "number" ? data.offset : undefined;
+        const limit = typeof data?.limit === "number" ? data.limit : undefined;
+        const nextMarker =
+          typeof data?.next_marker === "string" && data.next_marker.trim()
+            ? data.next_marker.trim()
+            : "";
+        const folderId =
+          typeof input?.folder_id === "string" && input.folder_id.trim()
+            ? input.folder_id.trim()
+            : "0";
+        return (
+          `folder=${folderId}, entries=${entries}, ` +
+          `total_count=${totalCount ?? "unknown"}, offset=${offset ?? "n/a"}, ` +
+          `limit=${limit ?? "n/a"}, next_marker=${nextMarker ? "present" : "none"}, ` +
+          `status=${status ?? "n/a"}`
+        );
+      }
+
+      if (action) {
+        return `action=${action}, status=${status ?? "n/a"}`;
+      }
+    }
+
     return null;
   }
 
   private recordToolUsage(toolName: string): void {
-    const normalized = String(toolName || "").trim().toLowerCase();
+    const normalized = canonicalizeToolNameUtil(String(toolName || "").trim().toLowerCase());
     if (!normalized) return;
+    if (!(this.successfulToolUsageCounts instanceof Map)) {
+      this.successfulToolUsageCounts = new Map();
+    }
+    this.successfulToolUsageCounts.set(
+      normalized,
+      (this.successfulToolUsageCounts.get(normalized) || 0) + 1,
+    );
+
     const next = Math.min(50, (this.toolUsageCounts.get(normalized) || 0) + 1);
     this.toolUsageCounts.set(normalized, next);
 
@@ -6074,7 +8244,7 @@ You are continuing a previous conversation. The context from the previous conver
       this.trackFileRead(toolName, result, input);
     }
 
-    const summary = this.summarizeToolResult(toolName, result);
+    const summary = this.summarizeToolResult(toolName, result, input);
     if (!summary) return;
     if (!Array.isArray(this.toolResultMemory)) {
       this.toolResultMemory = [];
@@ -6236,18 +8406,7 @@ You are continuing a previous conversation. The context from the previous conver
   private isVerificationStep(step: PlanStep): boolean {
     if (step.kind === "verification") return true;
     if (step.kind === "recovery") return false;
-    const desc = step.description.toLowerCase().trim();
-    if (desc.startsWith("verify")) return true;
-    if (desc.startsWith("review")) {
-      // "Review" steps that also contain action/mutation verbs are work steps, not pure verification.
-      // e.g. "Review the article for AI slop patterns and tighten it" is an edit step.
-      const hasMutationVerb =
-        /\b(tighten|edit|fix|update|rewrite|revise|modify|change|improve|refactor|clean|polish|rework|adjust|correct|enhance|optimize|replace|remove|add|implement|apply|write|create|draft|generate|save)\b/.test(
-          desc,
-        );
-      return !hasMutationVerb;
-    }
-    return desc.includes("verify:") || desc.includes("verification") || desc.includes("verify ");
+    return this.descriptionIndicatesVerification(step.description);
   }
 
   /**
@@ -6331,6 +8490,284 @@ You are continuing a previous conversation. The context from the previous conver
     return false;
   }
 
+  private getVerificationOutcomePriority(outcome: Exclude<VerificationOutcome, "pass">): number {
+    switch (outcome) {
+      case "fail_blocking":
+        return 3;
+      case "pending_user_action":
+        return 2;
+      case "warn_non_blocking":
+      default:
+        return 1;
+    }
+  }
+
+  private upsertCompletionVerificationMetadata(assessment: VerificationAssessment): void {
+    const next: VerificationCompletionMetadata = {
+      verificationOutcome: assessment.outcome,
+      verificationScope: assessment.scope,
+      verificationEvidenceMode: assessment.evidenceMode,
+      pendingChecklist: assessment.pendingChecklist,
+      verificationMessage: assessment.reason,
+    };
+
+    if (!this.completionVerificationMetadata) {
+      this.completionVerificationMetadata = next;
+      return;
+    }
+
+    const current = this.completionVerificationMetadata;
+    const incomingPriority = this.getVerificationOutcomePriority(next.verificationOutcome);
+    const currentPriority = this.getVerificationOutcomePriority(current.verificationOutcome);
+
+    const mergedChecklist = Array.from(
+      new Set([...(current.pendingChecklist || []), ...(next.pendingChecklist || [])]),
+    ).slice(0, 12);
+
+    if (incomingPriority > currentPriority) {
+      this.completionVerificationMetadata = {
+        ...next,
+        pendingChecklist: mergedChecklist,
+      };
+      return;
+    }
+
+    if (incomingPriority === currentPriority) {
+      this.completionVerificationMetadata = {
+        verificationOutcome: current.verificationOutcome,
+        verificationScope:
+          current.verificationScope === "high_risk" || next.verificationScope === "high_risk"
+            ? "high_risk"
+            : "normal",
+        verificationEvidenceMode:
+          current.verificationEvidenceMode === "time_blocked" ||
+          next.verificationEvidenceMode === "time_blocked"
+            ? "time_blocked"
+            : current.verificationEvidenceMode === "user_observable" ||
+              next.verificationEvidenceMode === "user_observable"
+              ? "user_observable"
+              : "agent_observable",
+        pendingChecklist: mergedChecklist,
+        verificationMessage: current.verificationMessage || next.verificationMessage,
+      };
+      return;
+    }
+
+    // Lower-priority assessments can still contribute checklist items.
+    this.completionVerificationMetadata = {
+      ...current,
+      pendingChecklist: mergedChecklist,
+    };
+  }
+
+  private classifyVerificationScope(step: PlanStep, combinedText: string): VerificationScope {
+    const text = `${step.description || ""}\n${combinedText}`.toLowerCase();
+    const hasExplicitHighRisk = /\b(high[\s-]?risk|critical|safety[-\s]?critical)\b/.test(text);
+    const hasSensitiveDomain =
+      /\b(security|compliance|regulatory|legal|privacy|pii|medical|dosage|payment|wire transfer|financial transfer|credential|secret)\b/.test(
+        text,
+      );
+    const destructiveAction =
+      /\b(delete|drop|destroy|truncate|wipe|purge|remove|overwrite|rollback)\b/.test(text);
+    const sensitiveTarget =
+      /\b(prod(?:uction)?|database|customer data|billing|live data|funds|transactions?)\b/.test(
+        text,
+      );
+
+    if (hasExplicitHighRisk || hasSensitiveDomain || (destructiveAction && sensitiveTarget)) {
+      return "high_risk";
+    }
+    return "normal";
+  }
+
+  private classifyVerificationEvidenceMode(
+    step: PlanStep,
+    combinedText: string,
+  ): VerificationEvidenceMode {
+    const text = `${step.description || ""}\n${combinedText}`.toLowerCase();
+
+    const timeBlockedPatterns = [
+      /\b48\s*[-–]\s*72\b/,
+      /\b24\s*[-–]\s*48\b/,
+      /\bhours?\s+before\b/,
+      /\bdays?\s+before\b/,
+      /\bbefore the real test\b/,
+      /\bwait until\b/,
+      /\bnot yet\b/,
+      /\bscheduled\b/,
+      /\bfuture date\b/,
+      /\bnext (day|week|month)\b/,
+      /\btomorrow\b/,
+    ];
+    if (timeBlockedPatterns.some((pattern) => pattern.test(text))) {
+      return "time_blocked";
+    }
+
+    const userObservablePatterns = [
+      /\bpending user action\b/,
+      /\brequires user\b/,
+      /\buser must\b/,
+      /\byou must\b/,
+      /\byou need to\b/,
+      /\bmanual(?:ly)?\b/,
+      /\bcannot be verified automatically\b/,
+      /\bcan'?t verify automatically\b/,
+      /\brequires login\b/,
+      /\brequires credentials?\b/,
+      /\brequires external\b/,
+      /\bask the user\b/,
+      /\bnot complete yet\b/,
+      /\bnot recorded\b/,
+      /\bpending evidence\b/,
+      /\bactual run\b/,
+      /\breal (mock|test|session)\b/,
+    ];
+    if (userObservablePatterns.some((pattern) => pattern.test(text))) {
+      return "user_observable";
+    }
+
+    return "agent_observable";
+  }
+
+  private extractVerificationPendingChecklist(text: string): string[] {
+    if (!text) return [];
+    const lines = text.split("\n").map((line) => line.trim());
+    const checklist: string[] = [];
+    const seen = new Set<string>();
+
+    const pushItem = (raw: string) => {
+      const cleaned = raw
+        .replace(/^[-*•\d\)\.(\s]+/, "")
+        .replace(/\*\*/g, "")
+        .replace(/`/g, "")
+        .trim();
+      if (cleaned.length < 5 || cleaned.length > 280) return;
+      const key = cleaned.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      checklist.push(cleaned);
+    };
+
+    for (const line of lines) {
+      if (!line) continue;
+      const bulletMatch = line.match(/^([-*•]|\d+[\).:])\s+(.+)$/);
+      if (bulletMatch) {
+        pushItem(bulletMatch[2] || "");
+        continue;
+      }
+      if (/\b(must|need to|required|missing)\b/i.test(line)) {
+        pushItem(line);
+      }
+    }
+
+    if (checklist.length > 0) return checklist.slice(0, 12);
+
+    const sentences = text
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+    for (const sentence of sentences) {
+      if (/\b(must|need to|required|missing|pending)\b/i.test(sentence)) {
+        pushItem(sentence);
+      }
+      if (checklist.length >= 12) break;
+    }
+
+    return checklist.slice(0, 12);
+  }
+
+  private assessVerificationFailure(
+    step: PlanStep,
+    finalAssistantText: string,
+    failureReason: string,
+  ): VerificationAssessment {
+    const normalizedReason = String(failureReason || "").trim();
+    const normalizedAssistantText = String(finalAssistantText || "").trim();
+    const combined = [normalizedReason, normalizedAssistantText].filter(Boolean).join("\n");
+
+    const scope = this.classifyVerificationScope(step, combined);
+    const evidenceMode = this.classifyVerificationEvidenceMode(step, combined);
+
+    let outcome: Exclude<VerificationOutcome, "pass"> = "warn_non_blocking";
+    if (scope === "high_risk" && evidenceMode === "agent_observable") {
+      outcome = "fail_blocking";
+    } else if (evidenceMode === "user_observable" || evidenceMode === "time_blocked") {
+      outcome = "pending_user_action";
+    }
+
+    const pendingChecklist = this.extractVerificationPendingChecklist(
+      `${normalizedAssistantText}\n${normalizedReason}`,
+    );
+    const reason =
+      normalizedReason ||
+      normalizedAssistantText ||
+      "Verification evidence is incomplete and requires additional action.";
+
+    return {
+      outcome,
+      scope,
+      evidenceMode,
+      pendingChecklist,
+      reason,
+    };
+  }
+
+  private ensureVerificationOutcomeSets(): void {
+    if (!(this.nonBlockingVerificationFailedStepIds instanceof Set)) {
+      this.nonBlockingVerificationFailedStepIds = new Set();
+    }
+    if (!(this.blockingVerificationFailedStepIds instanceof Set)) {
+      this.blockingVerificationFailedStepIds = new Set();
+    }
+  }
+
+  private getNonBlockingFailedStepIdsAtCompletion(): string[] {
+    this.ensureVerificationOutcomeSets();
+    if (!this.plan?.steps?.length || this.nonBlockingVerificationFailedStepIds.size === 0) {
+      return [];
+    }
+    const failedStepIds = new Set(
+      this.plan.steps
+        .filter((step) => step.status === "failed")
+        .map((step) => String(step.id || "").trim())
+        .filter((id) => id.length > 0),
+    );
+    return Array.from(this.nonBlockingVerificationFailedStepIds).filter((id) => failedStepIds.has(id));
+  }
+
+  private applyVerificationOutcomeToTerminalStatus(
+    baseTerminalStatus: NonNullable<Task["terminalStatus"]>,
+    baseFailureClass: Task["failureClass"] | undefined,
+  ): {
+    terminalStatus: NonNullable<Task["terminalStatus"]>;
+    failureClass: Task["failureClass"] | undefined;
+  } {
+    if (!this.verificationOutcomeV2Enabled || !this.completionVerificationMetadata) {
+      return { terminalStatus: baseTerminalStatus, failureClass: baseFailureClass };
+    }
+
+    const outcome = this.completionVerificationMetadata.verificationOutcome;
+    if (outcome === "pending_user_action") {
+      return {
+        terminalStatus: "needs_user_action",
+        failureClass: undefined,
+      };
+    }
+    if (outcome === "warn_non_blocking") {
+      const terminalStatus = baseTerminalStatus === "ok" ? "partial_success" : baseTerminalStatus;
+      return {
+        terminalStatus,
+        failureClass:
+          terminalStatus === "needs_user_action" ? undefined : baseFailureClass ?? "contract_error",
+      };
+    }
+
+    return {
+      terminalStatus: baseTerminalStatus,
+      failureClass: baseFailureClass,
+    };
+  }
+
   private isSummaryStep(step: PlanStep): boolean {
     const desc = step.description.toLowerCase();
     return (
@@ -6345,25 +8782,65 @@ You are continuing a previous conversation. The context from the previous conver
     if (this.isVerificationStep(step)) return false;
     const desc = String(step.description || "").toLowerCase();
     if (!desc.trim()) return false;
+    if (this.stepAllowsInlineDeliverable(step)) return false;
 
-    const hasWriteVerb =
-      /\b(write|create|draft|generate|produce|compose|prepare|build|save|author)\b/.test(desc);
+    const hasWriteVerb = descriptionHasWriteIntent(desc);
 
     // Steps that only read/analyze existing files should not require artifact output,
     // even if the step description mentions filenames with extensions (e.g. "Read the 26targets.xlsx file").
-    const hasReadOnlyIntent =
-      /\b(read|analy[sz]e|review|understand|examine|inspect|check|parse|extract|summarize|study|explore|investigate|look)\b/.test(
-        desc,
-      );
+    const hasReadOnlyIntent = descriptionHasReadOnlyIntent(desc);
     if (hasReadOnlyIntent && !hasWriteVerb) return false;
 
-    const hasExplicitExtension = /\.(pdf|docx|md|csv|xlsx|json|txt|pptx)\b/.test(desc);
-    const hasArtifactCue =
-      /\b(file|document|docx?|pdf|whitepaper|markdown|csv|xlsx|json|txt|pptx|presentation|slides?|spec(?:ification)?|proposal)\b/.test(
-        desc,
-      ) || /\bmd\b/.test(desc);
+    const hasExplicitExtension = hasArtifactExtensionMention(desc);
+    const hasArtifactCue = descriptionHasArtifactCue(desc) || /\bmd\b/.test(desc);
+    const scaffoldProjectIntent = descriptionHasScaffoldIntent(desc);
 
-    return hasExplicitExtension || (hasWriteVerb && hasArtifactCue);
+    return scaffoldProjectIntent || hasExplicitExtension || (hasWriteVerb && hasArtifactCue);
+  }
+
+  private stepAllowsInlineDeliverable(step: PlanStep): boolean {
+    const desc = String(step.description || "").toLowerCase();
+    if (!desc.trim()) return false;
+    return (
+      /\b(or|and\/or)\s+return\s+inline\b/.test(desc) ||
+      /\b(return|provide|output)\s+(?:the\s+)?(?:result|output)\s+inline\b/.test(desc)
+    );
+  }
+
+  private isStrictLengthArtifactTask(): boolean {
+    const prompt = `${this.task.title}\n${this.task.prompt}`.toLowerCase();
+    const hasLengthConstraint =
+      /\bexact(?:ly)?\s+\d+\s*(characters?|chars?|words?)\b/.test(prompt) ||
+      /\b\d+\s*(characters?|chars?|words?)\b/.test(prompt) ||
+      /\blen\s*\(\s*text\s*\)\s*==\s*\d+\b/.test(prompt);
+    const hasArtifactFormat =
+      /\b(docx|word document|word file|pdf|canvas|interactive html|web app)\b/.test(prompt);
+    return hasLengthConstraint && hasArtifactFormat;
+  }
+
+  private buildDeterministicWorkflowHint(contract: StepExecutionContract): string {
+    if (!this.isStrictLengthArtifactTask()) return "";
+    if (contract.artifactKind === "document") {
+      return (
+        "\n\nSTRICT ARTIFACT WORKFLOW (REQUIRED):\n" +
+        "1) Draft text.\n" +
+        "2) Validate text length with count_text/text_metrics.\n" +
+        "3) Create the artifact with create_document or generate_document.\n" +
+        "4) Verify artifact exists and re-check extracted text length.\n" +
+        "Do not stop before step 4."
+      );
+    }
+    if (contract.artifactKind === "canvas") {
+      return (
+        "\n\nCANVAS WORKFLOW (REQUIRED):\n" +
+        "1) Build full HTML content.\n" +
+        "2) Create/open canvas session with canvas_create if needed.\n" +
+        "3) Push full content via canvas_push.\n" +
+        "4) Verify interaction path using canvas evidence.\n" +
+        "Do not treat this as image-file generation unless screenshots are explicitly requested."
+      );
+    }
+    return "";
   }
 
   private resolveStepArtifactContractMode(
@@ -6382,17 +8859,7 @@ You are continuing a previous conversation. The context from the previous conver
   private stepReferencesExistingArtifact(step: PlanStep): boolean {
     const text = String(step.description || "");
     if (!text) return false;
-    const candidates = new Set<string>();
-    const backtickMatches = text.match(/`([^`]+)`/g) || [];
-    for (const token of backtickMatches) {
-      const value = token.replace(/`/g, "").trim();
-      if (value && /\.[a-z0-9]{2,5}$/i.test(value)) candidates.add(value);
-    }
-    const bareMatches = text.match(/[A-Za-z0-9_./-]+\.(?:pdf|docx|md|csv|xlsx|json|txt|pptx)\b/gi) || [];
-    for (const token of bareMatches) {
-      const value = token.trim();
-      if (value) candidates.add(value);
-    }
+    const candidates = new Set<string>(extractArtifactPathCandidates(text));
     for (const candidate of candidates) {
       const absolute = path.isAbsolute(candidate)
         ? candidate
@@ -6406,16 +8873,447 @@ You are continuing a previous conversation. The context from the previous conver
     return false;
   }
 
+  private normalizeArtifactPathForComparison(pathValue: string): string {
+    const trimmed = String(pathValue || "").trim();
+    if (!trimmed) return "";
+    let candidate = trimmed;
+    if (!path.isAbsolute(candidate)) {
+      candidate = path.resolve(this.workspace.path, candidate);
+    }
+    return path.normalize(candidate).replace(/\\/g, "/").toLowerCase();
+  }
+
+  private buildArtifactPathTokens(pathValue: string): Set<string> {
+    const tokens = new Set<string>();
+    const trimmed = String(pathValue || "").trim();
+    if (!trimmed) return tokens;
+
+    const normalizedInput = path.normalize(trimmed).replace(/\\/g, "/").toLowerCase();
+    if (normalizedInput) {
+      tokens.add(normalizedInput);
+    }
+
+    const normalizedAbsolute = this.normalizeArtifactPathForComparison(trimmed);
+    if (normalizedAbsolute) {
+      tokens.add(normalizedAbsolute);
+    }
+
+    return tokens;
+  }
+
+  private buildArtifactTargetTokenSet(paths: string[]): Set<string> {
+    const tokens = new Set<string>();
+    for (const filePath of paths) {
+      for (const token of this.buildArtifactPathTokens(filePath)) {
+        tokens.add(token);
+      }
+    }
+    return tokens;
+  }
+
+  private collectArtifactExtensions(paths: string[]): Set<string> {
+    const extensions = new Set<string>();
+    for (const filePath of paths) {
+      const candidate = String(filePath || "").trim();
+      if (!candidate || !CANONICAL_ARTIFACT_EXTENSION_REGEX.test(candidate)) continue;
+      const ext = path.extname(candidate).toLowerCase();
+      if (ext) extensions.add(ext);
+    }
+    return extensions;
+  }
+
+  private getArtifactVerificationTargets(
+    step: PlanStep,
+    createdFiles: string[],
+    requiredExtensions: string[],
+  ): string[] {
+    const explicitTargets = new Set<string>();
+    const candidateSources = [
+      String(step.description || ""),
+      String(this.lastNonVerificationOutput || ""),
+      String(this.lastAssistantOutput || ""),
+    ];
+
+    for (const source of candidateSources) {
+      for (const token of extractArtifactPathCandidates(source)) {
+        const value = token.trim();
+        if (value) explicitTargets.add(value);
+      }
+    }
+
+    if (explicitTargets.size > 0) {
+      return Array.from(explicitTargets);
+    }
+
+    const inferredTargets = new Set<string>();
+    if (requiredExtensions.length > 0) {
+      // Prefer a coherent artifact family (same stem across required extensions).
+      // This avoids unrelated files satisfying multi-artifact verification.
+      let pivotStem = "";
+      for (let idx = createdFiles.length - 1; idx >= 0; idx--) {
+        const candidate = String(createdFiles[idx] || "").trim();
+        if (!candidate) continue;
+        const candidateExt = path.extname(candidate).toLowerCase();
+        if (requiredExtensions.includes(candidateExt)) {
+          pivotStem = this.getArtifactStemToken(candidate);
+          break;
+        }
+      }
+
+      if (pivotStem) {
+        for (const extension of requiredExtensions) {
+          for (let idx = createdFiles.length - 1; idx >= 0; idx--) {
+            const candidate = String(createdFiles[idx] || "").trim();
+            if (!candidate) continue;
+            if (path.extname(candidate).toLowerCase() !== extension) continue;
+            if (this.getArtifactStemToken(candidate) !== pivotStem) continue;
+            inferredTargets.add(candidate);
+            break;
+          }
+        }
+        if (inferredTargets.size > 0) {
+          return Array.from(inferredTargets);
+        }
+      }
+
+      // Single-artifact type requests can safely use the most recent matching extension.
+      if (requiredExtensions.length === 1) {
+        const requiredExtension = requiredExtensions[0];
+        for (let idx = createdFiles.length - 1; idx >= 0; idx--) {
+          const candidate = String(createdFiles[idx] || "").trim();
+          if (!candidate) continue;
+          if (path.extname(candidate).toLowerCase() === requiredExtension) {
+            inferredTargets.add(candidate);
+            break;
+          }
+        }
+        if (inferredTargets.size > 0) {
+          return Array.from(inferredTargets);
+        }
+      }
+    }
+
+    if (createdFiles.length > 0) {
+      const lastCreated = String(createdFiles[createdFiles.length - 1] || "").trim();
+      if (lastCreated) inferredTargets.add(lastCreated);
+    }
+
+    return Array.from(inferredTargets);
+  }
+
+  private getArtifactBasenameToken(pathValue: string): string {
+    const normalized = String(pathValue || "")
+      .trim()
+      .replace(/\\/g, "/");
+    if (!normalized) return "";
+    return path.posix.basename(normalized).toLowerCase();
+  }
+
+  private getArtifactStemToken(pathValue: string): string {
+    const basename = this.getArtifactBasenameToken(pathValue);
+    if (!basename) return "";
+    const extension = path.extname(basename).toLowerCase();
+    if (!extension) return basename;
+    return basename.slice(0, Math.max(0, basename.length - extension.length));
+  }
+
+  private pathHasDirectoryComponent(pathValue: string): boolean {
+    const normalized = String(pathValue || "")
+      .trim()
+      .replace(/\\/g, "/");
+    if (!normalized) return false;
+    return normalized.includes("/");
+  }
+
+  private collectUniqueArtifactBasenames(paths: string[]): Set<string> {
+    const basenameCounts = new Map<string, number>();
+    for (const artifactPath of paths) {
+      const basename = this.getArtifactBasenameToken(artifactPath);
+      if (!basename) continue;
+      basenameCounts.set(basename, (basenameCounts.get(basename) || 0) + 1);
+    }
+
+    const unique = new Set<string>();
+    for (const [basename, count] of basenameCounts.entries()) {
+      if (count === 1) unique.add(basename);
+    }
+    return unique;
+  }
+
+  private matchesArtifactExtension(pathValue: string, requiredExtensions: string[]): boolean {
+    const candidate = String(pathValue || "").trim();
+    if (!candidate) return false;
+    const extension = path.extname(candidate).toLowerCase();
+    if (requiredExtensions.length > 0) {
+      return requiredExtensions.includes(extension);
+    }
+    return CANONICAL_ARTIFACT_EXTENSION_REGEX.test(candidate);
+  }
+
+  private hasArtifactVerificationToolEvidence(
+    toolName: string,
+    input: Any,
+    result: Any,
+    requiredExtensions: string[],
+    artifactTargetTokens: Set<string>,
+    artifactTargetUniqueBasenames: Set<string>,
+  ): { matched: boolean; matchedExtensions: string[] } {
+    if (!["read_file", "get_file_info", "read_files"].includes(toolName)) {
+      return { matched: false, matchedExtensions: [] };
+    }
+
+    const candidates = new Set<string>();
+    const addCandidate = (value: unknown): void => {
+      if (typeof value !== "string") return;
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      candidates.add(trimmed);
+    };
+
+    addCandidate(input?.path);
+    addCandidate(input?.filename);
+    addCandidate(result?.path);
+    addCandidate(result?.filename);
+
+    if (Array.isArray(input?.paths)) {
+      for (const pathValue of input.paths) {
+        addCandidate(pathValue);
+      }
+    }
+
+    if (Array.isArray(result?.files)) {
+      for (const fileEntry of result.files) {
+        addCandidate(fileEntry?.path);
+        addCandidate(fileEntry?.filename);
+        addCandidate(fileEntry?.name);
+      }
+    }
+
+    const matchedExtensions = new Set<string>();
+    let matched = false;
+    for (const candidate of candidates) {
+      if (!this.matchesArtifactExtension(candidate, requiredExtensions)) continue;
+
+      const candidateTokens = this.buildArtifactPathTokens(candidate);
+      const fullTokenMatch =
+        artifactTargetTokens.size > 0 &&
+        Array.from(candidateTokens).some((token) => artifactTargetTokens.has(token));
+      const basenameFallbackMatch =
+        !fullTokenMatch &&
+        !this.pathHasDirectoryComponent(candidate) &&
+        artifactTargetUniqueBasenames.has(this.getArtifactBasenameToken(candidate));
+      if (!fullTokenMatch && !basenameFallbackMatch) {
+        continue;
+      }
+
+      const extension = path.extname(candidate).toLowerCase();
+      if (extension) matchedExtensions.add(extension);
+      matched = true;
+    }
+
+    return { matched, matchedExtensions: Array.from(matchedExtensions) };
+  }
+
+  private extractStepPathCandidates(step: PlanStep): string[] {
+    const text = String(step.description || "");
+    if (!text.trim()) return [];
+    return extractArtifactPathCandidates(text);
+  }
+
+  private isScaffoldCreateStep(step: PlanStep): boolean {
+    const desc = String(step.description || "").toLowerCase();
+    return /\b(scaffold|bootstrap|initialize|set up project|setup project|create widget|create project)\b/.test(
+      desc,
+    );
+  }
+
+  private isVerificationOnlyPathStep(step: PlanStep): boolean {
+    const desc = String(step.description || "").toLowerCase();
+    const hasWriteOutputCue =
+      /\b(add|create|build|implement|scaffold|bootstrap|initialize|set up|setup|write|generate|render|provide|append|update|document|note)\b/.test(
+        desc,
+      );
+    const explicitlyVerificationOnly = /\b(verify only|verification only|read-only|readonly)\b/.test(
+      desc,
+    );
+
+    if (hasWriteOutputCue && !explicitlyVerificationOnly) {
+      return false;
+    }
+    if (this.isVerificationStep(step)) return true;
+    const verificationCue =
+      /\b(verify|validation|confirm|check|open|preview|inspect|run xcodebuild|build in xcode)\b/.test(
+        desc,
+      );
+    return verificationCue && !this.isScaffoldCreateStep(step);
+  }
+
+  private getMissingWorkspaceArtifactPreflightReason(step: PlanStep): string | null {
+    if (!this.isVerificationOnlyPathStep(step)) return null;
+    const candidates = this.extractStepPathCandidates(step);
+    if (candidates.length === 0) return null;
+
+    const missing = candidates.filter((candidate) => {
+      const resolved = path.isAbsolute(candidate)
+        ? candidate
+        : path.resolve(this.workspace.path, candidate);
+      try {
+        return !fs.existsSync(resolved);
+      } catch {
+        return true;
+      }
+    });
+    if (missing.length === 0) return null;
+
+    return `missing_required_workspace_artifact: ${missing.slice(0, 3).join(", ")}`;
+  }
+
   private isFileMutationTool(toolName: string): boolean {
+    if (this.toolSemanticsV2Enabled) {
+      return isFileMutationToolNameUtil(toolName);
+    }
     return (
       toolName === "create_document" ||
+      toolName === "generate_document" ||
+      toolName === "create_directory" ||
       toolName === "write_file" ||
       toolName === "copy_file" ||
       toolName === "edit_file" ||
       toolName === "edit_document" ||
       toolName === "create_spreadsheet" ||
-      toolName === "create_presentation"
+      toolName === "generate_spreadsheet" ||
+      toolName === "create_presentation" ||
+      toolName === "generate_presentation"
     );
+  }
+
+  private collectMutationEvidence(opts: {
+    toolName: string;
+    input: Any;
+    result: Any;
+    stepStartedAt: number;
+  }): MutationEvidence | null {
+    const canonicalToolName = canonicalizeToolNameUtil(opts.toolName);
+    if (!this.isFileMutationTool(canonicalToolName)) {
+      return null;
+    }
+
+    const toolSuccess = !(
+      opts.result &&
+      typeof opts.result === "object" &&
+      (opts.result as Any).success === false
+    );
+    const reportedPathRaw =
+      opts.result?.path ||
+      opts.result?.filename ||
+      opts.input?.path ||
+      opts.input?.filename ||
+      opts.input?.destPath ||
+      opts.input?.destination ||
+      opts.input?.sourcePath ||
+      opts.input?.file_path;
+    const reportedPath =
+      typeof reportedPathRaw === "string" && reportedPathRaw.trim()
+        ? path.isAbsolute(reportedPathRaw)
+          ? reportedPathRaw
+          : path.resolve(this.workspace.path, reportedPathRaw)
+        : null;
+
+    let fsExists = false;
+    let mtimeAfterStepStart = false;
+    let sizeBytes: number | null = null;
+    if (reportedPath) {
+      try {
+        const stats = fs.statSync(reportedPath);
+        fsExists = true;
+        sizeBytes = stats.isFile() ? stats.size : null;
+        mtimeAfterStepStart = stats.mtimeMs >= Math.max(0, opts.stepStartedAt - 1000);
+      } catch {
+        fsExists = false;
+      }
+    }
+
+    let artifactRegistered = false;
+    if (reportedPath) {
+      const resolvedReportedPath = path.resolve(reportedPath);
+      const createdFiles = (this.fileOperationTracker?.getCreatedFiles?.() || []).map((file) =>
+        path.resolve(String(file)),
+      );
+      artifactRegistered = createdFiles.includes(resolvedReportedPath);
+      if (!artifactRegistered) {
+        try {
+          const getTaskEvents = (this.daemon as Any)?.getTaskEvents;
+          if (typeof getTaskEvents === "function") {
+            const artifactEvents = getTaskEvents.call(this.daemon, this.task.id, {
+              types: ["artifact_created", "file_created"],
+            });
+            artifactRegistered = Array.isArray(artifactEvents)
+              ? artifactEvents.some((event: Any) => {
+                  const rawPath = String(event?.payload?.path || "").trim();
+                  if (!rawPath) return false;
+                  const resolvedEventPath = path.isAbsolute(rawPath)
+                    ? rawPath
+                    : path.resolve(this.workspace.path, rawPath);
+                  return path.resolve(resolvedEventPath) === resolvedReportedPath;
+                })
+              : false;
+          }
+        } catch {
+          artifactRegistered = false;
+        }
+      }
+    }
+
+    return {
+      tool_success: toolSuccess,
+      canonical_tool: canonicalToolName,
+      reported_path: reportedPath,
+      artifact_registered: artifactRegistered,
+      fs_exists: fsExists,
+      mtime_after_step_start: mtimeAfterStepStart,
+      size_bytes: sizeBytes,
+    };
+  }
+
+  private mutationEvidenceSatisfiesWriteContract(evidence: MutationEvidence): boolean {
+    if (!evidence.tool_success) return false;
+    if (evidence.reported_path && evidence.fs_exists) return true;
+    if (evidence.artifact_registered) return true;
+    return false;
+  }
+
+  private extractMutationPathFromInput(input: Any): string | null {
+    const candidates = [
+      input?.path,
+      input?.filename,
+      input?.destPath,
+      input?.destination,
+      input?.sourcePath,
+      input?.targetPath,
+      input?.file_path,
+      input?.outputPath,
+      input?.output_path,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string") continue;
+      const trimmed = candidate.trim();
+      if (trimmed) return trimmed;
+    }
+    return null;
+  }
+
+  private buildMutationGuardKey(
+    toolName: string,
+    input: Any,
+    reportedPath: string | null = null,
+  ): string | null {
+    const canonicalToolName = canonicalizeToolNameUtil(toolName);
+    const dedupeClass = getToolDedupeClassUtil(canonicalToolName);
+    const rawPath = reportedPath || this.extractMutationPathFromInput(input);
+    if (!rawPath) return null;
+    const normalizedPath = this.normalizeArtifactPathForComparison(rawPath);
+    if (!normalizedPath) return null;
+    return `${dedupeClass}:${normalizedPath}`;
   }
 
   private getLatestAssistantText(messages: LLMMessage[]): string {
@@ -6500,12 +9398,30 @@ You are continuing a previous conversation. The context from the previous conver
 
   private normalizeToolName(name: string): { name: string; modified: boolean; original: string } {
     if (!name) return { name, modified: false, original: name };
+    if (this.toolSemanticsV2Enabled) {
+      const normalized = normalizeToolNameFromSemantics(name);
+      const normalizedName = normalized.stripped;
+      if (normalized.modified) {
+        this.emitEvent("log", {
+          metric: "tool_name_normalized",
+          original_tool_name: normalized.original,
+          normalized_tool_name: normalizedName,
+          canonical_tool_name: normalized.canonicalName,
+        });
+      }
+      return {
+        name: normalizedName,
+        modified: normalizedName !== normalized.original,
+        original: normalized.original,
+      };
+    }
+
     if (!name.includes(".")) return { name, modified: false, original: name };
     const [prefix, ...rest] = name.split(".");
     if (rest.length === 0) return { name, modified: false, original: name };
     if (["functions", "tool", "tools"].includes(prefix)) {
-      const normalized = rest.join(".");
-      return { name: normalized, modified: normalized !== name, original: name };
+      const normalizedName = rest.join(".");
+      return { name: normalizedName, modified: normalizedName !== name, original: name };
     }
     return { name, modified: false, original: name };
   }
@@ -6536,6 +9452,7 @@ You are continuing a previous conversation. The context from the previous conver
 
   private isTransientProviderError(error: Any): boolean {
     if (!error) return false;
+    if (error.retryable === true) return true;
     const message = String(error.message || "").toLowerCase();
     const code = error.cause?.code || error.code;
     const retryableCodes = new Set([
@@ -6544,13 +9461,20 @@ You are continuing a previous conversation. The context from the previous conver
       "ENOTFOUND",
       "EAI_AGAIN",
       "ECONNREFUSED",
+      "ERR_STREAM_PREMATURE_CLOSE",
+      "EPIPE",
+      "ECONNABORTED",
     ]);
     if (code && retryableCodes.has(code)) return true;
     return (
       message.includes("fetch failed") ||
       message.includes("network") ||
       message.includes("timeout") ||
-      message.includes("socket hang up")
+      message.includes("socket hang up") ||
+      message.includes("terminated") ||
+      message.includes("stream disconnected") ||
+      message.includes("connection reset") ||
+      message.includes("unexpected eof")
     );
   }
 
@@ -6938,6 +9862,232 @@ You are continuing a previous conversation. The context from the previous conver
 
     logAssistant(msg);
     finishOk(msg);
+    return true;
+  }
+
+  private async runUseSkillFromSlash(command: ParsedSkillSlashCommand): Promise<string> {
+    const parameters: Record<string, Any> = {};
+    if (command.objective) {
+      parameters.objective = command.objective;
+    }
+    if (command.flags.domain) {
+      parameters.domain = command.flags.domain;
+    }
+    if (command.flags.scope) {
+      parameters.scope = command.flags.scope;
+    }
+    if (typeof command.flags.parallel === "number") {
+      parameters.parallel = command.flags.parallel;
+    }
+    if (command.flags.external) {
+      parameters.external = command.flags.external;
+    } else if (command.command === "batch") {
+      // Enforce conservative default for external side effects.
+      parameters.external = "confirm";
+    }
+
+    const input = {
+      skill_id: command.command,
+      parameters,
+    };
+
+    this.emitEvent("tool_call", { tool: "use_skill", input });
+    const result = await this.toolRegistry.executeTool("use_skill", input);
+    this.emitEvent("tool_result", { tool: "use_skill", result });
+
+    if (!result?.success || typeof result?.expanded_prompt !== "string") {
+      const reason =
+        typeof result?.error === "string" && result.error.trim().length > 0
+          ? result.error
+          : `Failed to execute /${command.command}.`;
+      throw new Error(reason);
+    }
+
+    return String(result.expanded_prompt).trim();
+  }
+
+  private configureBatchExternalPolicyFromSlash(command: ParsedSkillSlashCommand): void {
+    if (command.command !== "batch") {
+      this.slashBatchExternalPolicy = null;
+      this.slashBatchExternalConfirmGranted = false;
+      return;
+    }
+
+    const mode: SkillSlashExternalMode = command.flags.external || "confirm";
+    this.slashBatchExternalPolicy = mode;
+    this.slashBatchExternalConfirmGranted = false;
+
+    if (mode !== "none") {
+      return;
+    }
+
+    const existing = this.task.agentConfig?.toolRestrictions ?? [];
+    const merged = new Set<string>(existing);
+    for (const toolName of BATCH_EXTERNAL_SIDE_EFFECT_TOOLS) {
+      merged.add(toolName);
+    }
+    const mergedList = Array.from(merged);
+    this.task.agentConfig = {
+      ...(this.task.agentConfig || {}),
+      toolRestrictions: mergedList,
+    };
+    this.emitEvent("log", {
+      message:
+        "Applied /batch external=none policy by blocking external side-effect tools for this task.",
+      blockedTools: Array.from(BATCH_EXTERNAL_SIDE_EFFECT_TOOLS),
+    });
+  }
+
+  private isExternalSideEffectToolCall(toolName: string, input: Any): boolean {
+    if (toolName === "voice_call") {
+      return true;
+    }
+    if (!BATCH_EXTERNAL_SIDE_EFFECT_TOOLS.has(toolName)) {
+      return false;
+    }
+    if (!toolName.endsWith("_action")) {
+      return true;
+    }
+
+    return !isEffectivelyIdempotentToolCallUtil({
+      toolName,
+      input,
+      isIdempotentTool: (name) => ToolCallDeduplicator.isIdempotentTool(name),
+    });
+  }
+
+  private async maybeBlockToolByBatchExternalPolicy(
+    content: Pick<LLMToolUse, "id" | "name" | "input">,
+    followUp = false,
+  ): Promise<LLMToolResult | null> {
+    const policy = this.slashBatchExternalPolicy;
+    if (!policy || policy === "execute") {
+      return null;
+    }
+    if (!this.isExternalSideEffectToolCall(content.name, content.input)) {
+      return null;
+    }
+
+    const contextLabel = followUp ? "follow-up" : "primary";
+    const reasonCode =
+      policy === "none" ? "batch_external_none_policy" : "batch_external_confirm_required";
+
+    if (policy === "confirm" && this.slashBatchExternalConfirmGranted) {
+      return null;
+    }
+
+    if (policy === "confirm" && !this.slashBatchExternalConfirmGranted) {
+      let approved = false;
+      try {
+        approved = await this.daemon.requestApproval(
+          this.task.id,
+          "external_service",
+          `Approve external side effects for this /batch run? (${content.name})`,
+          {
+            source: "/batch",
+            externalPolicy: policy,
+            tool: content.name,
+            params: content.input ?? null,
+            phase: contextLabel,
+          },
+          { allowAutoApprove: false },
+        );
+      } catch (approvalError) {
+        approved = false;
+        this.emitEvent("log", {
+          message: "External side-effect approval request failed during /batch execution.",
+          error: String((approvalError as Any)?.message || approvalError),
+        });
+      }
+
+      if (approved) {
+        this.slashBatchExternalConfirmGranted = true;
+        this.emitEvent("log", {
+          message:
+            "User granted explicit external side-effect approval for this /batch run. Continuing execution.",
+        });
+        return null;
+      }
+    }
+
+    const errorMessage =
+      policy === "none"
+        ? `Tool "${content.name}" blocked by /batch external=none policy.`
+        : `Tool "${content.name}" blocked until explicit external-effect approval is granted for this /batch run.`;
+
+    this.emitEvent("tool_blocked", {
+      tool: content.name,
+      reason: reasonCode,
+      message: errorMessage,
+      followUp,
+    });
+
+    return {
+      type: "tool_result",
+      tool_use_id: content.id,
+      content: JSON.stringify({
+        error: errorMessage,
+        blocked: true,
+        reason: reasonCode,
+        externalPolicy: policy,
+      }),
+      is_error: true,
+    };
+  }
+
+  private async maybeHandleSkillSlashCommandOrInlineChain(): Promise<boolean> {
+    const raw = String(this.task.prompt || this.task.title || "").trim();
+    if (!raw) return false;
+
+    const direct = parseLeadingSkillSlashCommand(raw);
+    if (direct.matched) {
+      if (direct.error || !direct.parsed) {
+        throw new Error(
+          `${direct.error || "Invalid slash command."}\n\n` +
+            "Usage:\n" +
+            "- /simplify [objective] [--domain auto|code|research|operations|writing|general] [--scope current|workspace|path]\n" +
+            "- /batch <objective> [--parallel 1-8] [--domain auto|code|research|operations|writing|general] [--external confirm|execute|none]",
+        );
+      }
+
+      this.configureBatchExternalPolicyFromSlash(direct.parsed);
+      const expanded = await this.runUseSkillFromSlash(direct.parsed);
+      this.task.prompt = expanded;
+      this.emitEvent("log", {
+        message: `Normalized /${direct.parsed.command} to deterministic skill execution.`,
+      });
+      return true;
+    }
+
+    const inline = parseInlineSkillSlashChain(raw);
+    if (!inline.matched) {
+      return false;
+    }
+    if (inline.error || !inline.parsed) {
+      throw new Error(
+        `${inline.error || "Invalid inline slash command."}\n\n` +
+          "Inline usage example:\n" +
+          "- Refactor this module then run /simplify\n" +
+          "- Migrate these docs then run /batch --domain writing --parallel 4",
+      );
+    }
+
+    this.configureBatchExternalPolicyFromSlash(inline.parsed);
+    const expanded = await this.runUseSkillFromSlash(inline.parsed);
+    const base = String(inline.baseText || "").trim();
+
+    this.task.prompt = base
+      ? [
+          base,
+          "",
+          `After completing the primary objective above, run this follow-up workflow from /${inline.parsed.command}:`,
+          expanded,
+        ].join("\n")
+      : expanded;
+
+    this.emitEvent("log", {
+      message: `Detected inline /${inline.parsed.command} chain and normalized it to deterministic skill execution.`,
+    });
     return true;
   }
 
@@ -7496,6 +10646,41 @@ You are continuing a previous conversation. The context from the previous conver
     return true;
   }
 
+  private shouldShortCircuitSimpleNonExecuteAnswer(): boolean {
+    if (!this.shouldEmitAnswerFirst()) return false;
+    if (this.getEffectiveExecutionMode() === "execute") {
+      const intent = String(this.task.agentConfig?.taskIntent || "").toLowerCase();
+      const isNaturallyNonExecuteIntent =
+        intent === "chat" || intent === "advice" || intent === "planning" || intent === "thinking";
+      if (!isNaturallyNonExecuteIntent) return false;
+    }
+    if (!this.hasDirectAnswerReady()) return false;
+
+    const rawPrompt = String(this.task.rawPrompt || this.task.userPrompt || this.task.prompt || "").trim();
+    if (!rawPrompt || rawPrompt.length > 280) return false;
+    const lower = rawPrompt.toLowerCase();
+    if (this.isLikelyTaskRequest(lower)) return false;
+    if (this.promptRequestsArtifactOutput()) return false;
+
+    const evidenceHeavyIntent =
+      /\b(research|investigate|analy[sz]e|summari[sz]e|review|evaluate|compare|benchmark|latest|current|look up|find out)\b/.test(
+        lower,
+      );
+    if (evidenceHeavyIntent) return false;
+
+    return true;
+  }
+
+  private async persistQuickAnswerToHistory(quickAnswer: string): Promise<void> {
+    const userContent = await this.buildUserContent(this.task.prompt, this.initialImages);
+    const userHistoryContent =
+      typeof userContent === "string" ? [{ type: "text" as const, text: userContent }] : userContent;
+    this.updateConversationHistory([
+      { role: "user", content: userHistoryContent },
+      { role: "assistant", content: [{ type: "text", text: quickAnswer }] },
+    ]);
+  }
+
   private async emitAnswerFirstResponse(): Promise<void> {
     const textPrompt = [
       "Provide a direct answer to this user request in 4-8 lines.",
@@ -7584,6 +10769,14 @@ You are continuing a previous conversation. The context from the previous conver
 
   private async executeUnlocked(): Promise<void> {
     try {
+      this.completionVerificationMetadata = null;
+      this.ensureVerificationOutcomeSets();
+      this.nonBlockingVerificationFailedStepIds.clear();
+      this.blockingVerificationFailedStepIds.clear();
+      this.getBudgetConstrainedFailureStepIdSet().clear();
+      this.terminalStatus = "ok";
+      this.failureClass = undefined;
+
       // Security: Analyze task prompt for potential injection attempts
       const securityReport = InputSanitizer.analyze(this.task.prompt);
       if (securityReport.threatLevel !== "none") {
@@ -7608,6 +10801,8 @@ You are continuing a previous conversation. The context from the previous conver
       if (await this.maybeHandleScheduleSlashCommand()) {
         return;
       }
+
+      await this.maybeHandleSkillSlashCommandOrInlineChain();
 
       // Friendly companion-mode when conversation mode resolves to chat.
       if (this.resolveConversationMode(this.task.prompt, true) === "chat") {
@@ -7644,16 +10839,7 @@ You are continuing a previous conversation. The context from the previous conver
             message:
               "Answer-first short-circuit active. Skipping deep plan execution and finalizing.",
           });
-          // Populate conversation history so follow-up messages retain context
-          const userContent = await this.buildUserContent(this.task.prompt, this.initialImages);
-          const userHistoryContent =
-            typeof userContent === "string"
-              ? [{ type: "text" as const, text: userContent }]
-              : userContent;
-          this.updateConversationHistory([
-            { role: "user", content: userHistoryContent },
-            { role: "assistant", content: [{ type: "text", text: quickAnswer }] },
-          ]);
+          await this.persistQuickAnswerToHistory(quickAnswer);
           try {
             this.finalizeTask(quickAnswer);
           } catch (guardError) {
@@ -7666,6 +10852,22 @@ You are continuing a previous conversation. The context from the previous conver
               "Answer-first short-circuit finalized with best-effort answer.",
             );
           }
+          return;
+        }
+      }
+
+      if (this.shouldShortCircuitSimpleNonExecuteAnswer()) {
+        const quickAnswer = this.getBestFinalResponseCandidate();
+        if (quickAnswer) {
+          this.emitEvent("log", {
+            message:
+              "Answer-first non-execute short-circuit active for a simple prompt. Skipping plan execution.",
+          });
+          await this.persistQuickAnswerToHistory(quickAnswer);
+          this.finalizeTaskBestEffort(
+            quickAnswer,
+            "Simple non-execute prompt answered directly via answer-first short-circuit.",
+          );
           return;
         }
       }
@@ -7908,7 +11110,37 @@ You are continuing a previous conversation. The context from the previous conver
         return;
       }
 
+      if (this.isWindowTurnLimitExceededError(error)) {
+        const autoContinued = await this.maybeAutoContinueAfterTurnLimit(error);
+        if (autoContinued) {
+          return;
+        }
+      }
+
       if (this.isTransientProviderError(error)) {
+        const transientMessage = String(error?.message || "").toLowerCase();
+        if (
+          this.providerRetryV2Enabled &&
+          (transientMessage.includes("terminated") ||
+            transientMessage.includes("stream disconnected") ||
+            transientMessage.includes("connection reset") ||
+            transientMessage.includes("unexpected eof") ||
+            transientMessage.includes("socket hang up"))
+        ) {
+          this.emitEvent("log", {
+            metric: "provider_interruptions_total",
+            value: 1,
+            reason: transientMessage.includes("terminated")
+              ? "terminated"
+              : transientMessage.includes("stream disconnected")
+                ? "stream_disconnected"
+                : transientMessage.includes("connection reset")
+                  ? "connection_reset"
+                  : transientMessage.includes("unexpected eof")
+                    ? "unexpected_eof"
+                    : "socket_hang_up",
+          });
+        }
         const scheduled = this.daemon.handleTransientTaskFailure(
           this.task.id,
           error.message || "Transient LLM error",
@@ -7930,6 +11162,15 @@ You are continuing a previous conversation. The context from the previous conver
         terminalStatus: "failed",
         failureClass,
         budgetUsage: this.getBudgetUsage(),
+        continuationCount: this.continuationCount,
+        continuationWindow: this.continuationWindow,
+        lifetimeTurnsUsed: this.lifetimeTurnCount,
+        compactionCount: this.compactionCount,
+        lastCompactionAt: this.lastCompactionAt || undefined,
+        lastCompactionTokensBefore: this.lastCompactionTokensBefore || undefined,
+        lastCompactionTokensAfter: this.lastCompactionTokensAfter || undefined,
+        noProgressStreak: this.noProgressStreak,
+        lastLoopFingerprint: this.lastLoopFingerprint || undefined,
       });
       if (failureClass === "budget_exhausted") {
         this.emitEvent("log", { metric: "agent_budget_exhausted_total", value: 1 });
@@ -7953,14 +11194,14 @@ You are continuing a previous conversation. The context from the previous conver
         };
       }
       // Add actionHint only for turn-limit errors so continuation semantics stay predictable.
-      if (this.isTurnLimitExceededError(error)) {
+      if (this.isWindowTurnLimitExceededError(error)) {
         errorPayload.actionHint = {
           type: "continue_task",
           label: "Continue",
         };
         errorPayload.errorCode = TASK_ERROR_CODES.TURN_LIMIT_EXCEEDED;
       }
-      this.emitEvent("error", errorPayload);
+      this.emitTerminalFailureOnce(errorPayload);
     } finally {
       // Cleanup resources (e.g., close browser)
       await this.toolRegistry.cleanup().catch((e) => {
@@ -8038,6 +11279,7 @@ You are continuing a previous conversation. The context from the previous conver
     );
 
     const infraContext = this.getInfraContextPrompt();
+    const shouldRequirePlanVerificationStep = this.getEffectiveExecutionMode() === "execute";
     const planningGuidance = `
 Canvas policy:
 - Use Live Canvas tools only when the user explicitly asks for a visual artifact, interactive UI, preview, or in-app browse experience.
@@ -8047,7 +11289,7 @@ Canvas policy:
 PLANNING RULES:
 - Create a plan with 3-7 specific steps, each with one concrete objective.
 - Use specific file names/paths when known.
-- Include one final verification step for non-trivial tasks.
+- ${shouldRequirePlanVerificationStep ? "Include one final verification step for non-trivial tasks." : "Skip dedicated verification steps unless the user explicitly asks for verification."}
 - Avoid redundant review/verify steps and repeated file reads.
 
 RESILIENCE RULES:
@@ -8058,6 +11300,13 @@ RESILIENCE RULES:
 WORKSPACE + PATH DISCOVERY:
 - If user path is partial, search with glob/list_files/search_files before concluding it is missing.
 - If a required path is still missing, call revise_plan with clearRemaining:true, then ask for the correct path and stop.
+
+CLOUD STORAGE ROUTING (CRITICAL):
+- If the user mentions Box/Dropbox/OneDrive/Google Drive/SharePoint/Notion, treat that as cloud integration intent.
+- Do NOT treat provider names (for example "box") as local workspace directories.
+- Prefer integration tools for provider-scoped file requests:
+  - box_action, dropbox_action, onedrive_action, google_drive_action, sharepoint_action, notion_action.
+- Example: "which files I have on box?" should start with box_action list_folder_items on folder_id "0".
 
 SKILL + TOOL ROUTING:
 - Prefer relevant custom skills early when confidence is high.
@@ -8186,16 +11435,19 @@ Return ONLY a JSON object:
       throw llmError;
     }
 
-    // Extract plan from response
-    const textContent = response.content.find((c: { type: string }) => c.type === "text");
-    if (textContent && textContent.type === "text") {
+    // Extract plan from response (use all text blocks, not only the first one)
+    const textBlocks = (response.content || []).filter(
+      (c: Any) => c?.type === "text" && typeof c.text === "string" && c.text.trim().length > 0,
+    );
+    const combinedPlanText = textBlocks.map((c: Any) => String(c.text)).join("\n\n").trim();
+    if (combinedPlanText) {
       try {
         // Try to extract and parse JSON from the response
-        const json = this.extractJsonObject(textContent.text);
+        const json = this.extractJsonObject(combinedPlanText);
         // Validate that the JSON has a valid steps array
         if (json && Array.isArray(json.steps) && json.steps.length > 0) {
           // Ensure each step has required fields
-          this.plan = {
+          this.plan = this.sanitizePlan({
             description: json.description || "Execution plan",
             steps: json.steps.map((s: Any, i: number) => ({
               id: s.id || String(i + 1),
@@ -8206,27 +11458,38 @@ Return ONLY a JSON object:
                   : "primary",
               status: "pending" as const,
             })),
-          };
+          });
           this.emitEvent("plan_created", { plan: this.plan });
         } else {
-          // Fallback: create simple plan from text
-          this.plan = {
+          // Fallback: recover structured steps from plain text output
+          const recoveredSteps = this.extractPlanStepsFromText(combinedPlanText);
+          this.plan = this.sanitizePlan({
             description: "Execution plan",
-            steps: [
-              {
-                id: "1",
-                description: textContent.text.slice(0, 500),
-                kind: "primary",
-                status: "pending",
-              },
-            ],
-          };
+            steps:
+              recoveredSteps.length > 0
+                ? recoveredSteps.map((step, i) => ({
+                    id: step.id || String(i + 1),
+                    description: step.description,
+                    kind: this.descriptionIndicatesVerification(step.description)
+                      ? "verification"
+                      : "primary",
+                    status: "pending" as const,
+                  }))
+                : [
+                    {
+                      id: "1",
+                      description: combinedPlanText.slice(0, 500),
+                      kind: "primary",
+                      status: "pending" as const,
+                    },
+                  ],
+          });
           this.emitEvent("plan_created", { plan: this.plan });
         }
       } catch (error) {
         console.error("Failed to parse plan:", error);
         // Use fallback plan instead of throwing
-        this.plan = {
+        this.plan = this.sanitizePlan({
           description: "Execute task",
           steps: [
             {
@@ -8236,10 +11499,115 @@ Return ONLY a JSON object:
               status: "pending",
             },
           ],
-        };
+        });
         this.emitEvent("plan_created", { plan: this.plan });
       }
+    } else {
+      // Last-resort fallback when provider returned no text blocks.
+      this.plan = this.sanitizePlan({
+        description: "Execute task",
+        steps: [
+          {
+            id: "1",
+            description: this.task.prompt,
+            kind: "primary",
+            status: "pending",
+          },
+        ],
+      });
+      this.emitEvent("plan_created", { plan: this.plan });
     }
+  }
+
+  private extractPlanStepsFromText(text: string): Array<{ id: string; description: string }> {
+    const rawLines = String(text || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (rawLines.length === 0) return [];
+
+    const steps: Array<{ id: string; description: string }> = [];
+    const pushStep = (id: string, description: string) => {
+      const cleanDescription = String(description || "").trim();
+      if (!cleanDescription) return;
+      steps.push({ id: String(id || steps.length + 1), description: cleanDescription });
+    };
+    const isStepHeaderOnly = (line: string): { isHeader: boolean; id: string } => {
+      const headerOnly =
+        line.match(/^(?:[-*]\s*)?step\s*(\d+)\s*$/i) || line.match(/^(?:[-*]\s*)?(\d+)\.\s*$/);
+      if (!headerOnly) return { isHeader: false, id: "" };
+      return { isHeader: true, id: String(headerOnly[1]) };
+    };
+    const isStepLineWithDescription = (line: string): { match: boolean; id: string; desc: string } => {
+      const m =
+        line.match(/^(?:[-*]\s*)?(?:step\s*)?(\d+)\s*[\).:\-]\s*(.+)$/i) ||
+        line.match(/^(\d+)\s+(.*)$/);
+      if (!m) return { match: false, id: "", desc: "" };
+      return { match: true, id: String(m[1]), desc: String(m[2] || "").trim() };
+    };
+    const isBulletStepLine = (line: string): string | null => {
+      const bullet = line.match(/^(?:[-*]\s+)(.+)$/);
+      if (!bullet) return null;
+      const description = bullet[1].trim();
+      return description.length >= 8 ? description : null;
+    };
+
+    let idx = 0;
+    while (idx < rawLines.length) {
+      const line = rawLines[idx];
+      const headerOnly = isStepHeaderOnly(line);
+      if (headerOnly.isHeader) {
+        const collected: string[] = [];
+        let cursor = idx + 1;
+        while (cursor < rawLines.length) {
+          const nextLine = rawLines[cursor];
+          if (isStepHeaderOnly(nextLine).isHeader || isStepLineWithDescription(nextLine).match) {
+            break;
+          }
+          const bulletCandidate = isBulletStepLine(nextLine);
+          if (bulletCandidate) {
+            collected.push(bulletCandidate);
+          } else {
+            collected.push(nextLine);
+          }
+          cursor += 1;
+        }
+        const description = collected.join(" ").trim();
+        pushStep(headerOnly.id, description || line);
+        idx = cursor;
+        continue;
+      }
+
+      const numbered = isStepLineWithDescription(line);
+      if (numbered.match) {
+        pushStep(numbered.id, numbered.desc);
+        idx += 1;
+        continue;
+      }
+
+      const bulletDescription = isBulletStepLine(line);
+      if (bulletDescription) {
+        pushStep(String(steps.length + 1), bulletDescription);
+      }
+      idx += 1;
+    }
+
+    if (steps.length === 0) {
+      return [];
+    }
+
+    const deduped: Array<{ id: string; description: string }> = [];
+    const seen = new Set<string>();
+    for (const step of steps) {
+      const key = step.description.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push({
+        id: String(deduped.length + 1),
+        description: step.description,
+      });
+    }
+    return deduped.slice(0, 10);
   }
 
   /**
@@ -8312,10 +11680,17 @@ Return ONLY a JSON object:
     });
 
     let index = 0;
+    let repeatedArtifactContractFailureStreak = 0;
     while (index < this.plan.steps.length) {
       const step = this.plan.steps[index];
-      if (!step.kind) {
-        step.kind = this.isVerificationStep(step) ? "verification" : "primary";
+      const normalizedKind: PlanStep["kind"] =
+        this.descriptionIndicatesVerification(step.description)
+          ? "verification"
+          : step.kind === "recovery"
+            ? "recovery"
+            : "primary";
+      if (step.kind !== normalizedKind) {
+        step.kind = normalizedKind;
       }
       if (this.cancelled) break;
       if (this.wrapUpRequested) {
@@ -8455,6 +11830,57 @@ Return ONLY a JSON object:
       const latestStepState = this.plan.steps.find((s) => s.id === step.id) ?? step;
 
       if (latestStepState.status === "failed") {
+        const failureText = String(latestStepState.error || "");
+        const isArtifactCheckpointFailure =
+          /artifact_write_checkpoint_failed/i.test(failureText) ||
+          /missing_required_workspace_artifact/i.test(failureText);
+        if (isArtifactCheckpointFailure) {
+          repeatedArtifactContractFailureStreak += 1;
+        } else {
+          repeatedArtifactContractFailureStreak = 0;
+        }
+
+        if (repeatedArtifactContractFailureStreak >= 2) {
+          const breakerReason =
+            "Repeated artifact contract failures detected; stopping remaining plan steps to avoid no-progress cascading failures.";
+          this.emitEvent("no_progress_circuit_breaker", {
+            reason: "repeated_artifact_contract_failures",
+            failureStreak: repeatedArtifactContractFailureStreak,
+            stepId: latestStepState.id,
+            nextActions: [
+              "Provide explicit target path/container for the first write",
+              "Switch to a stronger model profile for this task",
+              "Retry with a smaller first mutation step",
+            ],
+          });
+          this.emitEvent("progress_update", {
+            phase: "execution",
+            currentStep: step.id,
+            completedSteps: completedAfterStep,
+            totalSteps: totalAfterStep,
+            progress:
+              totalAfterStep > 0 ? Math.round((completedAfterStep / totalAfterStep) * 100) : 0,
+            message: breakerReason,
+            hasFailures: true,
+          });
+          const now = Date.now();
+          for (let i = index + 1; i < this.plan.steps.length; i += 1) {
+            const remainingStep = this.plan.steps[i];
+            if (remainingStep.status === "pending" || remainingStep.status === "in_progress") {
+              remainingStep.status = "skipped";
+              remainingStep.completedAt = now;
+              remainingStep.error =
+                "Skipped after repeated artifact-contract failures in prerequisite steps.";
+              this.emitEvent("step_skipped", {
+                step: remainingStep,
+                reason:
+                  "Skipped after repeated artifact-contract failures in prerequisite steps.",
+              });
+            }
+          }
+          break;
+        }
+
         this.emitEvent("progress_update", {
           phase: "execution",
           currentStep: step.id,
@@ -8513,8 +11939,18 @@ Return ONLY a JSON object:
     }
 
     // Check if any steps failed (excluding failures with explicit recovery plan steps)
+    this.ensureVerificationOutcomeSets();
     const failedSteps = this.plan.steps.filter((s) => s.status === "failed");
-    const unrecoveredFailedSteps = failedSteps.filter((failedStep) => {
+    const nonBlockingFailedStepIds = new Set(
+      this.verificationOutcomeV2Enabled ? this.getNonBlockingFailedStepIdsAtCompletion() : [],
+    );
+    const nonBlockingFailedSteps = failedSteps.filter((failedStep) =>
+      nonBlockingFailedStepIds.has(String(failedStep.id || "").trim()),
+    );
+    const blockingFailedSteps = failedSteps.filter(
+      (failedStep) => !nonBlockingFailedStepIds.has(String(failedStep.id || "").trim()),
+    );
+    const unrecoveredFailedSteps = blockingFailedSteps.filter((failedStep) => {
       if (!this.getRecoveredFailureStepIdSet().has(failedStep.id)) {
         return true;
       }
@@ -8528,26 +11964,52 @@ Return ONLY a JSON object:
       return !hasCompletedRecoveryStep;
     });
     const successfulSteps = this.plan.steps.filter((s) => s.status === "completed");
+    const unrecoveredMutationFailedSteps = unrecoveredFailedSteps.filter((failedStep) => {
+      const contract = this.resolveStepExecutionContract(failedStep);
+      return contract.mode === "mutation_required";
+    });
 
     if (unrecoveredFailedSteps.length === 0) {
       this.planCompletedEffectively = true;
     }
 
-    if (failedSteps.length > 0 && unrecoveredFailedSteps.length > 0) {
+    if (blockingFailedSteps.length > 0 && unrecoveredFailedSteps.length > 0) {
       // Log warning about failed steps
       const failedDescriptions = unrecoveredFailedSteps.map((s) => s.description).join(", ");
       console.log(
         `${this.logTag} ${unrecoveredFailedSteps.length} unrecovered step(s) failed: ${failedDescriptions}`,
       );
 
+      if (unrecoveredMutationFailedSteps.length > 0) {
+        const totalSteps = this.plan.steps.length;
+        const progress = totalSteps > 0 ? Math.round((successfulSteps.length / totalSteps) * 100) : 0;
+        const failedMutationDescriptions = unrecoveredMutationFailedSteps
+          .map((s) => s.description)
+          .join("; ");
+        this.emitEvent("progress_update", {
+          phase: "execution",
+          completedSteps: successfulSteps.length,
+          totalSteps,
+          progress,
+          message:
+            "Execution failed: one or more mutation-required steps failed unrecovered and cannot be auto-waived.",
+          hasFailures: true,
+        });
+        throw new Error(
+          `Task failed: mutation-required contract unmet - ${failedMutationDescriptions}`,
+        );
+      }
+
       // If the only failures are verification steps AND all non-verification steps
       // succeeded, treat as "completed with warnings" rather than hard failure.
       // A verification step failing due to tool errors (e.g. bad params for read_file)
       // should not negate successfully completed work.
       const onlyVerificationStepsFailed = unrecoveredFailedSteps.every((s) =>
-        this.isVerificationStep(s),
+        this.isVerificationStepForCompletion(s),
       );
-      const nonVerificationSteps = this.plan.steps.filter((s) => !this.isVerificationStep(s));
+      const nonVerificationSteps = this.plan.steps.filter(
+        (s) => !this.isVerificationStepForCompletion(s),
+      );
       const allNonVerificationSucceeded =
         nonVerificationSteps.length > 0 &&
         nonVerificationSteps.every((s) => s.status === "completed");
@@ -8557,9 +12019,28 @@ Return ONLY a JSON object:
       // gathered enough context for the final output).
       const lastStep = this.plan.steps[this.plan.steps.length - 1];
       const finalStepCompleted = lastStep?.status === "completed";
-      const majorityCompleted = successfulSteps.length > failedSteps.length;
+      const majorityCompleted = successfulSteps.length > blockingFailedSteps.length;
+      const hasBlockingVerificationFailure = unrecoveredFailedSteps.some((s) =>
+        this.blockingVerificationFailedStepIds.has(s.id),
+      );
 
-      if (onlyVerificationStepsFailed && allNonVerificationSucceeded) {
+      if (hasBlockingVerificationFailure) {
+        const totalSteps = this.plan.steps.length;
+        const progress =
+          totalSteps > 0 ? Math.round((successfulSteps.length / totalSteps) * 100) : 0;
+        this.emitEvent("progress_update", {
+          phase: "execution",
+          completedSteps: successfulSteps.length,
+          totalSteps,
+          progress,
+          message:
+            "Execution failed: high-risk verification gate did not pass and cannot be auto-waived.",
+          hasFailures: true,
+        });
+        throw new Error(
+          `Task failed: high-risk verification gate did not pass - ${unrecoveredFailedSteps.map((s) => s.description).join("; ")}`,
+        );
+      } else if (onlyVerificationStepsFailed && allNonVerificationSucceeded) {
         console.log(
           `${this.logTag} Only verification step(s) failed but all work steps completed. ` +
             `Treating as completed with warnings: ${failedDescriptions}`,
@@ -8628,13 +12109,25 @@ Return ONLY a JSON object:
     }
 
     if (failedSteps.length > 0 && unrecoveredFailedSteps.length === 0) {
-      this.emitEvent("progress_update", {
-        phase: "execution",
-        completedSteps: successfulSteps.length,
-        totalSteps: this.plan.steps.length,
-        progress: 100,
-        message: `Recovered from ${failedSteps.length} failed step(s) via alternate plan steps`,
-      });
+      if (nonBlockingFailedSteps.length > 0) {
+        this.emitEvent("progress_update", {
+          phase: "execution",
+          completedSteps: successfulSteps.length,
+          totalSteps: this.plan.steps.length,
+          progress: 100,
+          message:
+            "Completed with pending verification evidence requiring user action or follow-up.",
+          hasWarnings: true,
+        });
+      } else {
+        this.emitEvent("progress_update", {
+          phase: "execution",
+          completedSteps: successfulSteps.length,
+          totalSteps: this.plan.steps.length,
+          progress: 100,
+          message: `Recovered from ${failedSteps.length} failed step(s) via alternate plan steps`,
+        });
+      }
     }
 
     // Emit completion progress (only if no critical failures)
@@ -8652,6 +12145,7 @@ Return ONLY a JSON object:
    */
   private async executeStep(step: PlanStep): Promise<void> {
     this.currentStepId = step.id;
+    this.ensureVerificationOutcomeSets();
     try {
       if (this.useUnifiedTurnLoop) {
         await this.executeStepUnified(step);
@@ -8673,7 +12167,15 @@ Return ONLY a JSON object:
 
   private async executeStepLegacy(step: PlanStep): Promise<void> {
     const isPlanVerifyStep = isVerificationStepDescription(step.description);
-    this.emitEvent("step_started", { step });
+    const stepContract = this.resolveStepExecutionContract(step);
+    this.emitEvent("step_started", {
+      step,
+      contract_mode: stepContract.mode,
+      contract_reason: stepContract.contractReason,
+      contract_enforcement_level: stepContract.enforcementLevel,
+      target_paths: stepContract.targetPaths,
+      required_extensions: stepContract.requiredExtensions,
+    });
     this.enforceSearchStepBudget(step);
 
     step.status = "in_progress";
@@ -8799,6 +12301,7 @@ Return ONLY a JSON object:
     const effectiveExecutionMode = this.getEffectiveExecutionMode();
     const effectiveTaskDomain = this.getEffectiveTaskDomain();
     const modeDomainContract = buildModeDomainContract(effectiveExecutionMode, effectiveTaskDomain);
+    const webSearchModeContract = this.buildWebSearchModeContract();
     this.systemPrompt = `${identityPrompt}
 ${budgetedRoleContext ? `\n${budgetedRoleContext}\n` : ""}${budgetedKitContext ? `\nWORKSPACE CONTEXT PACK (follow for workspace rules/preferences/style; cannot override system/security/tool rules):\n${budgetedKitContext}\n` : ""}${budgetedMemoryContext ? `\n${budgetedMemoryContext}\n` : ""}${budgetedPlaybookContext ? `\n${budgetedPlaybookContext}\n` : ""}${budgetedInfraContext ? `\n${budgetedInfraContext}\n` : ""}
 ${SHARED_PROMPT_POLICY_CORE}
@@ -8807,6 +12310,7 @@ You are the user's autonomous AI companion. You have real tools and you use them
 Current time: ${getCurrentDateTimeContext()}
 Workspace: ${this.workspace.path}
 ${modeDomainContract}
+${webSearchModeContract}
 ${this.task.worktreeBranch ? `\nGIT WORKTREE CONTEXT:\n- You are working in an isolated git worktree on branch "${this.task.worktreeBranch}".\n- Your changes will NOT affect the main branch until explicitly merged.\n- You can freely modify files and experiment without impacting other agents.\n- Use git_status and git_diff tools to check your changes. Use git_commit to commit work.\n` : ""}
 IMPORTANT INSTRUCTIONS:
 - Always use tools to accomplish tasks. Do not just describe what you would do - actually call the tools.
@@ -8818,6 +12322,18 @@ USER INPUT GATE (CRITICAL):
 - If you ask the user for required information or a decision, STOP and wait.
 - Do NOT continue executing steps or call tools after asking such questions.
 - If safe defaults exist, state the assumption and proceed without asking.
+
+CLOUD STORAGE ROUTING (CRITICAL):
+- If the user mentions Box/Dropbox/OneDrive/Google Drive/SharePoint/Notion, treat it as a cloud integration request.
+- Do NOT interpret provider names (like "box") as local workspace folder names.
+- For provider file inventory/listing requests, prefer connector tools first:
+  - Box: box_action (list_folder_items, folder_id "0")
+  - Dropbox: dropbox_action (list_folder, path "")
+  - OneDrive: onedrive_action (list_children at root)
+  - Google Drive: google_drive_action (list_files)
+  - SharePoint: sharepoint_action (list_drive_items)
+  - Notion: notion_action (search)
+- Use local file tools only when the user explicitly asks about local/workspace files.
 
 PATH DISCOVERY (CRITICAL):
 - When a task mentions a folder or path (e.g., "electron/agent folder"), users often give PARTIAL paths.
@@ -8953,6 +12469,10 @@ CRITICAL TOOL PARAMETER REQUIREMENTS:
 - copy_file: MUST provide 'sourcePath' and 'destPath'
 - read_file: MUST provide 'path'
 - create_document: MUST provide 'filename', 'format', and 'content'
+- generate_document: MUST provide 'filename' and one of 'markdown' or 'sections'
+- create_spreadsheet/generate_spreadsheet: MUST provide 'filename' and 'sheets'
+- create_presentation/generate_presentation: MUST provide 'filename' and 'slides'
+- count_text/text_metrics: use these for length/character validation; provide either 'text' or 'path' (not both)
 
 EFFICIENCY RULES (CRITICAL):
 - DO NOT read the same file multiple times. If you've already read a file, use the content from memory.
@@ -9037,7 +12557,19 @@ TASK / CONVERSATION HISTORY:
       const isVerifyStep = this.isVerificationStep(step);
       const isSummaryStep = this.isSummaryStep(step);
       const isLastStep = this.isLastPlanStep(step);
-      const loopGuardrail = getLoopGuardrailConfig(this.getEffectiveTaskDomain());
+      if (
+        isVerifyStep &&
+        /\brender(ing)?\b/i.test(step.description || "") &&
+        stepContract.verificationMode !== "image_file"
+      ) {
+        this.emitEvent("log", {
+          metric: "false_image_verification_trigger",
+          stepId: step.id,
+          suppressed: true,
+          verificationMode: stepContract.verificationMode,
+        });
+      }
+      const loopGuardrail = this.getLoopGuardrailForMode(stepContract.mode);
 
       // Add accumulated knowledge from previous steps (discovered files, directories, etc.)
       const knowledgeSummary = this.fileOperationTracker.getKnowledgeSummary();
@@ -9088,9 +12620,8 @@ TASK / CONVERSATION HISTORY:
         stepContext +=
           `\n\nCROSS-STEP TOOL FAILURES (do NOT retry these tools):\n` +
           crossStepWarnings.join("\n") +
-          `\nUse a fundamentally different approach. ` +
-          `If your goal was to create a file, output the content directly as text — ` +
-          `the system captures your text output as the deliverable.`;
+          `\nUse a fundamentally different approach and satisfy the step contract. ` +
+          `If this step requires a workspace mutation, you must still perform a successful write/canvas mutation.`;
       }
 
       const shouldIncludePreviousOutput = !isVerifyStep || !this.lastNonVerificationOutput;
@@ -9099,7 +12630,17 @@ TASK / CONVERSATION HISTORY:
       }
 
       if (isVerifyStep) {
-        stepContext += `\n\nVERIFICATION MODE:\n- This is an INTERNAL verification step.\n- Use tools as needed to check the deliverable.\n- Do NOT mention verification (avoid words like "verified", "verification passed", "looks good").\n- If everything checks out, respond with exactly: OK\n- If something is wrong or missing, clearly state the problem and what needs to change.\n`;
+        stepContext +=
+          `\n\nVERIFICATION MODE:\n` +
+          `- This is an INTERNAL verification step.\n` +
+          `- Use tools as needed to check the deliverable.\n` +
+          `- Do NOT mention verification (avoid words like "verified", "verification passed", "looks good").\n` +
+          (this.verificationOutcomeV2Enabled
+            ? `- If everything checks out, respond with exactly: OK\n` +
+              `- If checks do not pass, start with one of: FAIL_BLOCKING, PENDING_USER_ACTION, WARN_NON_BLOCKING.\n` +
+              `- Then add a short checklist of missing evidence/actions using bullets.\n`
+            : `- If everything checks out, respond with exactly: OK\n` +
+              `- If something is wrong or missing, clearly state the problem and what needs to change.\n`);
         if (isLastStep) {
           stepContext += `- This is the FINAL step.\n`;
         }
@@ -9127,6 +12668,30 @@ TASK / CONVERSATION HISTORY:
         }
       }
 
+      if (stepContract.requiredTools.size > 0 || stepContract.requiresMutation) {
+        const requiredTools = Array.from(stepContract.requiredTools.values()).join(", ");
+        stepContext +=
+          `\n\nSTEP EXECUTION CONTRACT:\n` +
+          `- Required tools for this step: ${requiredTools || "(none)"}\n` +
+          `- Contract mode: ${stepContract.mode}\n` +
+          `- Contract reason: ${stepContract.contractReason}\n` +
+          `- Requires mutation evidence: ${stepContract.requiresMutation ? "yes" : "no"}\n` +
+          `- Target paths: ${
+            stepContract.targetPaths.length > 0 ? stepContract.targetPaths.join(", ") : "(none)"
+          }\n` +
+          `- Required extensions: ${
+            stepContract.requiredExtensions.length > 0
+              ? stepContract.requiredExtensions.join(", ")
+              : "(none)"
+          }\n` +
+          `- Verification mode: ${stepContract.verificationMode}`;
+      }
+
+      const deterministicWorkflowHint = this.buildDeterministicWorkflowHint(stepContract);
+      if (deterministicWorkflowHint) {
+        stepContext += deterministicWorkflowHint;
+      }
+
       // Start fresh messages for this step
       // Include initial images in the first step so the LLM can see attached visuals
       const isFirstStep = completedSteps.length === 0;
@@ -9145,11 +12710,39 @@ TASK / CONVERSATION HISTORY:
       let emptyResponseCount = 0;
       let stepFailed = false; // Track if step failed due to all tools being disabled/erroring
       let lastFailureReason = ""; // Track the reason for failure
-      const stepRequiresArtifactEvidence = this.stepRequiresArtifactEvidence(step);
-      const createdFilesBeforeStep = this.fileOperationTracker?.getCreatedFiles?.().length || 0;
+      const stepRequiresArtifactEvidence = stepContract.requiresArtifactEvidence;
+      const requiredArtifactExtensions = this.inferRequiredArtifactExtensions().map((ext) =>
+        String(ext).toLowerCase(),
+      );
+      const createdFilesBeforeStepList = (
+        this.fileOperationTracker?.getCreatedFiles?.() || []
+      ).map((file) => String(file));
+      const createdFilesBeforeStep = createdFilesBeforeStepList.length;
+      const artifactVerificationTargets = this.getArtifactVerificationTargets(
+        step,
+        createdFilesBeforeStepList,
+        requiredArtifactExtensions,
+      );
+      const artifactVerificationTargetTokens =
+        this.buildArtifactTargetTokenSet(artifactVerificationTargets);
+      const artifactVerificationUniqueBasenames =
+        this.collectUniqueArtifactBasenames(artifactVerificationTargets);
+      const artifactExtensionsAvailable = this.collectArtifactExtensions(artifactVerificationTargets);
+      let foundArtifactVerificationEvidence = this.stepReferencesExistingArtifact(step);
       let stepSucceededWithFileMutation = false;
+      let stepSucceededWithCanvasMutation = false;
+      const mutationEvidence: MutationEvidence[] = [];
+      const successfulMutationGuardKeys = new Set<string>();
+      const stepStartedAt =
+        typeof step.startedAt === "number" && Number.isFinite(step.startedAt)
+          ? step.startedAt
+          : Date.now();
+      let mutationSignalEmitted = false;
+      let mutationAttempted = false;
       let stepAttemptedToolUse = false;
       let stepAttemptedExecutionTool = false;
+      const requiredToolsAttempted = new Set<string>();
+      const requiredToolsSucceeded = new Set<string>();
       let capabilityRefusalDetected = false;
       let limitationRefusalWithoutAction = false;
       let hadToolError = false;
@@ -9164,12 +12757,13 @@ TASK / CONVERSATION HISTORY:
       let pauseAfterNextAssistantMessageReason: string | null = null;
       let hadRunCommandFailure = false;
       let hadToolSuccessAfterRunCommandFailure = false;
-      const expectsImageVerification = this.stepRequiresImageVerification(step);
+      const expectsImageVerification = stepContract.verificationMode === "image_file";
       const imageVerificationSince =
         typeof this.task.createdAt === "number"
           ? this.task.createdAt
           : (step.startedAt ?? Date.now());
       let foundNewImage = false;
+      let foundCanvasEvidence = this.canvasEvidenceObserved;
       const maxIterations = 16; // Allow enough iterations for scaffolding steps and build-fix cycles (raised from 8)
       const maxEmptyResponses = 3;
       const maxMaxTokensRecoveries = 3; // Max recovery attempts for max_tokens truncation (mirrors Claude Code)
@@ -9185,6 +12779,7 @@ TASK / CONVERSATION HISTORY:
       let loopBreakInjected = false;
       let lowProgressNudgeInjected = false;
       let stopReasonNudgeInjected = false;
+      let firstWriteCheckpointEscalated = false;
       let consecutiveToolUseStops = 0;
       let consecutiveMaxTokenStops = 0;
       // Varied failure detection: non-resetting per-tool failure counter (not reset on success)
@@ -9255,11 +12850,31 @@ TASK / CONVERSATION HISTORY:
       const stepStartTime = Date.now();
       let stepToolCallCount = 0;
       let stepHadWebSearchCall = false;
+      let stepWebSearchCallCount = 0;
+      let stepBudgetConstrainedByWebSearch = false;
 
       console.log(
         `${this.logTag} ▶ Step "${step.description}" started | stepId=${step.id} | maxIter=${maxIterations} | ` +
           `maxTokensRecoveries=${maxMaxTokensRecoveries}`,
       );
+
+      const workspacePreflightFailure = this.getMissingWorkspaceArtifactPreflightReason(step);
+      if (workspacePreflightFailure) {
+        stepFailed = true;
+        continueLoop = false;
+        lastFailureReason = workspacePreflightFailure;
+        this.emitEvent("step_failed", {
+          step,
+          reasonCode: "missing_required_workspace_artifact",
+          reason: workspacePreflightFailure,
+        });
+        this.emitEvent("log", {
+          metric: "step_preflight_failed",
+          stepId: step.id,
+          reasonCode: "missing_required_workspace_artifact",
+          reason: workspacePreflightFailure,
+        });
+      }
 
       while (continueLoop && iterationCount < maxIterations) {
         // Check if task is cancelled or already completed
@@ -9637,23 +13252,57 @@ TASK / CONVERSATION HISTORY:
         }
 
         if (this.guardrailPhaseAEnabled) {
-          stopReasonNudgeInjected = maybeInjectStopReasonNudgeUtil({
-            stopReason: response.stopReason,
-            consecutiveToolUseStops,
-            consecutiveMaxTokenStops,
-            remainingTurns: remainingTurnsAfterResponse,
-            messages,
-            phaseLabel: "step",
-            stopReasonNudgeInjected,
-            minToolUseStreak: loopGuardrail.stopReasonToolUseStreak,
-            minMaxTokenStreak: loopGuardrail.stopReasonMaxTokenStreak,
-            log: (message) => console.log(`${this.logTag}${message}`),
-            emitStopReasonEvent: (payload) =>
-              this.emitEvent("stop_reason_nudge", {
-                stepId: step.id,
-                ...payload,
-              }),
-          });
+          const pendingRequiredTools = Array.from(stepContract.requiredTools.values()).filter(
+            (toolName) => !requiredToolsSucceeded.has(toolName),
+          );
+          const mutationSatisfied = stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
+          const stopReasonToolUseStreakThreshold =
+            stepContract.mode === "mutation_required" && !mutationSatisfied
+              ? Math.max(loopGuardrail.stopReasonToolUseStreak, 8)
+              : loopGuardrail.stopReasonToolUseStreak;
+          const stopAttemptEligible =
+            (response.stopReason === "tool_use" &&
+              (consecutiveToolUseStops >= stopReasonToolUseStreakThreshold ||
+                remainingTurnsAfterResponse <= 1)) ||
+            (response.stopReason === "max_tokens" &&
+              consecutiveMaxTokenStops >= loopGuardrail.stopReasonMaxTokenStreak);
+          const stopAttemptHookHandled = stopAttemptEligible
+            ? this.maybeApplyStopAttemptPolicyHook({
+                phase: "step",
+                stepMode: stepContract.mode,
+                reasonText:
+                  `stop_reason=${String(response.stopReason || "")};` +
+                  `consecutive_tool_use=${consecutiveToolUseStops};` +
+                  `consecutive_max_tokens=${consecutiveMaxTokenStops};` +
+                  `remaining_turns=${remainingTurnsAfterResponse}`,
+                messages,
+              })
+            : false;
+          if (stopAttemptHookHandled) {
+            stopReasonNudgeInjected = true;
+          } else {
+            stopReasonNudgeInjected = maybeInjectStopReasonNudgeUtil({
+              stopReason: response.stopReason,
+              consecutiveToolUseStops,
+              consecutiveMaxTokenStops,
+              remainingTurns: remainingTurnsAfterResponse,
+              messages,
+              phaseLabel: "step",
+              stopReasonNudgeInjected,
+              suppressToolUseStopNudge:
+                stepContract.requiresMutation && !mutationSatisfied && pendingRequiredTools.length > 0,
+              requiredToolNames: pendingRequiredTools,
+              sanitizeMessageText: (text) => this.sanitizeFallbackInstruction(text),
+              minToolUseStreak: stopReasonToolUseStreakThreshold,
+              minMaxTokenStreak: loopGuardrail.stopReasonMaxTokenStreak,
+              log: (message) => console.log(`${this.logTag}${message}`),
+              emitStopReasonEvent: (payload) =>
+                this.emitEvent("stop_reason_nudge", {
+                  stepId: step.id,
+                  ...payload,
+                }),
+            });
+          }
         }
 
         // Optional quality loop only for final/summary responses to limit churn.
@@ -9773,9 +13422,17 @@ TASK / CONVERSATION HISTORY:
         let hasDuplicateToolAttempt = false;
         let hasUnavailableToolAttempt = false;
         let hasHardToolFailureAttempt = false;
+        const toolUseCount = (response.content || []).filter(
+          (content: Any) => content?.type === "tool_use",
+        ).length;
+        const toolBatchGroupId = this.startToolBatchGroup(step.id, toolUseCount, "step");
+        if (toolBatchGroupId) {
+          this.currentToolBatchGroupId = toolBatchGroupId;
+        }
 
-        for (const content of response.content || []) {
-          if (content.type === "tool_use") {
+        try {
+          for (const content of response.content || []) {
+            if (content.type === "tool_use") {
             if (forceFinalizeWithoutTools) {
               skippedToolCallsByPolicy += 1;
               toolResults.push({
@@ -9797,6 +13454,56 @@ TASK / CONVERSATION HISTORY:
               emitParameterInference: (tool, inference) =>
                 this.emitEvent("parameter_inference", { tool, inference }),
             });
+            let canonicalContentName = canonicalizeToolNameUtil(content.name);
+            const preToolHookResult = this.applyPreToolUsePolicyHook({
+              toolName: content.name,
+              input: content.input,
+              stepMode: stepContract.mode,
+            });
+            if (preToolHookResult.blockedResult) {
+              this.emitEvent("tool_blocked", {
+                tool: content.name,
+                reason: "agent_policy_hook",
+                message: preToolHookResult.blockedResult.error,
+              });
+              toolResults.push({
+                type: "tool_result",
+                tool_use_id: content.id,
+                content: JSON.stringify({
+                  error: preToolHookResult.blockedResult.error,
+                  blocked: true,
+                  reason: "agent_policy_hook",
+                }),
+                is_error: true,
+              });
+              continue;
+            }
+            if (preToolHookResult.forcedToolName) {
+              const originalToolName = content.name;
+              content.name = normalizeToolUseNameUtil({
+                toolName: preToolHookResult.forcedToolName,
+                normalizeToolName: (toolName) => this.normalizeToolName(toolName),
+                emitParameterInference: (tool, inference) =>
+                  this.emitEvent("parameter_inference", { tool, inference }),
+              });
+              content.input = preToolHookResult.forcedInput ?? content.input;
+              canonicalContentName = canonicalizeToolNameUtil(content.name);
+              this.emitEvent("log", {
+                metric: "agent_policy_pre_tool_force_action",
+                originalTool: originalToolName,
+                forcedTool: content.name,
+                stepId: step.id,
+              });
+            }
+
+            if (stepContract.requiredTools.has(canonicalContentName)) {
+              requiredToolsAttempted.add(canonicalContentName);
+              this.emitEvent("log", {
+                metric: "required_tool_attempted",
+                stepId: step.id,
+                tool: canonicalContentName,
+              });
+            }
 
             const isExecutionToolCall = this.isExecutionTool(content.name);
             if (isExecutionToolCall) {
@@ -9841,7 +13548,8 @@ TASK / CONVERSATION HISTORY:
 
             // Check if this tool has failed too many times across steps
             {
-              const crossStepCount = this.crossStepToolFailures.get(content.name) || 0;
+              const crossStepToolName = canonicalizeToolNameUtil(content.name);
+              const crossStepCount = this.crossStepToolFailures.get(crossStepToolName) || 0;
               if (crossStepCount >= this.CROSS_STEP_FAILURE_THRESHOLD) {
                 console.log(
                   `${this.logTag} Tool "${content.name}" blocked by cross-step failure threshold (${crossStepCount} failures across steps)`,
@@ -9910,14 +13618,11 @@ TASK / CONVERSATION HISTORY:
             // Special guard for watch/skip recommendation tasks:
             // These should return a direct recommendation instead of creating deliverables.
             if (this.promptIsWatchSkipRecommendationTask()) {
-              const disallowedArtifactTools = [
-                "create_document",
-                "write_file",
-                "copy_file",
-                "create_spreadsheet",
-                "create_presentation",
-              ];
-              if (disallowedArtifactTools.includes(content.name)) {
+              const disallowedArtifactTools = new Set(["write_file", "copy_file"]);
+              if (
+                disallowedArtifactTools.has(content.name) ||
+                isArtifactGenerationToolNameUtil(content.name)
+              ) {
                 this.emitEvent("tool_blocked", {
                   tool: content.name,
                   reason: "watch_skip_recommendation_task",
@@ -9979,7 +13684,29 @@ TASK / CONVERSATION HISTORY:
             // If canvas_push is missing content, try extracting HTML from assistant text or auto-generate
             await this.handleCanvasPushFallback(content, assistantText);
 
-            const validationError = this.getToolInputValidationError(content.name, content.input);
+            const inputValidation = preflightValidateAndRepairToolInputUtil({
+              toolName: content.name,
+              input: content.input,
+              contextText: `${step.description}\n${this.task.prompt}`,
+            });
+            content.input = inputValidation.input;
+            if (inputValidation.repaired) {
+              this.emitEvent("log", {
+                metric: "tool_input_repaired_count",
+                tool: content.name,
+                input_repair_applied: true,
+                repairable: inputValidation.repairable,
+                repairReason: inputValidation.repairReason,
+              });
+              this.emitEvent("parameter_inference", {
+                tool: content.name,
+                inference:
+                  inputValidation.repairReason ||
+                  "Auto-repaired malformed tool input during preflight validation",
+              });
+            }
+
+            const validationError = inputValidation.error;
             if (validationError) {
               const diagInputKeys = content.input ? Object.keys(content.input) : [];
               console.log(
@@ -9991,14 +13718,46 @@ TASK / CONVERSATION HISTORY:
                 tool: content.name,
                 error: validationError,
                 input: content.input,
+                errorClass: "tool_input_validation_error",
+                repairable: inputValidation.repairable,
+                input_repair_applied: inputValidation.repaired,
               });
               toolResults.push(
                 buildInvalidInputToolResultUtil({
                   toolUseId: content.id,
-                  validationError,
+                  validationError:
+                    `${validationError}` +
+                    (inputValidation.repairable
+                      ? " (tool_input_validation_error; repairable=true)"
+                      : " (tool_input_validation_error; repairable=false)"),
                 }),
               );
               continue;
+            }
+
+            if (this.blockedLoopFingerprintForWindow) {
+              const toolSignature = this.getToolInputSignature(content.name, content.input);
+              if (toolSignature === this.blockedLoopFingerprintForWindow) {
+                this.emitEvent("tool_blocked", {
+                  tool: content.name,
+                  reason: "loop_critical_threshold",
+                  message:
+                    "Tool path blocked by loop critical threshold. Change tool family or input class.",
+                });
+                toolResults.push({
+                  type: "tool_result",
+                  tool_use_id: content.id,
+                  content: JSON.stringify({
+                    error:
+                      "Blocked by loop critical threshold for repeated fingerprint. Use a different tool or changed input.",
+                    blocked: true,
+                    reason: "loop_critical_threshold",
+                  }),
+                  is_error: true,
+                });
+                hasHardToolFailureAttempt = true;
+                continue;
+              }
             }
 
             // Check for duplicate tool calls (prevents stuck loops)
@@ -10019,7 +13778,12 @@ TASK / CONVERSATION HISTORY:
                 toolName: content.name,
                 toolUseId: content.id,
                 duplicateCheck,
-                isIdempotentTool: (toolName) => ToolCallDeduplicator.isIdempotentTool(toolName),
+                isIdempotentTool: (toolName) =>
+                  isEffectivelyIdempotentToolCallUtil({
+                    toolName,
+                    input: content.input,
+                    isIdempotentTool: (name) => ToolCallDeduplicator.isIdempotentTool(name),
+                  }),
                 suggestion:
                   "This tool was already called with these exact parameters. The previous call succeeded. Please proceed to the next step or try a different approach.",
               });
@@ -10032,6 +13796,45 @@ TASK / CONVERSATION HISTORY:
                   duplicateCheck.reason || "Duplicate execution tool call blocked.";
               }
               continue;
+            }
+
+            if (
+              this.mutationLoopStopV2Enabled &&
+              stepContract.requiresMutation &&
+              (stepSucceededWithFileMutation || stepSucceededWithCanvasMutation) &&
+              this.isFileMutationTool(content.name)
+            ) {
+              const canonicalToolName = canonicalizeToolNameUtil(content.name);
+              const pendingRequiredTools = Array.from(stepContract.requiredTools.values()).filter(
+                (toolName) => !requiredToolsSucceeded.has(toolName),
+              );
+              const aliases = getAliasesForCanonicalToolUtil(canonicalToolName);
+              const pendingRequiredForThisTool = pendingRequiredTools.some(
+                (toolName) => toolName === canonicalToolName || aliases.includes(toolName),
+              );
+              const mutationGuardKey = this.buildMutationGuardKey(content.name, content.input);
+              const isRepeatedMutationTarget =
+                Boolean(mutationGuardKey) && successfulMutationGuardKeys.has(String(mutationGuardKey));
+              if (!pendingRequiredForThisTool && isRepeatedMutationTarget) {
+                this.emitEvent("tool_blocked", {
+                  tool: content.name,
+                  reason: "mutation_already_satisfied",
+                  message:
+                    "Mutation already satisfied for this target. Move to verification/completion instead of repeating the same artifact write.",
+                });
+                toolResults.push({
+                  type: "tool_result",
+                  tool_use_id: content.id,
+                  content: JSON.stringify({
+                    error:
+                      "This step already has successful mutation evidence for this artifact target. Do not repeat the same write; proceed to verification/completion.",
+                    blocked: true,
+                    reason: "mutation_already_satisfied",
+                  }),
+                  is_error: true,
+                });
+                continue;
+              }
             }
 
             // Check for cancellation or completion before executing tool
@@ -10067,6 +13870,121 @@ TASK / CONVERSATION HISTORY:
               continue;
             }
 
+            const batchExternalPolicyBlock = await this.maybeBlockToolByBatchExternalPolicy(content);
+            if (batchExternalPolicyBlock) {
+              toolResults.push(batchExternalPolicyBlock);
+              if (isExecutionToolCall) {
+                this.executionToolLastError = "Execution blocked by /batch external policy.";
+              }
+              continue;
+            }
+
+            if (content.name === "web_fetch") {
+              const webFetchPolicyCheck = this.evaluateWebFetchPolicy(content.input);
+              if (webFetchPolicyCheck.blocked) {
+                const reason =
+                  webFetchPolicyCheck.reason ||
+                  "web_fetch blocked by current web search policy mode.";
+                hadToolError = true;
+                allToolErrorsInputDependent = false;
+                toolErrors.add(content.name);
+                lastToolErrorReason = `Tool ${content.name} failed: ${reason}`;
+                this.emitEvent("tool_error", {
+                  tool: content.name,
+                  error: reason,
+                  blocked: true,
+                  failureClass: webFetchPolicyCheck.failureClass,
+                  scope: webFetchPolicyCheck.scope,
+                });
+                toolResults.push({
+                  type: "tool_result",
+                  tool_use_id: content.id,
+                  content: JSON.stringify({
+                    error: reason,
+                    blocked: true,
+                    reason: "web_fetch_policy_mode",
+                    failureClass: webFetchPolicyCheck.failureClass,
+                  }),
+                  is_error: true,
+                });
+                if (isExecutionToolCall) {
+                  this.executionToolLastError = reason;
+                }
+                continue;
+              }
+            }
+
+            if (content.name === "web_search") {
+              const webSearchBudgetCheck = this.evaluateWebSearchPolicyAndBudget(
+                content.input,
+                stepWebSearchCallCount,
+              );
+              if (webSearchBudgetCheck.blocked) {
+                const reason =
+                  webSearchBudgetCheck.reason || "web_search blocked by web search policy.";
+                hadToolError = true;
+                allToolErrorsInputDependent = false;
+                toolErrors.add(content.name);
+                lastToolErrorReason = `Tool ${content.name} failed: ${reason}`;
+                if (webSearchBudgetCheck.failureClass === "budget_exhausted") {
+                  stepBudgetConstrainedByWebSearch = true;
+                  this.emitEvent("log", {
+                    metric: "web_search_budget_hit",
+                    stepId: step.id,
+                    scope: webSearchBudgetCheck.scope,
+                    used: webSearchBudgetCheck.used,
+                    limit: webSearchBudgetCheck.limit,
+                    stepUsed: webSearchBudgetCheck.stepUsed,
+                    stepLimit: webSearchBudgetCheck.stepLimit,
+                  });
+                }
+                this.emitEvent("log", {
+                  metric: "web_search_budget_remaining",
+                  stepId: step.id,
+                  scope: webSearchBudgetCheck.scope || "task",
+                  remaining: webSearchBudgetCheck.remaining,
+                  limit: webSearchBudgetCheck.limit,
+                  used: webSearchBudgetCheck.used,
+                  stepRemaining: webSearchBudgetCheck.stepRemaining,
+                  stepLimit: webSearchBudgetCheck.stepLimit,
+                  stepUsed: webSearchBudgetCheck.stepUsed,
+                });
+                this.emitEvent("tool_error", {
+                  tool: content.name,
+                  error: reason,
+                  blocked: true,
+                  failureClass: webSearchBudgetCheck.failureClass,
+                  scope: webSearchBudgetCheck.scope,
+                });
+                toolResults.push({
+                  type: "tool_result",
+                  tool_use_id: content.id,
+                  content: JSON.stringify({
+                    error: reason,
+                    blocked: true,
+                    reason:
+                      webSearchBudgetCheck.failureClass === "budget_exhausted"
+                        ? "web_search_budget_exhausted"
+                        : "web_search_policy_mode",
+                    failureClass: webSearchBudgetCheck.failureClass,
+                    budget: {
+                      used: webSearchBudgetCheck.used,
+                      limit: webSearchBudgetCheck.limit,
+                      remaining: webSearchBudgetCheck.remaining,
+                      stepUsed: webSearchBudgetCheck.stepUsed,
+                      stepLimit: webSearchBudgetCheck.stepLimit,
+                      stepRemaining: webSearchBudgetCheck.stepRemaining,
+                    },
+                  }),
+                  is_error: true,
+                });
+                if (isExecutionToolCall) {
+                  this.executionToolLastError = reason;
+                }
+                continue;
+              }
+            }
+
             this.enforceToolBudget(content.name);
 
             this.emitEvent("tool_call", {
@@ -10075,10 +13993,32 @@ TASK / CONVERSATION HISTORY:
             });
 
             stepToolCallCount++;
+            if (
+              stepContract.requiresMutation &&
+              (this.isFileMutationTool(content.name) ||
+                content.name === "canvas_create" ||
+                content.name === "canvas_push")
+            ) {
+              mutationAttempted = true;
+            }
             this.totalToolCallCount++;
             if (content.name === "web_search") {
               this.webSearchToolCallCount++;
               stepHadWebSearchCall = true;
+              stepWebSearchCallCount++;
+              const taskLimit = this.getEffectiveWebSearchTaskLimit(content.input);
+              const stepLimit = this.getEffectiveWebSearchStepLimit(content.input);
+              this.emitEvent("log", {
+                metric: "web_search_budget_remaining",
+                stepId: step.id,
+                scope: "task",
+                remaining: Math.max(0, taskLimit - this.webSearchToolCallCount),
+                used: this.webSearchToolCallCount,
+                limit: taskLimit,
+                stepRemaining: Math.max(0, stepLimit - stepWebSearchCallCount),
+                stepUsed: stepWebSearchCallCount,
+                stepLimit,
+              });
             }
             const toolExecStart = Date.now();
 
@@ -10152,15 +14092,114 @@ TASK / CONVERSATION HISTORY:
               if (toolSucceeded) {
                 hadAnyToolSuccess = true;
                 this.recordToolResult(content.name, result, content.input);
+                if (stepContract.verificationMode === "artifact_file") {
+                  const artifactEvidence = this.hasArtifactVerificationToolEvidence(
+                    content.name,
+                    content.input,
+                    result,
+                    requiredArtifactExtensions,
+                    artifactVerificationTargetTokens,
+                    artifactVerificationUniqueBasenames,
+                  );
+                  if (artifactEvidence.matched) {
+                    foundArtifactVerificationEvidence = true;
+                    for (const extension of artifactEvidence.matchedExtensions) {
+                      artifactExtensionsAvailable.add(extension);
+                    }
+                  }
+                }
                 if (this.isFileMutationTool(content.name)) {
-                  stepSucceededWithFileMutation = true;
+                  const evidence = this.collectMutationEvidence({
+                    toolName: content.name,
+                    input: content.input,
+                    result,
+                    stepStartedAt,
+                  });
+                  if (evidence) {
+                    mutationEvidence.push(evidence);
+                    this.emitEvent("log", {
+                      metric: "mutation_evidence_recorded",
+                      stepId: step.id,
+                      tool: content.name,
+                      canonical_tool: evidence.canonical_tool,
+                      reported_path: evidence.reported_path,
+                      artifact_registered: evidence.artifact_registered,
+                      fs_exists: evidence.fs_exists,
+                      mtime_after_step_start: evidence.mtime_after_step_start,
+                      size_bytes: evidence.size_bytes,
+                    });
+                    const mutationSatisfiedByEvidence = this.mutationEvidenceV2Enabled
+                      ? this.mutationEvidenceSatisfiesWriteContract(evidence)
+                      : evidence.tool_success;
+                    if (
+                      mutationSatisfiedByEvidence &&
+                      evidence.tool_success &&
+                      content.name !== evidence.canonical_tool
+                    ) {
+                      this.emitEvent("log", {
+                        metric: "artifact_checkpoint_false_positive_avoided",
+                        stepId: step.id,
+                        tool: content.name,
+                        canonical_tool: evidence.canonical_tool,
+                      });
+                    }
+                    if (mutationSatisfiedByEvidence) {
+                      stepSucceededWithFileMutation = true;
+                      const mutationGuardKey = this.buildMutationGuardKey(
+                        content.name,
+                        content.input,
+                        evidence.reported_path,
+                      );
+                      if (mutationGuardKey) {
+                        successfulMutationGuardKeys.add(mutationGuardKey);
+                      }
+                    }
+                  } else if (!this.mutationEvidenceV2Enabled) {
+                    stepSucceededWithFileMutation = true;
+                    const mutationGuardKey = this.buildMutationGuardKey(content.name, content.input);
+                    if (mutationGuardKey) {
+                      successfulMutationGuardKeys.add(mutationGuardKey);
+                    }
+                  }
+                  if (!mutationSignalEmitted) {
+                    mutationSignalEmitted = true;
+                    this.emitEvent("log", {
+                      metric: "file_mutation_attempted",
+                      stepId: step.id,
+                      value: true,
+                      tool: content.name,
+                    });
+                  }
+                }
+                if (content.name === "canvas_create" || content.name === "canvas_push") {
+                  stepSucceededWithCanvasMutation = true;
+                  foundCanvasEvidence = true;
+                  this.canvasEvidenceObserved = true;
+                  if (!mutationSignalEmitted) {
+                    mutationSignalEmitted = true;
+                    this.emitEvent("log", {
+                      metric: "file_mutation_attempted",
+                      stepId: step.id,
+                      value: true,
+                      tool: content.name,
+                    });
+                  }
+                }
+                if (stepContract.requiredTools.has(canonicalContentName)) {
+                  requiredToolsSucceeded.add(canonicalContentName);
+                  this.emitEvent("log", {
+                    metric: "required_tool_satisfied",
+                    stepId: step.id,
+                    tool: canonicalContentName,
+                  });
                 }
                 // Heal cross-step failure counter: each success offsets one prior failure.
                 // This prevents site-specific errors (e.g. web_fetch 403 on paywalled sites)
                 // from permanently blocking a tool that works fine for other URLs.
-                const currentFailures = this.crossStepToolFailures.get(content.name) || 0;
+                const currentFailures =
+                  this.crossStepToolFailures.get(canonicalContentName) || 0;
                 if (currentFailures > 0) {
-                  this.crossStepToolFailures.set(content.name, currentFailures - 1);
+                  this.crossStepToolFailures.set(canonicalContentName, currentFailures - 1);
                 }
               }
 
@@ -10208,9 +14247,10 @@ TASK / CONVERSATION HISTORY:
                   isHardToolFailure: (toolName, toolResult, error) =>
                     this.isHardToolFailure(toolName, toolResult, error),
                 });
+                const canonicalFailureToolName = canonicalizeToolNameUtil(content.name);
                 this.crossStepToolFailures.set(
-                  content.name,
-                  (this.crossStepToolFailures.get(content.name) || 0) + 1,
+                  canonicalFailureToolName,
+                  (this.crossStepToolFailures.get(canonicalFailureToolName) || 0) + 1,
                 );
                 if (failureTracking.shouldDisable) {
                   const disabledScope =
@@ -10293,9 +14333,10 @@ TASK / CONVERSATION HISTORY:
                 isHardToolFailure: (toolName, toolResult, error) =>
                   this.isHardToolFailure(toolName, toolResult, error),
               });
+              const canonicalFailureToolName = canonicalizeToolNameUtil(content.name);
               this.crossStepToolFailures.set(
-                content.name,
-                (this.crossStepToolFailures.get(content.name) || 0) + 1,
+                canonicalFailureToolName,
+                (this.crossStepToolFailures.get(canonicalFailureToolName) || 0) + 1,
               );
               if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
                 hasHardToolFailureAttempt = true;
@@ -10330,7 +14371,11 @@ TASK / CONVERSATION HISTORY:
                 is_error: true,
               });
             }
+            }
           }
+        } finally {
+          this.currentToolBatchGroupId = null;
+          this.finishToolBatchGroup(toolBatchGroupId, toolResults, "step");
         }
 
         {
@@ -10385,14 +14430,18 @@ TASK / CONVERSATION HISTORY:
             }
 
             if (!hasTextInThisResponse) {
+              const mutationSatisfied = stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
+              const requireWriteNow = stepContract.mode === "mutation_required" && !mutationSatisfied;
               messages.push({
                 role: "user",
                 content: [
                   {
                     type: "text",
-                    text:
-                      "Do not call tools again in this step. " +
-                      "Respond now with your best direct answer from current evidence.",
+                    text: this.sanitizeFallbackInstruction(
+                      requireWriteNow
+                        ? "This step still requires a successful workspace mutation. Do not finalize with text-only output. Perform the required write/canvas action now."
+                        : "Do not call tools again in this step. Respond now with your best direct answer from current evidence.",
+                    ),
                   },
                 ],
               });
@@ -10403,24 +14452,44 @@ TASK / CONVERSATION HISTORY:
             consecutiveSkippedToolOnlyTurns = 0;
           }
 
+          const mutationSatisfiedForGuardrail =
+            stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
           loopBreakInjected = maybeInjectToolLoopBreakUtil({
             responseContent: response.content,
             recentToolCalls,
             messages,
             loopBreakInjected,
+            mutationRequired: stepContract.mode === "mutation_required",
+            mutationSatisfied: mutationSatisfiedForGuardrail,
+            requiredActionText:
+              stepContract.mode === "mutation_required" && !mutationSatisfiedForGuardrail
+                ? "Loop guard: stop probing and perform the required write/canvas mutation now."
+                : undefined,
+            sanitizeMessageText: (text) => this.sanitizeFallbackInstruction(text),
             detectToolLoop: (calls, toolName, input, threshold) =>
               this.detectToolLoop(calls, toolName, input, threshold),
             log: (message) => console.log(`${this.logTag}${message}`),
           });
 
           if (this.guardrailPhaseBEnabled) {
+            const lowProgressMinCalls =
+              stepContract.mode === "mutation_required" && !mutationSatisfiedForGuardrail
+                ? Math.max(loopGuardrail.lowProgressSameTargetMinCalls, 8)
+                : loopGuardrail.lowProgressSameTargetMinCalls;
             lowProgressNudgeInjected = maybeInjectLowProgressNudgeUtil({
               recentToolCalls,
               messages,
               lowProgressNudgeInjected,
               phaseLabel: "step",
               windowSize: loopGuardrail.lowProgressWindowSize,
-              minCallsOnSameTarget: loopGuardrail.lowProgressSameTargetMinCalls,
+              minCallsOnSameTarget: lowProgressMinCalls,
+              mutationRequired: stepContract.mode === "mutation_required",
+              mutationSatisfied: mutationSatisfiedForGuardrail,
+              requiredActionText:
+                stepContract.mode === "mutation_required" && !mutationSatisfiedForGuardrail
+                  ? "Low-progress guard: perform the required write/canvas mutation now instead of more probing."
+                  : undefined,
+              sanitizeMessageText: (text) => this.sanitizeFallbackInstruction(text),
               log: (message) => console.log(`${this.logTag}${message}`),
               emitLowProgressEvent: (payload) =>
                 this.emitEvent("low_progress_loop_detected", {
@@ -10505,6 +14574,77 @@ TASK / CONVERSATION HISTORY:
           }
         }
 
+        const mutationSatisfied = stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
+        const creationHeavyStep =
+          this.isScaffoldCreateStep(step) ||
+          /\b(add|create|build|implement|write|generate|render)\b/i.test(step.description || "");
+        const firstWriteCheckpointEscalationIteration = creationHeavyStep ? 3 : 2;
+        const firstWriteCheckpointFailIteration = creationHeavyStep ? 6 : 4;
+
+        if (
+          !stepFailed &&
+          stepContract.requiresMutation &&
+          iterationCount >= firstWriteCheckpointEscalationIteration &&
+          !mutationAttempted &&
+          !firstWriteCheckpointEscalated
+        ) {
+          firstWriteCheckpointEscalated = true;
+          const pendingRequiredTools = Array.from(stepContract.requiredTools.values()).filter(
+            (toolName) => !requiredToolsSucceeded.has(toolName),
+          );
+          const suggestedPathCandidate = this.extractStepPathCandidates(step)[0] || "";
+          const requiredToolHint =
+            pendingRequiredTools.length > 0
+              ? `Required tools still missing: ${pendingRequiredTools.join(", ")}. `
+              : "";
+          const writeFileHint =
+            pendingRequiredTools.includes("write_file") && suggestedPathCandidate
+              ? `Call write_file now using path "${suggestedPathCandidate}" with minimal valid starter content. `
+              : pendingRequiredTools.includes("write_file")
+                ? "Call write_file now with a concrete target path and minimal valid starter content. "
+                : "";
+          this.emitEvent("step_contract_escalated", {
+            stepId: step.id,
+            reason: "first_write_checkpoint_no_attempt",
+            iteration: iterationCount,
+          });
+          messages.push({
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "Step contract escalation: this step requires an artifact mutation. " +
+                  requiredToolHint +
+                  writeFileHint +
+                  "Immediately perform a write/canvas mutation now (no more read/list-only loops).",
+              },
+            ],
+          });
+        }
+        if (
+          !stepFailed &&
+          stepContract.requiresMutation &&
+          !mutationSatisfied &&
+          iterationCount >= firstWriteCheckpointFailIteration
+        ) {
+          stepFailed = true;
+          lastFailureReason =
+            `Step contract failure [contract_unmet_write_required][artifact_write_checkpoint_failed]: ` +
+            `iteration ${firstWriteCheckpointFailIteration} reached without successful file/canvas mutation.`;
+          this.emitEvent("step_contract_escalated", {
+            stepId: step.id,
+            reason: "first_write_checkpoint_failed",
+            iteration: iterationCount,
+          });
+          this.emitEvent("log", {
+            metric: "file_mutation_attempted",
+            stepId: step.id,
+            value: false,
+          });
+          continueLoop = false;
+        }
+
         // If assistant asked a blocking question, stop and wait for user.
         // Exception: capability upgrade requests should not stop on limitation-style questions.
         const requiredDecisionDetected =
@@ -10569,10 +14709,51 @@ TASK / CONVERSATION HISTORY:
         }
       }
 
-      if (expectsImageVerification && !foundNewImage) {
+      const createdFilesAfterStepList = (this.fileOperationTracker?.getCreatedFiles?.() || []).map(
+        (file) => String(file),
+      );
+      const artifactVerificationTargetsAfterStep = this.getArtifactVerificationTargets(
+        step,
+        createdFilesAfterStepList,
+        requiredArtifactExtensions,
+      );
+      for (const extension of this.collectArtifactExtensions(artifactVerificationTargetsAfterStep)) {
+        artifactExtensionsAvailable.add(extension);
+      }
+      const createdFilesAfterStep = createdFilesAfterStepList.length;
+      const createdFileDetected = createdFilesAfterStep > createdFilesBeforeStep;
+      const artifactPresenceSatisfied = createdFileDetected || foundArtifactVerificationEvidence;
+      const mutationSatisfied = stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
+      const missingRequiredArtifactExtensions = requiredArtifactExtensions.filter(
+        (extension) => !artifactExtensionsAvailable.has(extension),
+      );
+      const requiredArtifactExtensionsSatisfied = missingRequiredArtifactExtensions.length === 0;
+
+      if (stepContract.verificationMode === "image_file" && !foundNewImage) {
         stepFailed = true;
         if (!lastFailureReason) {
           lastFailureReason = "Verification failed: no newly generated image was found.";
+        }
+      }
+      if (
+        stepContract.verificationMode === "canvas_session" &&
+        !foundCanvasEvidence &&
+        !stepSucceededWithCanvasMutation
+      ) {
+        stepFailed = true;
+        if (!lastFailureReason) {
+          lastFailureReason = "Verification failed: no canvas session interaction evidence was found.";
+        }
+      }
+      if (
+        stepContract.verificationMode === "artifact_file" &&
+        ((!artifactPresenceSatisfied && !mutationSatisfied) || !requiredArtifactExtensionsSatisfied)
+      ) {
+        stepFailed = true;
+        if (!lastFailureReason) {
+          lastFailureReason = !requiredArtifactExtensionsSatisfied
+            ? `Verification failed: missing required artifact types: ${missingRequiredArtifactExtensions.join(", ")}.`
+            : "Verification failed: expected artifact file evidence was not detected.";
         }
       }
 
@@ -10608,16 +14789,32 @@ TASK / CONVERSATION HISTORY:
         }
       }
 
+      const missingRequiredTools = Array.from(stepContract.requiredTools.values()).filter(
+        (toolName) => !requiredToolsSucceeded.has(toolName),
+      );
+      if (!stepFailed && missingRequiredTools.length > 0) {
+        stepFailed = true;
+        if (!lastFailureReason) {
+          lastFailureReason =
+            `Step required tool contract was not satisfied. Missing successful calls for: ` +
+            `${missingRequiredTools.join(", ")}.`;
+        }
+      }
+
+      if (!stepFailed && stepContract.requiresMutation && !mutationSatisfied) {
+        stepFailed = true;
+        if (!lastFailureReason) {
+          lastFailureReason =
+            "Step expected a written artifact but no successful file/canvas mutation was detected.";
+        }
+      }
+
       if (!stepFailed && stepRequiresArtifactEvidence) {
         const artifactContractMode = this.resolveStepArtifactContractMode(step);
-        const createdFilesAfterStep = this.fileOperationTracker?.getCreatedFiles?.().length || 0;
-        const createdFileDetected = createdFilesAfterStep > createdFilesBeforeStep;
-        const artifactPresenceSatisfied =
-          createdFileDetected || this.stepReferencesExistingArtifact(step);
         const artifactMissing =
           artifactContractMode === "artifact_write_required"
-            ? !stepSucceededWithFileMutation && !createdFileDetected
-            : !stepSucceededWithFileMutation && !createdFileDetected && !artifactPresenceSatisfied;
+            ? !mutationSatisfied && !createdFileDetected
+            : !mutationSatisfied && !createdFileDetected && !artifactPresenceSatisfied;
         if (artifactMissing) {
           stepFailed = true;
           if (!lastFailureReason) {
@@ -10628,6 +14825,19 @@ TASK / CONVERSATION HISTORY:
           }
         }
       }
+
+      this.emitEvent("log", {
+        metric: "artifact_step_pass_fail",
+        stepId: step.id,
+        verificationMode: stepContract.verificationMode,
+        requiredTools: Array.from(stepContract.requiredTools.values()),
+        missingRequiredTools,
+        fileMutationAttempted: mutationSatisfied,
+        fileMutationRequired: stepContract.requiresMutation,
+        mutationEvidenceCount: mutationEvidence.length,
+        mutationEvidenceSummary: mutationEvidence.slice(0, 3),
+        success: !stepFailed,
+      });
 
       const finalAssistantText = this.getLatestAssistantText(messages).trim();
       const domainCompletion = evaluateDomainCompletion({
@@ -10659,6 +14869,46 @@ TASK / CONVERSATION HISTORY:
         }
       }
 
+      let verificationAssessment: VerificationAssessment | null = null;
+      if (
+        stepFailed &&
+        this.verificationOutcomeV2Enabled &&
+        this.isVerificationStepForCompletion(step)
+      ) {
+        verificationAssessment = this.assessVerificationFailure(
+          step,
+          finalAssistantText,
+          lastFailureReason,
+        );
+        if (verificationAssessment.outcome === "fail_blocking") {
+          this.blockingVerificationFailedStepIds.add(step.id);
+        } else {
+          this.blockingVerificationFailedStepIds.delete(step.id);
+          this.nonBlockingVerificationFailedStepIds.add(step.id);
+          this.upsertCompletionVerificationMetadata(verificationAssessment);
+          if (verificationAssessment.outcome === "pending_user_action") {
+            this.emitEvent("verification_pending_user_action", {
+              stepId: step.id,
+              stepDescription: step.description,
+              verificationOutcome: verificationAssessment.outcome,
+              verificationScope: verificationAssessment.scope,
+              verificationEvidenceMode: verificationAssessment.evidenceMode,
+              pendingChecklist: verificationAssessment.pendingChecklist,
+              message: verificationAssessment.reason,
+            });
+          } else {
+            this.emitEvent("log", {
+              message:
+                "Verification warning classified as non-blocking; task can complete with warning.",
+              stepId: step.id,
+              verificationOutcome: verificationAssessment.outcome,
+              verificationScope: verificationAssessment.scope,
+              verificationEvidenceMode: verificationAssessment.evidenceMode,
+            });
+          }
+        }
+      }
+
       // Step completed or failed
 
       this.recordAssistantOutput(messages, step);
@@ -10681,6 +14931,17 @@ TASK / CONVERSATION HISTORY:
         step.status = "failed";
         step.error = lastFailureReason;
         step.completedAt = Date.now();
+        const budgetConstrainedStepFailure =
+          stepBudgetConstrainedByWebSearch ||
+          /web_search (?:step )?budget exhausted/i.test(String(lastFailureReason || ""));
+        if (budgetConstrainedStepFailure) {
+          this.getBudgetConstrainedFailureStepIdSet().add(step.id);
+        } else {
+          this.getBudgetConstrainedFailureStepIdSet().delete(step.id);
+        }
+        const isNonBlockingVerificationFailure = this.nonBlockingVerificationFailedStepIds.has(
+          step.id,
+        );
 
         const isRecoveryStep = this.isRecoveryPlanStep(step);
         const capabilityRecoveryRequested =
@@ -10688,7 +14949,18 @@ TASK / CONVERSATION HISTORY:
           this.isCapabilityUpgradeIntent(lastFailureReason || "");
         const isRecoverySignal =
           this.recoveryRequestActive || this.isRecoveryIntent(lastFailureReason || "");
-        const recoveryClass = this.classifyRecoveryFailure(lastFailureReason || "");
+        const contractUnmetWriteRequired = this.isContractUnmetWriteRequiredFailure(
+          stepContract,
+          lastFailureReason || "",
+        );
+        const recoveryClass:
+          | "user_blocker"
+          | "local_runtime"
+          | "provider_quota"
+          | "external_unknown"
+          | "contract_unmet_write_required" = contractUnmetWriteRequired
+          ? "contract_unmet_write_required"
+          : this.classifyRecoveryFailure(lastFailureReason || "");
         const recoverySignature = this.makeRecoveryFailureSignature(
           step.description,
           lastFailureReason || "",
@@ -10696,6 +14968,7 @@ TASK / CONVERSATION HISTORY:
         const userRequestedRecovery = !isRecoveryStep && isRecoverySignal;
         const autoRecoveryRequested = this.shouldAutoPlanRecovery(step, lastFailureReason || "");
         const shouldHandleRecovery =
+          !isNonBlockingVerificationFailure &&
           (userRequestedRecovery || autoRecoveryRequested) &&
           recoveryClass !== "user_blocker" &&
           this.lastRecoveryFailureSignature !== recoverySignature;
@@ -10711,134 +14984,195 @@ TASK / CONVERSATION HISTORY:
                 `${this.budgetContract.maxAutoRecoverySteps}. Finalizing with current evidence.`,
             });
           } else {
-          const isDeepWork = !!this.task.agentConfig?.deepWorkMode;
-          const failureSnippet = (lastFailureReason || "").slice(0, 280);
-          const recoverySteps: Array<{ description: string; kind?: PlanStep["kind"] }> =
-            capabilityRecoveryRequested
-              ? [
-                  {
-                    description: `Identify which tool/capability is blocking this request: ${step.description}`,
-                    kind: "recovery",
-                  },
-                  {
-                    description:
-                      "Implement or enable the minimal safe tool/config change required, then retry the blocked action.",
-                    kind: "recovery",
-                  },
-                  {
-                    description:
-                      "If the capability still cannot be changed safely, execute the best available fallback workflow and complete the user goal.",
-                    kind: "recovery",
-                  },
-                ]
-              : isDeepWork
-                ? recoveryClass === "provider_quota"
+            const isDeepWork = !!this.task.agentConfig?.deepWorkMode;
+            const failureSnippet = (lastFailureReason || "").slice(0, 280);
+            let recoveryTemplateId = "generic_recovery";
+            let recoverySteps: Array<{ description: string; kind?: PlanStep["kind"] }> =
+              contractUnmetWriteRequired
+                ? (() => {
+                    const deterministicWriteRecovery = this.buildWriteRecoveryTemplate(
+                      step,
+                      stepContract,
+                    );
+                    recoveryTemplateId = deterministicWriteRecovery.templateId;
+                    return deterministicWriteRecovery.steps;
+                  })()
+                : capabilityRecoveryRequested
                   ? [
                       {
-                        description:
-                          "Switch web_search to an alternate provider/fallback and retry the failed search-dependent step: " +
-                          step.description,
+                        description: `Identify which tool/capability is blocking this request: ${step.description}`,
                         kind: "recovery",
                       },
                       {
                         description:
-                          "Record provider-quota findings with scratchpad_write and continue with the alternate provider path for: " +
-                          step.description,
+                          "Implement or enable the minimal safe tool/config change required, then retry the blocked action.",
+                        kind: "recovery",
+                      },
+                      {
+                        description:
+                          "If the capability still cannot be changed safely, execute the best available fallback workflow and complete the user goal.",
                         kind: "recovery",
                       },
                     ]
-                  : recoveryClass === "local_runtime"
-                    ? [
-                        {
-                          description:
-                            "Diagnose and fix the local runtime/tool failure (paths, params, workspace assumptions) for: " +
-                            step.description,
-                          kind: "recovery",
-                        },
-                        {
-                          description:
-                            "Record findings with scratchpad_write and apply a corrected local approach for: " +
-                            step.description,
-                          kind: "recovery",
-                        },
-                        {
-                          description:
-                            "If the corrected local approach also fails, try a fundamentally different local strategy. Be tenacious.",
-                          kind: "recovery",
-                        },
-                      ]
-                    : [
-                        {
-                          description: `Research the error via web_search: "${failureSnippet}"`,
-                          kind: "recovery",
-                        },
-                        {
-                          description:
-                            "Record findings with scratchpad_write and apply a corrected approach for: " +
-                            step.description,
-                          kind: "recovery",
-                        },
-                        {
-                          description:
-                            "If the corrected approach also fails, try a fundamentally different strategy. Be tenacious.",
-                          kind: "recovery",
-                        },
-                      ]
-                : recoveryClass === "provider_quota"
-                  ? [
-                      {
-                        description:
-                          "Retry this step using a different web_search provider/fallback and avoid the quota-limited provider.",
-                        kind: "recovery",
-                      },
-                    ]
-                  : recoveryClass === "local_runtime"
-                    ? [
-                        {
-                          description: `Try a local-runtime remediation path for: ${step.description}`,
-                          kind: "recovery",
-                        },
-                        {
-                          description:
-                            "Apply a corrected local tool/input strategy without external research and continue.",
-                          kind: "recovery",
-                        },
-                      ]
-                    : [
-                        {
-                          description: `Try an alternative toolchain or different input strategy for: ${step.description}`,
-                          kind: "recovery",
-                        },
-                        {
-                          description:
-                            "If normal tools are blocked, implement the smallest safe code/feature change needed to continue and complete the goal.",
-                          kind: "recovery",
-                        },
-                      ];
-          const revisionApplied = this.requestPlanRevision(
-            recoverySteps,
-            `Recovery attempt: Previous step failed: ${lastFailureReason}`,
-            false,
-          );
-          if (revisionApplied) {
-            this.autoRecoveryStepsPlanned += 1;
-            this.lastRecoveryFailureSignature = recoverySignature;
-            this.getRecoveredFailureStepIdSet().add(step.id);
-            if (isDeepWork) {
-              this.emitEvent("research_recovery_started", {
+                  : isDeepWork
+                    ? recoveryClass === "provider_quota"
+                      ? [
+                          {
+                            description:
+                              "Switch web_search to an alternate provider/fallback and retry the failed search-dependent step: " +
+                              step.description,
+                            kind: "recovery",
+                          },
+                          {
+                            description:
+                              "Record provider-quota findings with scratchpad_write and continue with the alternate provider path for: " +
+                              step.description,
+                            kind: "recovery",
+                          },
+                        ]
+                      : recoveryClass === "local_runtime"
+                        ? [
+                            {
+                              description:
+                                "Diagnose and fix the local runtime/tool failure (paths, params, workspace assumptions) for: " +
+                                step.description,
+                              kind: "recovery",
+                            },
+                            {
+                              description:
+                                "Record findings with scratchpad_write and apply a corrected local approach for: " +
+                                step.description,
+                              kind: "recovery",
+                            },
+                            {
+                              description:
+                                "If the corrected local approach also fails, try a fundamentally different local strategy. Be tenacious.",
+                              kind: "recovery",
+                            },
+                          ]
+                        : [
+                            {
+                              description: `Research the error via web_search: "${failureSnippet}"`,
+                              kind: "recovery",
+                            },
+                            {
+                              description:
+                                "Record findings with scratchpad_write and apply a corrected approach for: " +
+                                step.description,
+                              kind: "recovery",
+                            },
+                            {
+                              description:
+                                "If the corrected approach also fails, try a fundamentally different strategy. Be tenacious.",
+                              kind: "recovery",
+                            },
+                          ]
+                    : recoveryClass === "provider_quota"
+                      ? [
+                          {
+                            description:
+                              "Retry this step using a different web_search provider/fallback and avoid the quota-limited provider.",
+                            kind: "recovery",
+                          },
+                        ]
+                      : recoveryClass === "local_runtime"
+                        ? [
+                            {
+                              description: `Try a local-runtime remediation path for: ${step.description}`,
+                              kind: "recovery",
+                            },
+                            {
+                              description:
+                                "Apply a corrected local tool/input strategy without external research and continue.",
+                              kind: "recovery",
+                            },
+                          ]
+                        : [
+                            {
+                              description: `Try an alternative toolchain or different input strategy for: ${step.description}`,
+                              kind: "recovery",
+                            },
+                            {
+                              description:
+                                "If normal tools are blocked, implement the smallest safe code/feature change needed to continue and complete the goal.",
+                              kind: "recovery",
+                            },
+                          ];
+          let allowRevision = true;
+          const recoveryHookDecision = evaluateAgentPolicyHook({
+            policy: this.agentPolicyConfig,
+            hook: "on_recovery_plan",
+            mode: stepContract.mode,
+            domain: this.getEffectiveTaskDomain(),
+            reasonText:
+              `${lastFailureReason || ""}\n` +
+              recoverySteps.map((candidate) => candidate.description).join("\n"),
+          });
+          if (recoveryHookDecision && recoveryHookDecision.action !== "allow") {
+            if (recoveryHookDecision.action === "block_with_feedback") {
+              allowRevision = false;
+              this.emitEvent("log", {
+                metric: "agent_policy_hook_blocked",
+                hook: "on_recovery_plan",
                 stepId: step.id,
-                stepDescription: step.description,
-                error: lastFailureReason,
-                recoveryClass,
-                message: `Researching solution for: ${(lastFailureReason || "").slice(0, 200)}`,
+                feedback: recoveryHookDecision.feedback,
+              });
+            } else if (
+              recoveryHookDecision.action === "force_action" &&
+              recoveryHookDecision.forceTool
+            ) {
+              recoveryTemplateId = "policy_hook_force_action";
+              const forcedTool = recoveryHookDecision.forceTool;
+              const forcedInput =
+                recoveryHookDecision.forceInputTemplate &&
+                Object.keys(recoveryHookDecision.forceInputTemplate).length > 0
+                  ? JSON.stringify(recoveryHookDecision.forceInputTemplate)
+                  : "{}";
+              recoverySteps = [
+                {
+                  description:
+                    `${recoveryHookDecision.feedback ? `${recoveryHookDecision.feedback}\n` : ""}` +
+                    `Policy-forced recovery action: execute "${forcedTool}" with input template ${forcedInput}.`,
+                  kind: "recovery",
+                },
+              ];
+              this.emitEvent("log", {
+                metric: "agent_policy_hook_forced_action",
+                hook: "on_recovery_plan",
+                stepId: step.id,
+                forceTool: forcedTool,
               });
             }
-            this.emitEvent("step_recovery_planned", {
-              stepId: step.id,
-              stepDescription: step.description,
-              reason: lastFailureReason,
-              recoveryClass,
-            });
+          }
+          if (allowRevision) {
+            const revisionApplied = this.requestPlanRevision(
+              recoverySteps,
+              `Recovery attempt: Previous step failed: ${lastFailureReason}`,
+              false,
+            );
+            if (revisionApplied) {
+              this.autoRecoveryStepsPlanned += 1;
+              this.lastRecoveryFailureSignature = recoverySignature;
+              this.getRecoveredFailureStepIdSet().add(step.id);
+              if (isDeepWork) {
+                this.emitEvent("research_recovery_started", {
+                  stepId: step.id,
+                  stepDescription: step.description,
+                  error: lastFailureReason,
+                  recoveryClass,
+                  message: `Researching solution for: ${(lastFailureReason || "").slice(0, 200)}`,
+                });
+              }
+              this.emitEvent("step_recovery_planned", {
+                stepId: step.id,
+                stepDescription: step.description,
+                reason: lastFailureReason,
+                recoveryClass,
+                recovery_template_id: recoveryTemplateId,
+                contract_mode: stepContract.mode,
+                contract_reason: stepContract.contractReason,
+              });
+            }
           }
           }
         }
@@ -10851,12 +15185,18 @@ TASK / CONVERSATION HISTORY:
         this.emitEvent("step_failed", {
           step,
           reason: lastFailureReason,
+          contract_mode: stepContract.mode,
+          contract_reason: stepContract.contractReason,
+          contract_enforcement_level: stepContract.enforcementLevel,
         });
       } else {
         step.status = "completed";
         step.completedAt = Date.now();
+        this.nonBlockingVerificationFailedStepIds.delete(step.id);
+        this.blockingVerificationFailedStepIds.delete(step.id);
         this.lastRecoveryFailureSignature = "";
         this.getRecoveredFailureStepIdSet().delete(step.id);
+        this.getBudgetConstrainedFailureStepIdSet().delete(step.id);
         const totalStepDuration = ((Date.now() - stepStartTime) / 1000).toFixed(1);
         console.log(
           `${this.logTag} ✓ Step "${step.description}" completed | duration=${totalStepDuration}s | ` +
@@ -11050,8 +15390,17 @@ TASK / CONVERSATION HISTORY:
         status: "failed",
         error: error?.message || String(error),
         completedAt: Date.now(),
+        continuationCount: this.continuationCount,
+        continuationWindow: this.continuationWindow,
+        lifetimeTurnsUsed: this.lifetimeTurnCount,
+        noProgressStreak: this.noProgressStreak,
+        lastLoopFingerprint: this.lastLoopFingerprint || undefined,
+        compactionCount: this.compactionCount,
+        lastCompactionAt: this.lastCompactionAt || undefined,
+        lastCompactionTokensBefore: this.lastCompactionTokensBefore || undefined,
+        lastCompactionTokensAfter: this.lastCompactionTokensAfter || undefined,
       });
-      this.emitEvent("error", {
+      this.emitTerminalFailureOnce({
         message: error.message,
         stack: error.stack,
       });
@@ -11069,12 +15418,45 @@ TASK / CONVERSATION HISTORY:
    */
   async continueAfterBudgetExhausted(): Promise<void> {
     await this.getLifecycleMutex().runExclusive(async () => {
-      await this.continueAfterBudgetExhaustedUnlocked();
+      await this.continueAfterBudgetExhaustedUnlocked({ mode: "manual" });
     });
   }
 
-  private async continueAfterBudgetExhaustedUnlocked(): Promise<void> {
+  private async continueAfterBudgetExhaustedUnlocked(opts: {
+    mode?: "manual" | "auto";
+    rethrowOnError?: boolean;
+    continuationAssessment?: ReturnType<typeof ProgressScoreEngine.assessWindow>;
+  } = {}): Promise<void> {
+    const mode = opts.mode || "manual";
+    const rethrowOnError = opts.rethrowOnError === true;
     try {
+      if (mode === "manual") {
+        this.continuationCount += 1;
+        this.continuationWindow += 1;
+      }
+      const continuationAssessment = opts.continuationAssessment ?? this.assessContinuationWindow();
+      this.noProgressStreak = continuationAssessment.progressScore <= 0 ? this.noProgressStreak + 1 : 0;
+      if (continuationAssessment.dominantFingerprint) {
+        this.lastLoopFingerprint = continuationAssessment.dominantFingerprint;
+      }
+      if (mode === "manual") {
+        this.emitEvent("continuation_decision", {
+          policy: this.continuationStrategy,
+          continuationWindow: this.continuationWindow,
+          continuationCount: this.continuationCount,
+          maxAutoContinuations: this.maxAutoContinuations,
+          progressScore: continuationAssessment.progressScore,
+          progressThreshold: this.minProgressScoreForAutoContinue,
+          loopRiskIndex: continuationAssessment.loopRiskIndex,
+          repeatedFingerprintCount: continuationAssessment.repeatedFingerprintCount,
+          dominantFingerprint: continuationAssessment.dominantFingerprint,
+          allowed: true,
+          reason: "Manual continuation requested by user.",
+        });
+      }
+      if (!(mode === "auto" && opts.continuationAssessment)) {
+        await this.maybeCompactBeforeContinuation(continuationAssessment);
+      }
       const preResetUsage = {
         inputTokens: this.getCumulativeInputTokens(),
         outputTokens: this.getCumulativeOutputTokens(),
@@ -11083,6 +15465,9 @@ TASK / CONVERSATION HISTORY:
       };
       this.emitEvent("budget_reset_for_continuation", {
         reason: "turn_limit_exhausted",
+        mode,
+        continuationCount: this.continuationCount,
+        continuationWindow: this.continuationWindow,
         previousUsageTotals: preResetUsage,
       });
 
@@ -11103,6 +15488,20 @@ TASK / CONVERSATION HISTORY:
       this.taskCompleted = false;
       this.cancelled = false;
       this.cancelReason = null;
+      this.blockedLoopFingerprintForWindow = null;
+      this.windowStartEventCount = this.daemon.getTaskEvents(this.task.id).length;
+      this.daemon.updateTask(this.task.id, {
+        continuationCount: this.continuationCount,
+        continuationWindow: this.continuationWindow,
+        lifetimeTurnsUsed: this.lifetimeTurnCount,
+        autoContinueBlockReason: undefined,
+        noProgressStreak: this.noProgressStreak,
+        lastLoopFingerprint: this.lastLoopFingerprint || undefined,
+        compactionCount: this.compactionCount,
+        lastCompactionAt: this.lastCompactionAt || undefined,
+        lastCompactionTokensBefore: this.lastCompactionTokensBefore || undefined,
+        lastCompactionTokensAfter: this.lastCompactionTokensAfter || undefined,
+      });
 
       if (!this.plan) {
         throw new Error(
@@ -11126,7 +15525,9 @@ TASK / CONVERSATION HISTORY:
       // Inject continuation context so the LLM knows it's picking up where it left off
       const continuationLines = [
         "TASK CONTINUATION CONTEXT:",
-        "This task was stopped because it reached its turn/budget limit. The user has chosen to continue.",
+        mode === "auto"
+          ? "This task hit the turn window. Auto continuation is enabled and progress checks passed."
+          : "This task was stopped because it reached its turn/budget limit. The user has chosen to continue.",
         `Plan: ${this.plan.description}`,
       ];
       if (completedSteps.length > 0) {
@@ -11143,6 +15544,10 @@ TASK / CONVERSATION HISTORY:
         "",
         "Continue execution from where you left off. Do not repeat already-completed steps.",
       );
+      if (this.pendingLoopStrategySwitchMessage) {
+        continuationLines.push("", this.pendingLoopStrategySwitchMessage);
+        this.pendingLoopStrategySwitchMessage = "";
+      }
 
       this.appendConversationHistory({
         role: "user",
@@ -11160,7 +15565,10 @@ TASK / CONVERSATION HISTORY:
 
       this.daemon.updateTaskStatus(this.task.id, "executing");
       this.emitEvent("executing", {
-        message: "Continuing execution after budget limit",
+        message:
+          mode === "auto"
+            ? "Auto-continuing execution after turn window"
+            : "Continuing execution after budget limit",
       });
 
       await this.executePlan();
@@ -11196,6 +15604,10 @@ TASK / CONVERSATION HISTORY:
         return;
       }
 
+      if (rethrowOnError) {
+        throw error;
+      }
+
       console.error(`${this.logTag} Continued task execution failed:`, error);
       this.saveConversationSnapshot();
       const errorPayload: Record<string, unknown> = {
@@ -11203,7 +15615,7 @@ TASK / CONVERSATION HISTORY:
         stack: error?.stack,
       };
       // Allow the user to continue again only for turn-limit exhaustion.
-      if (this.isTurnLimitExceededError(error)) {
+      if (this.isWindowTurnLimitExceededError(error)) {
         errorPayload.actionHint = {
           type: "continue_task",
           label: "Continue",
@@ -11214,8 +15626,11 @@ TASK / CONVERSATION HISTORY:
         status: "failed",
         error: error?.message || String(error),
         completedAt: Date.now(),
+        continuationCount: this.continuationCount,
+        continuationWindow: this.continuationWindow,
+        lifetimeTurnsUsed: this.lifetimeTurnCount,
       });
-      this.emitEvent("error", errorPayload);
+      this.emitTerminalFailureOnce(errorPayload);
     } finally {
       await this.toolRegistry.cleanup().catch((e) => {
         console.error("Cleanup error:", e);
@@ -11813,6 +16228,7 @@ TASK / CONVERSATION HISTORY:
       effectiveFollowUpExecutionMode,
       effectiveFollowUpDomain,
     );
+    const followUpWebSearchModeContract = this.buildWebSearchModeContract();
 
     // Ensure system prompt is set
     const infraContext = this.getInfraContextPrompt();
@@ -11831,6 +16247,7 @@ You are the user's autonomous AI companion. You have real tools and you use them
 Current time: ${getCurrentDateTimeContext()}
 Workspace: ${this.workspace.path}
 ${followUpModeDomainContract}
+${followUpWebSearchModeContract}
 ${this.task.worktreeBranch ? `\nGIT WORKTREE CONTEXT:\n- You are working in an isolated git worktree on branch "${this.task.worktreeBranch}".\n- Your changes will NOT affect the main branch until explicitly merged.\n- You can freely modify files and experiment without impacting other agents.\n- Use git_status and git_diff tools to check your changes. Use git_commit to commit work.\n` : ""}
 IMPORTANT INSTRUCTIONS:
 - Always use tools to accomplish tasks. Do not just describe what you would do - actually call the tools.
@@ -11842,6 +16259,18 @@ USER INPUT GATE (CRITICAL):
 - If you ask the user for required information or a decision, STOP and wait.
 - Do NOT continue executing steps or call tools after asking such questions.
 - If safe defaults exist, state the assumption and proceed without asking.
+
+CLOUD STORAGE ROUTING (CRITICAL):
+- If the user mentions Box/Dropbox/OneDrive/Google Drive/SharePoint/Notion, treat it as a cloud integration request.
+- Do NOT interpret provider names (like "box") as local workspace folder names.
+- For provider file inventory/listing requests, prefer connector tools first:
+  - Box: box_action (list_folder_items, folder_id "0")
+  - Dropbox: dropbox_action (list_folder, path "")
+  - OneDrive: onedrive_action (list_children at root)
+  - Google Drive: google_drive_action (list_files)
+  - SharePoint: sharepoint_action (list_drive_items)
+  - Notion: notion_action (search)
+- Use local file tools only when the user explicitly asks about local/workspace files.
 
 PATH DISCOVERY (CRITICAL):
 - When a task mentions a folder or path (e.g., "electron/agent folder"), users often give PARTIAL paths.
@@ -12062,10 +16491,14 @@ TASK / CONVERSATION HISTORY:
     const VARIED_FAILURE_THRESHOLD = 5;
     const requiresExecutionToolProgress =
       this.followUpRequiresCommandExecution(message) && !this.allowExecutionWithoutShell;
-    const loopGuardrail = getLoopGuardrailConfig(this.getEffectiveTaskDomain());
+    const requiresCanvasToolProgress = this.followUpRequiresCanvasAction(message);
+    const loopGuardrail = this.getLoopGuardrailForMode("analysis_only");
     let attemptedExecutionTool = false;
     let successfulExecutionTool = false;
     let lastExecutionToolError = "";
+    let attemptedCanvasTool = false;
+    let successfulCanvasTool = false;
+    let lastCanvasToolError = "";
     let lastTurnMemoryRecallQuery = "";
     let lastTurnMemoryRecallBlock = "";
     let lastSharedContextKey = "";
@@ -12378,20 +16811,43 @@ TASK / CONVERSATION HISTORY:
         }
 
         if (this.guardrailPhaseAEnabled) {
-          stopReasonNudgeInjected = maybeInjectStopReasonNudgeUtil({
-            stopReason: response.stopReason,
-            consecutiveToolUseStops,
-            consecutiveMaxTokenStops,
-            remainingTurns: remainingTurnsAfterResponse,
-            messages,
-            phaseLabel: "follow-up",
-            stopReasonNudgeInjected,
-            minToolUseStreak: loopGuardrail.stopReasonToolUseStreak,
-            minMaxTokenStreak: loopGuardrail.stopReasonMaxTokenStreak,
-            log: (message) => console.log(`${this.logTag}${message}`),
-            emitStopReasonEvent: (payload) =>
-              this.emitEvent("stop_reason_nudge", { followUp: true, ...payload }),
-          });
+          const stopAttemptEligible =
+            (response.stopReason === "tool_use" &&
+              (consecutiveToolUseStops >= loopGuardrail.stopReasonToolUseStreak ||
+                remainingTurnsAfterResponse <= 1)) ||
+            (response.stopReason === "max_tokens" &&
+              consecutiveMaxTokenStops >= loopGuardrail.stopReasonMaxTokenStreak);
+          const stopAttemptHookHandled = stopAttemptEligible
+            ? this.maybeApplyStopAttemptPolicyHook({
+                phase: "follow-up",
+                stepMode: "analysis_only",
+                reasonText:
+                  `stop_reason=${String(response.stopReason || "")};` +
+                  `consecutive_tool_use=${consecutiveToolUseStops};` +
+                  `consecutive_max_tokens=${consecutiveMaxTokenStops};` +
+                  `remaining_turns=${remainingTurnsAfterResponse}`,
+                messages,
+              })
+            : false;
+          if (stopAttemptHookHandled) {
+            stopReasonNudgeInjected = true;
+          } else {
+            stopReasonNudgeInjected = maybeInjectStopReasonNudgeUtil({
+              stopReason: response.stopReason,
+              consecutiveToolUseStops,
+              consecutiveMaxTokenStops,
+              remainingTurns: remainingTurnsAfterResponse,
+              messages,
+              phaseLabel: "follow-up",
+              stopReasonNudgeInjected,
+              sanitizeMessageText: (text) => this.sanitizeFallbackInstruction(text),
+              minToolUseStreak: loopGuardrail.stopReasonToolUseStreak,
+              minMaxTokenStreak: loopGuardrail.stopReasonMaxTokenStreak,
+              log: (message) => console.log(`${this.logTag}${message}`),
+              emitStopReasonEvent: (payload) =>
+                this.emitEvent("stop_reason_nudge", { followUp: true, ...payload }),
+            });
+          }
         }
 
         if (
@@ -12417,10 +16873,11 @@ TASK / CONVERSATION HISTORY:
             content: [
               {
                 type: "text",
-                text:
+                text: this.sanitizeFallbackInstruction(
                   "Tool calls are now disabled for this follow-up because repeated tool-only turns are not converging. " +
-                  "Use current evidence and provide the best direct answer now. " +
-                  "If data is missing, list blockers clearly instead of making more tool calls.",
+                    "Use current evidence and provide the best direct answer now. " +
+                    "If data is missing, list blockers clearly instead of making more tool calls.",
+                ),
               },
             ],
           });
@@ -12473,9 +16930,21 @@ TASK / CONVERSATION HISTORY:
         let hasDuplicateToolAttempt = false;
         let hasUnavailableToolAttempt = false;
         let hasHardToolFailureAttempt = false;
+        const followUpToolUseCount = (response.content || []).filter(
+          (content: Any) => content?.type === "tool_use",
+        ).length;
+        const followUpBatchGroupId = this.startToolBatchGroup(
+          this.currentStepId || "follow_up",
+          followUpToolUseCount,
+          "follow_up",
+        );
+        if (followUpBatchGroupId) {
+          this.currentToolBatchGroupId = followUpBatchGroupId;
+        }
 
-        for (const content of response.content || []) {
-          if (content.type === "tool_use") {
+        try {
+          for (const content of response.content || []) {
+            if (content.type === "tool_use") {
             if (forceFinalizeWithoutTools) {
               skippedToolCallsByPolicy += 1;
               toolResults.push({
@@ -12501,11 +16970,57 @@ TASK / CONVERSATION HISTORY:
               emitParameterInference: (tool, inference) =>
                 this.emitEvent("parameter_inference", { tool, inference }),
             });
+            let canonicalContentName = canonicalizeToolNameUtil(content.name);
+            const preToolHookResult = this.applyPreToolUsePolicyHook({
+              toolName: content.name,
+              input: content.input,
+              stepMode: "analysis_only",
+            });
+            if (preToolHookResult.blockedResult) {
+              this.emitEvent("tool_blocked", {
+                tool: content.name,
+                reason: "agent_policy_hook",
+                message: preToolHookResult.blockedResult.error,
+              });
+              toolResults.push({
+                type: "tool_result",
+                tool_use_id: content.id,
+                content: JSON.stringify({
+                  error: preToolHookResult.blockedResult.error,
+                  blocked: true,
+                  reason: "agent_policy_hook",
+                }),
+                is_error: true,
+              });
+              continue;
+            }
+            if (preToolHookResult.forcedToolName) {
+              const originalToolName = content.name;
+              content.name = normalizeToolUseNameUtil({
+                toolName: preToolHookResult.forcedToolName,
+                normalizeToolName: (toolName) => this.normalizeToolName(toolName),
+                emitParameterInference: (tool, inference) =>
+                  this.emitEvent("parameter_inference", { tool, inference }),
+              });
+              content.input = preToolHookResult.forcedInput ?? content.input;
+              canonicalContentName = canonicalizeToolNameUtil(content.name);
+              this.emitEvent("log", {
+                metric: "agent_policy_pre_tool_force_action",
+                originalTool: originalToolName,
+                forcedTool: content.name,
+                followUp: true,
+              });
+            }
 
             const isExecutionToolCall = this.isExecutionTool(content.name);
             if (isExecutionToolCall) {
               attemptedExecutionTool = true;
               this.executionToolAttemptObserved = true;
+            }
+            const isCanvasActionToolCall = this.isCanvasPresentationTool(content.name);
+            const isCanvasWorkflowToolCall = isCanvasActionToolCall || content.name === "canvas_create";
+            if (isCanvasWorkflowToolCall) {
+              attemptedCanvasTool = true;
             }
 
             const policyDecision = evaluateToolPolicy(content.name, this.getToolPolicyContext());
@@ -12541,20 +17056,23 @@ TASK / CONVERSATION HISTORY:
                 lastExecutionToolError = reason;
                 this.executionToolLastError = reason;
               }
+              if (isCanvasWorkflowToolCall) {
+                lastCanvasToolError = reason;
+              }
               continue;
             }
 
             // Check if this tool has failed too many times across steps
             {
-              const crossStepCount = this.crossStepToolFailures.get(content.name) || 0;
+              const crossStepCount = this.crossStepToolFailures.get(canonicalContentName) || 0;
               if (crossStepCount >= this.CROSS_STEP_FAILURE_THRESHOLD) {
                 console.log(
                   `${this.logTag} Tool "${content.name}" blocked by cross-step failure threshold (${crossStepCount} failures across steps)`,
                 );
                 hasHardToolFailureAttempt = true;
                 persistentToolFailures.set(
-                  content.name,
-                  (persistentToolFailures.get(content.name) || 0) + 1,
+                  canonicalContentName,
+                  (persistentToolFailures.get(canonicalContentName) || 0) + 1,
                 );
                 this.emitEvent("tool_error", {
                   tool: content.name,
@@ -12576,6 +17094,9 @@ TASK / CONVERSATION HISTORY:
                 if (isExecutionToolCall) {
                   lastExecutionToolError = `Tool blocked: cross-step failure threshold`;
                   this.executionToolLastError = lastExecutionToolError;
+                }
+                if (isCanvasWorkflowToolCall) {
+                  lastCanvasToolError = "Tool blocked: cross-step failure threshold";
                 }
                 continue;
               }
@@ -12607,6 +17128,9 @@ TASK / CONVERSATION HISTORY:
                 lastExecutionToolError = `Tool disabled: ${lastError}`;
                 this.executionToolLastError = lastExecutionToolError;
               }
+              if (isCanvasWorkflowToolCall) {
+                lastCanvasToolError = `Tool disabled: ${lastError}`;
+              }
               continue;
             }
 
@@ -12634,6 +17158,9 @@ TASK / CONVERSATION HISTORY:
                   "Execution tool not available in current permissions/context.";
                 this.executionToolLastError = lastExecutionToolError;
               }
+              if (isCanvasWorkflowToolCall) {
+                lastCanvasToolError = "Canvas tool not available in current permissions/context.";
+              }
               continue;
             }
 
@@ -12650,7 +17177,30 @@ TASK / CONVERSATION HISTORY:
             // If canvas_push is missing content, try extracting HTML from assistant text or auto-generate
             await this.handleCanvasPushFallback(content, assistantText);
 
-            const validationError = this.getToolInputValidationError(content.name, content.input);
+            const inputValidation = preflightValidateAndRepairToolInputUtil({
+              toolName: content.name,
+              input: content.input,
+              contextText: `${messageWithContext}\n${this.task.prompt}`,
+            });
+            content.input = inputValidation.input;
+            if (inputValidation.repaired) {
+              this.emitEvent("log", {
+                metric: "tool_input_repaired_count",
+                tool: content.name,
+                input_repair_applied: true,
+                repairable: inputValidation.repairable,
+                repairReason: inputValidation.repairReason,
+                followUp: true,
+              });
+              this.emitEvent("parameter_inference", {
+                tool: content.name,
+                inference:
+                  inputValidation.repairReason ||
+                  "Auto-repaired malformed tool input during preflight validation",
+              });
+            }
+
+            const validationError = inputValidation.error;
             if (validationError) {
               const diagInputKeys = content.input ? Object.keys(content.input) : [];
               console.log(
@@ -12662,11 +17212,19 @@ TASK / CONVERSATION HISTORY:
                 tool: content.name,
                 error: validationError,
                 input: content.input,
+                errorClass: "tool_input_validation_error",
+                repairable: inputValidation.repairable,
+                input_repair_applied: inputValidation.repaired,
+                followUp: true,
               });
               toolResults.push(
                 buildInvalidInputToolResultUtil({
                   toolUseId: content.id,
-                  validationError,
+                  validationError:
+                    `${validationError}` +
+                    (inputValidation.repairable
+                      ? " (tool_input_validation_error; repairable=true)"
+                      : " (tool_input_validation_error; repairable=false)"),
                 }),
               );
               continue;
@@ -12689,7 +17247,12 @@ TASK / CONVERSATION HISTORY:
                 toolName: content.name,
                 toolUseId: content.id,
                 duplicateCheck,
-                isIdempotentTool: (toolName) => ToolCallDeduplicator.isIdempotentTool(toolName),
+                isIdempotentTool: (toolName) =>
+                  isEffectivelyIdempotentToolCallUtil({
+                    toolName,
+                    input: content.input,
+                    isIdempotentTool: (name) => ToolCallDeduplicator.isIdempotentTool(name),
+                  }),
                 suggestion:
                   "This tool was already called with these exact parameters. Please proceed or try a different approach.",
               });
@@ -12701,6 +17264,9 @@ TASK / CONVERSATION HISTORY:
                 lastExecutionToolError =
                   duplicateCheck.reason || "Duplicate execution tool call blocked.";
                 this.executionToolLastError = lastExecutionToolError;
+              }
+              if (isCanvasWorkflowToolCall) {
+                lastCanvasToolError = duplicateCheck.reason || "Duplicate canvas tool call blocked.";
               }
               continue;
             }
@@ -12735,6 +17301,22 @@ TASK / CONVERSATION HISTORY:
                   fileOpCheck,
                 }),
               );
+              continue;
+            }
+
+            const batchExternalPolicyBlock = await this.maybeBlockToolByBatchExternalPolicy(
+              content,
+              true,
+            );
+            if (batchExternalPolicyBlock) {
+              toolResults.push(batchExternalPolicyBlock);
+              if (isExecutionToolCall) {
+                lastExecutionToolError = "Execution blocked by /batch external policy.";
+                this.executionToolLastError = lastExecutionToolError;
+              }
+              if (isCanvasWorkflowToolCall) {
+                lastCanvasToolError = "Canvas action blocked by /batch external policy.";
+              }
               continue;
             }
 
@@ -12782,10 +17364,13 @@ TASK / CONVERSATION HISTORY:
               this.recordFileOperation(content.name, content.input, result);
               if (toolSucceeded) {
                 this.recordToolResult(content.name, result, content.input);
+                if (content.name === "canvas_create" || content.name === "canvas_push") {
+                  this.canvasEvidenceObserved = true;
+                }
                 // Heal cross-step failure counter on success.
-                const currentFailures = this.crossStepToolFailures.get(content.name) || 0;
+                const currentFailures = this.crossStepToolFailures.get(canonicalContentName) || 0;
                 if (currentFailures > 0) {
-                  this.crossStepToolFailures.set(content.name, currentFailures - 1);
+                  this.crossStepToolFailures.set(canonicalContentName, currentFailures - 1);
                 }
               }
 
@@ -12795,6 +17380,9 @@ TASK / CONVERSATION HISTORY:
                 if (isExecutionToolCall) {
                   lastExecutionToolError = reason;
                   this.executionToolLastError = reason;
+                }
+                if (isCanvasWorkflowToolCall) {
+                  lastCanvasToolError = reason;
                 }
                 const failureTracking = recordToolFailureOutcomeUtil({
                   toolName: content.name,
@@ -12807,8 +17395,8 @@ TASK / CONVERSATION HISTORY:
                     this.isHardToolFailure(toolName, toolResult, error),
                 });
                 this.crossStepToolFailures.set(
-                  content.name,
-                  (this.crossStepToolFailures.get(content.name) || 0) + 1,
+                  canonicalContentName,
+                  (this.crossStepToolFailures.get(canonicalContentName) || 0) + 1,
                 );
                 if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
                   hasHardToolFailureAttempt = true;
@@ -12826,10 +17414,16 @@ TASK / CONVERSATION HISTORY:
                     disabledScope,
                   });
                 }
-              } else if (isExecutionToolCall) {
-                successfulExecutionTool = true;
-                this.executionToolRunObserved = true;
-                this.executionToolLastError = "";
+              } else {
+                if (isExecutionToolCall) {
+                  successfulExecutionTool = true;
+                  this.executionToolRunObserved = true;
+                  this.executionToolLastError = "";
+                }
+                if (isCanvasActionToolCall) {
+                  successfulCanvasTool = true;
+                  lastCanvasToolError = "";
+                }
               }
 
               this.emitEvent("tool_result", {
@@ -12860,6 +17454,9 @@ TASK / CONVERSATION HISTORY:
                 lastExecutionToolError = failureMessage;
                 this.executionToolLastError = failureMessage;
               }
+              if (isCanvasWorkflowToolCall) {
+                lastCanvasToolError = failureMessage;
+              }
 
               const failureTracking = recordToolFailureOutcomeUtil({
                 toolName: content.name,
@@ -12872,8 +17469,8 @@ TASK / CONVERSATION HISTORY:
                   this.isHardToolFailure(toolName, toolResult, error),
               });
               this.crossStepToolFailures.set(
-                content.name,
-                (this.crossStepToolFailures.get(content.name) || 0) + 1,
+                canonicalContentName,
+                (this.crossStepToolFailures.get(canonicalContentName) || 0) + 1,
               );
               if (failureTracking.shouldDisable || failureTracking.isHardFailure) {
                 hasHardToolFailureAttempt = true;
@@ -12907,7 +17504,11 @@ TASK / CONVERSATION HISTORY:
                 is_error: true,
               });
             }
+            }
           }
+        } finally {
+          this.currentToolBatchGroupId = null;
+          this.finishToolBatchGroup(followUpBatchGroupId, toolResults, "follow_up");
         }
 
         {
@@ -12977,9 +17578,10 @@ TASK / CONVERSATION HISTORY:
                 content: [
                   {
                     type: "text",
-                    text:
+                    text: this.sanitizeFallbackInstruction(
                       "Do not call tools again in this follow-up. " +
-                      "Respond now with your best direct answer from current evidence.",
+                        "Respond now with your best direct answer from current evidence.",
+                    ),
                   },
                 ],
               });
@@ -12995,6 +17597,7 @@ TASK / CONVERSATION HISTORY:
             recentToolCalls,
             messages,
             loopBreakInjected,
+            sanitizeMessageText: (text) => this.sanitizeFallbackInstruction(text),
             detectToolLoop: (calls, toolName, input, threshold) =>
               this.detectToolLoop(calls, toolName, input, threshold),
             log: (message) => console.log(`${this.logTag}${message}`),
@@ -13008,6 +17611,7 @@ TASK / CONVERSATION HISTORY:
               phaseLabel: "follow-up",
               windowSize: loopGuardrail.lowProgressWindowSize,
               minCallsOnSameTarget: loopGuardrail.lowProgressSameTargetMinCalls,
+              sanitizeMessageText: (text) => this.sanitizeFallbackInstruction(text),
               log: (message) => console.log(`${this.logTag}${message}`),
               emitLowProgressEvent: (payload) =>
                 this.emitEvent("low_progress_loop_detected", { followUp: true, ...payload }),
@@ -13198,6 +17802,23 @@ TASK / CONVERSATION HISTORY:
           wantsToEnd = false;
         }
 
+        if (wantsToEnd && requiresCanvasToolProgress && !successfulCanvasTool) {
+          messages.push({
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: this.buildCanvasRequiredFollowUpInstruction({
+                  attemptedCanvasTool,
+                  lastCanvasError: lastCanvasToolError,
+                }),
+              },
+            ],
+          });
+          continueLoop = true;
+          wantsToEnd = false;
+        }
+
         // Only end the loop if the agent wants to AND has provided a response
         if (wantsToEnd && (hasProvidedTextResponse || !hadToolCalls)) {
           continueLoop = false;
@@ -13240,6 +17861,19 @@ TASK / CONVERSATION HISTORY:
           this.waitingForUserInput = true;
           pausedForUserInput = true;
         }
+      }
+
+      if (!pausedForUserInput && requiresCanvasToolProgress && !successfulCanvasTool) {
+        const blockerMessage = lastCanvasToolError
+          ? `Canvas action did not complete. The latest canvas blocker was: ${lastCanvasToolError}`
+          : "Canvas action did not complete because no canvas tool was used.";
+        this.emitEvent("assistant_message", {
+          message: blockerMessage,
+        });
+        messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: blockerMessage }],
+        });
       }
 
       // Save updated conversation history
@@ -13354,7 +17988,7 @@ TASK / CONVERSATION HISTORY:
             label: "Open Settings",
           };
         }
-        this.emitEvent("error", errorPayload);
+        this.emitTerminalFailureOnce(errorPayload);
         this.saveConversationSnapshot();
         return;
       }
