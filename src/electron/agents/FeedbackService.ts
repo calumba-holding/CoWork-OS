@@ -353,7 +353,8 @@ export class FeedbackService {
     const stmt = this.db.prepare(`
       SELECT e.task_id as taskId, e.timestamp as timestamp, e.payload as payload
       FROM task_events e
-      WHERE e.type = 'user_feedback' AND e.timestamp >= ?
+      WHERE (e.type = 'user_feedback' OR e.legacy_type = 'user_feedback')
+        AND e.timestamp >= ?
       ORDER BY e.timestamp DESC
       LIMIT ?
     `);
