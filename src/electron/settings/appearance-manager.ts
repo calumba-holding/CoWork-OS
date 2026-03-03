@@ -19,6 +19,7 @@ import { SecureSettingsRepository } from "../database/SecureSettingsRepository";
 import { getUserDataDir } from "../utils/user-data-dir";
 
 const LEGACY_SETTINGS_FILE = "appearance-settings.json";
+const DEV_LOG_SETTINGS_FILE = path.join(".cowork", "dev-log-settings.json");
 
 const DEFAULT_SETTINGS: AppearanceSettings = {
   themeMode: "system",
@@ -26,6 +27,7 @@ const DEFAULT_SETTINGS: AppearanceSettings = {
   accentColor: "cyan",
   uiDensity: "focused",
   timelineVerbosity: "summary",
+  devRunLoggingEnabled: false,
   disclaimerAccepted: false,
   onboardingCompleted: false,
   onboardingCompletedAt: undefined,
@@ -130,7 +132,11 @@ export class AppearanceManager {
         if (stored) {
           settings = { ...DEFAULT_SETTINGS, ...stored };
           // Persist defaults for newly added fields when missing/invalid.
-          if (!isValidUiDensity(stored.uiDensity) || !isValidTimelineVerbosity(stored.timelineVerbosity)) {
+          if (
+            !isValidUiDensity(stored.uiDensity) ||
+            !isValidTimelineVerbosity(stored.timelineVerbosity) ||
+            typeof stored.devRunLoggingEnabled !== "boolean"
+          ) {
             needsWrite = true;
           }
         }
@@ -158,6 +164,10 @@ export class AppearanceManager {
         settings.timelineVerbosity = DEFAULT_SETTINGS.timelineVerbosity;
         needsWrite = true;
       }
+      if (typeof settings.devRunLoggingEnabled !== "boolean") {
+        settings.devRunLoggingEnabled = DEFAULT_SETTINGS.devRunLoggingEnabled;
+        needsWrite = true;
+      }
     } catch (error) {
       console.error("[AppearanceManager] Failed to load settings:", error);
       settings = { ...DEFAULT_SETTINGS };
@@ -170,7 +180,14 @@ export class AppearanceManager {
       try {
         const repository = SecureSettingsRepository.getInstance();
         repository.save("appearance", settings);
-        console.log("[AppearanceManager] Persisted default uiDensity:", settings.uiDensity);
+        console.log(
+          "[AppearanceManager] Persisted default appearance settings fields",
+          JSON.stringify({
+            uiDensity: settings.uiDensity,
+            timelineVerbosity: settings.timelineVerbosity,
+            devRunLoggingEnabled: settings.devRunLoggingEnabled,
+          }),
+        );
       } catch  {
         // Non-fatal: cache is correct, DB will catch up on next save
       }
@@ -220,10 +237,15 @@ export class AppearanceManager {
         timelineVerbosity: isValidTimelineVerbosity(settings.timelineVerbosity)
           ? settings.timelineVerbosity
           : existingSettings.timelineVerbosity,
+        devRunLoggingEnabled:
+          typeof settings.devRunLoggingEnabled === "boolean"
+            ? settings.devRunLoggingEnabled
+            : existingSettings.devRunLoggingEnabled,
       };
 
       const repository = SecureSettingsRepository.getInstance();
       repository.save("appearance", validatedSettings);
+      syncDevLogSettingsFile(validatedSettings.devRunLoggingEnabled === true);
       this.cachedSettings = validatedSettings;
       console.log("[AppearanceManager] Settings saved to encrypted database");
     } catch (error) {
@@ -269,4 +291,28 @@ function isValidUiDensity(value: unknown): value is UiDensity {
 
 function isValidTimelineVerbosity(value: unknown): value is TimelineVerbosity {
   return value === "summary" || value === "verbose";
+}
+
+function syncDevLogSettingsFile(captureEnabled: boolean): void {
+  if (process.env.NODE_ENV !== "development") {
+    return;
+  }
+  try {
+    const configPath = path.resolve(process.cwd(), DEV_LOG_SETTINGS_FILE);
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          captureEnabled,
+          updatedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+  } catch (error) {
+    console.warn("[AppearanceManager] Failed to sync dev-log settings file:", error);
+  }
 }
