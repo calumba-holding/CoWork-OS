@@ -16,6 +16,24 @@ interface CostMetrics {
   costByModel: Array<{ model: string; cost: number; calls: number }>;
 }
 
+interface ExecutionMetrics {
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalTokens: number;
+  totalLlmCalls: number;
+  avgTokensPerLlmCall: number | null;
+  avgTokensPerTask: number | null;
+  outputInputRatio: number | null;
+  totalToolCalls: number;
+  totalToolResults: number;
+  toolErrors: number;
+  toolBlocked: number;
+  toolWarnings: number;
+  toolCompletionRate: number | null;
+  uniqueTools: number;
+  topTools: Array<{ tool: string; calls: number; errors: number }>;
+}
+
 interface ActivityPattern {
   tasksByDayOfWeek: number[];
   tasksByHour: number[];
@@ -46,6 +64,7 @@ interface UsageInsightsData {
   generatedAt: number;
   taskMetrics: TaskMetrics;
   costMetrics: CostMetrics;
+  executionMetrics: ExecutionMetrics;
   activityPattern: ActivityPattern;
   topSkills: Array<{ skill: string; count: number }>;
   awuMetrics: AwuMetrics;
@@ -258,8 +277,18 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
 
   const tm = data?.taskMetrics;
   const cm = data?.costMetrics;
+  const em = data?.executionMetrics;
   const ap = data?.activityPattern;
   const awu = data?.awuMetrics;
+  const modelRows = cm?.costByModel ?? [];
+  const hasModelCost = modelRows.some((m) => m.cost > 0);
+  const modelBarMax =
+    modelRows.length === 0
+      ? 1
+      : hasModelCost
+        ? Math.max(...modelRows.map((m) => m.cost))
+        : Math.max(...modelRows.map((m) => m.calls), 1);
+  const hasAwuCard = !!(awu && awu.awuCount > 0);
   const maxDayTasks = ap ? Math.max(...ap.tasksByDayOfWeek, 1) : 1;
   const maxHourTasks = ap ? Math.max(...ap.tasksByHour, 1) : 1;
   const successRate =
@@ -353,43 +382,132 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
         </div>
       )}
 
-      {/* Cost + AWU row */}
-      {((cm && cm.totalCost > 0) || (awu && awu.awuCount > 0)) && (
-        <div className="insights-two-col">
-          {cm && cm.totalCost > 0 && (
+      {/* Token/Runtime + AWU row */}
+      {((em && (em.totalTokens > 0 || em.totalToolCalls > 0 || em.totalLlmCalls > 0)) ||
+        (awu && awu.awuCount > 0)) && (
+        <div className={`insights-two-col${hasAwuCard ? "" : " single"}`}>
+          {em && cm && (em.totalTokens > 0 || em.totalToolCalls > 0 || em.totalLlmCalls > 0) && (
             <div className="insights-card">
-              <div className="insights-card-header">Cost & Tokens</div>
+              <div className="insights-card-header">Token & Runtime</div>
               <div className="insights-cost-hero">
-                <span className="insights-cost-amount">${cm.totalCost.toFixed(2)}</span>
+                <span className="insights-cost-amount">{formatTokens(em.totalTokens)}</span>
                 <span className="insights-cost-tokens">
-                  {formatTokens(cm.totalInputTokens + cm.totalOutputTokens)} tokens
+                  total tokens (prompt + completion)
                 </span>
               </div>
               <div className="insights-cost-split">
                 <div className="insights-cost-split-item">
-                  <span className="insights-cost-split-label">Input</span>
+                  <span className="insights-cost-split-label">Prompt</span>
+                  <span className="insights-cost-split-value">{formatTokens(em.totalPromptTokens)}</span>
+                </div>
+                <div className="insights-cost-split-item">
+                  <span className="insights-cost-split-label">Completion</span>
                   <span className="insights-cost-split-value">
-                    {formatTokens(cm.totalInputTokens)}
+                    {formatTokens(em.totalCompletionTokens)}
                   </span>
                 </div>
                 <div className="insights-cost-split-item">
-                  <span className="insights-cost-split-label">Output</span>
-                  <span className="insights-cost-split-value">
-                    {formatTokens(cm.totalOutputTokens)}
-                  </span>
+                  <span className="insights-cost-split-label">Cost</span>
+                  <span className="insights-cost-split-value">${cm.totalCost.toFixed(4)}</span>
                 </div>
               </div>
-              {cm.costByModel.length > 0 && (
-                <div className="insights-model-list">
-                  {cm.costByModel.slice(0, 4).map((m) => (
-                    <div key={m.model} className="insights-model-row">
-                      <span className="insights-model-name">{m.model}</span>
-                      <MiniBar value={m.cost} max={cm.costByModel[0].cost} />
-                      <span className="insights-model-cost">${m.cost.toFixed(4)}</span>
-                      <span className="insights-model-calls">{m.calls}\u00D7</span>
-                    </div>
-                  ))}
+
+              <div className="insights-runtime-grid">
+                <div className="insights-runtime-metric">
+                  <span className="insights-runtime-value">{em.totalLlmCalls}</span>
+                  <span className="insights-runtime-label">LLM calls</span>
                 </div>
+                <div className="insights-runtime-metric">
+                  <span className="insights-runtime-value">
+                    {em.avgTokensPerLlmCall !== null ? formatTokens(em.avgTokensPerLlmCall) : "\u2014"}
+                  </span>
+                  <span className="insights-runtime-label">Tok / call</span>
+                </div>
+                <div className="insights-runtime-metric">
+                  <span className="insights-runtime-value">
+                    {em.avgTokensPerTask !== null ? formatTokens(em.avgTokensPerTask) : "\u2014"}
+                  </span>
+                  <span className="insights-runtime-label">Tok / task</span>
+                </div>
+                <div className="insights-runtime-metric">
+                  <span className="insights-runtime-value">
+                    {em.outputInputRatio !== null ? `${em.outputInputRatio.toFixed(2)}x` : "\u2014"}
+                  </span>
+                  <span className="insights-runtime-label">Out / In</span>
+                </div>
+              </div>
+
+              {(em.totalToolCalls > 0 || em.toolErrors > 0 || em.toolBlocked > 0) && (
+                <>
+                  <div className="insights-runtime-grid">
+                    <div className="insights-runtime-metric">
+                      <span className="insights-runtime-value">{em.totalToolCalls}</span>
+                      <span className="insights-runtime-label">Tool calls</span>
+                    </div>
+                    <div className="insights-runtime-metric">
+                      <span className="insights-runtime-value">{em.totalToolResults}</span>
+                      <span className="insights-runtime-label">Tool results</span>
+                    </div>
+                    <div className="insights-runtime-metric">
+                      <span className="insights-runtime-value">{em.toolErrors}</span>
+                      <span className="insights-runtime-label">Tool errors</span>
+                    </div>
+                    <div className="insights-runtime-metric">
+                      <span className="insights-runtime-value">{em.uniqueTools}</span>
+                      <span className="insights-runtime-label">Unique tools</span>
+                    </div>
+                  </div>
+
+                  <div className="insights-runtime-note">
+                    {em.toolCompletionRate !== null
+                      ? `${em.toolCompletionRate.toFixed(0)}% completion`
+                      : "\u2014"}
+                    {" \u00B7 "}
+                    {em.toolBlocked} blocked
+                    {" \u00B7 "}
+                    {em.toolWarnings} warnings
+                  </div>
+
+                  {em.topTools.length > 0 && (
+                    <>
+                      <div className="insights-runtime-section-label">Top tools</div>
+                      <div className="insights-model-list">
+                        {em.topTools.slice(0, 4).map((tool) => (
+                          <div key={tool.tool} className="insights-model-row">
+                            <span className="insights-model-name">{tool.tool}</span>
+                            <MiniBar value={tool.calls} max={em.topTools[0].calls} />
+                            <span className="insights-model-cost">{tool.calls}\u00D7</span>
+                            <span className="insights-model-calls">
+                              {tool.errors > 0 ? `${tool.errors} err` : "\u00A0"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {cm.costByModel.length > 0 && (
+                <>
+                  <div className="insights-runtime-section-label">
+                    Top models by {hasModelCost ? "cost" : "calls"}
+                  </div>
+                  <div className="insights-model-list">
+                    {cm.costByModel.slice(0, 4).map((m) => (
+                      <div key={m.model} className="insights-model-row">
+                        <span className="insights-model-name">{m.model}</span>
+                        <MiniBar value={hasModelCost ? m.cost : m.calls} max={modelBarMax} />
+                        <span className="insights-model-cost">
+                          {hasModelCost ? `$${m.cost.toFixed(4)}` : `${m.calls}\u00D7`}
+                        </span>
+                        <span className="insights-model-calls">
+                          {hasModelCost ? `${m.calls}\u00D7` : "\u00A0"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
               )}
             </div>
           )}
