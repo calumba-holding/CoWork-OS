@@ -115,7 +115,7 @@ describe("StepFeed UX snapshots", () => {
       indicator: makeIndicator({
         icon: Check,
         tone: "success",
-        label: "Artifact emitted",
+        label: "Output ready",
       }),
       showConnectorAbove: true,
       expandable: true,
