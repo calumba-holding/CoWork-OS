@@ -1309,8 +1309,8 @@ export class TaskExecutor {
       const limit = 10;
       const recentLimit = 4;
       const maxLines = 14;
-      const recent = MemoryService.getRecent(workspaceId, recentLimit);
-      const search = MemoryService.search(workspaceId, trimmed, limit);
+      const recent = MemoryService.getRecentForPromptRecall(workspaceId, recentLimit);
+      const search = MemoryService.searchForPromptRecall(workspaceId, trimmed, limit);
 
       const seen = new Set<string>();
       const lines: string[] = [];
@@ -1982,6 +1982,25 @@ ${transcript}
   private completionVerificationMetadata: VerificationCompletionMetadata | null = null;
   private nonBlockingVerificationFailedStepIds: Set<string> = new Set();
   private blockingVerificationFailedStepIds: Set<string> = new Set();
+  private stepStopReasons: Set<
+    | "completed"
+    | "max_turns"
+    | "tool_error"
+    | "contract_block"
+    | "verification_block"
+    | "awaiting_user_input"
+    | "dependency_unavailable"
+  > = new Set();
+  private taskFailureDomains: Set<string> = new Set();
+  private readonly reliabilityV2DisableCompletionReform =
+    process.env.COWORK_RELIABILITY_V2_DISABLE_COMPLETION_REFORM === "1" ||
+    process.env.COWORK_RELIABILITY_V2_DISABLE_COMPLETION_REFORM === "true";
+  private readonly reliabilityV2DisableStepToolScoping =
+    process.env.COWORK_RELIABILITY_V2_DISABLE_STEP_TOOL_SCOPING === "1" ||
+    process.env.COWORK_RELIABILITY_V2_DISABLE_STEP_TOOL_SCOPING === "true";
+  private readonly reliabilityV2DisableBootstrapWrite =
+    process.env.COWORK_RELIABILITY_V2_DISABLE_BOOTSTRAP_WRITE === "1" ||
+    process.env.COWORK_RELIABILITY_V2_DISABLE_BOOTSTRAP_WRITE === "true";
   private budgetConstrainedFailedStepIds: Set<string> = new Set();
   /** Short log tag including first 8 chars of task ID for parent/child task traceability */
   private readonly logTag: string;
@@ -3317,6 +3336,11 @@ ${transcript}
     );
   }
 
+  private isSourceValidationGuardError(error: unknown): boolean {
+    const message = String((error as Any)?.message || error || "");
+    return /Task missing source validation:/i.test(message);
+  }
+
   private hasMinimumCategoryCoverage(candidate: string): boolean {
     const text = String(candidate || "").trim();
     if (!text) return false;
@@ -3340,17 +3364,104 @@ ${transcript}
   private shouldFinalizeAsPartialSuccess(error: unknown): boolean {
     if (!this.partialSuccessForCronEnabled) return false;
     if (this.task.source !== "cron") return false;
-    if (!this.isBudgetExhaustionError(error)) return false;
     const candidate = String(this.buildResultSummary() || this.getContentFallback() || "").trim();
     if (!candidate) return false;
-    return this.hasMinimumCategoryCoverage(candidate);
+    if (this.isBudgetExhaustionError(error)) {
+      return this.hasMinimumCategoryCoverage(candidate);
+    }
+    if (this.isSourceValidationGuardError(error)) {
+      // Cron runs using best-effort finalization should not fail hard when
+      // strict source-dating validation blocks finalization.
+      if (!this.shouldPreferBestEffortCompletion()) return false;
+      if (!this.hasFetchedWebEvidence(1)) return false;
+      return this.hasMinimumCategoryCoverage(candidate);
+    }
+    return false;
+  }
+
+  private withSourceValidationDisclaimer(summary: string): string {
+    const trimmed = String(summary || "").trim();
+    if (!trimmed) return "";
+    const disclaimer =
+      "Note: release/funding claims in this report could not be fully validated with dated source-page fetches in this run.";
+    if (trimmed.toLowerCase().includes("could not be fully validated with dated source-page fetches")) {
+      return trimmed;
+    }
+    return `${trimmed}\n\n${disclaimer}`;
+  }
+
+  private getPartialSuccessReason(error: unknown): string {
+    if (this.isBudgetExhaustionError(error)) {
+      return "Execution budget exhausted. Finalized with partial results.";
+    }
+    if (this.isSourceValidationGuardError(error)) {
+      return "Source-validation guard blocked strict completion. Finalized with partial results.";
+    }
+    return "Execution completed with partial results.";
+  }
+
+  private getPartialSuccessSummary(error: unknown): string {
+    const base =
+      this.buildResultSummary() || this.getContentFallback() || "Completed with partial results.";
+    if (this.isSourceValidationGuardError(error)) {
+      return this.withSourceValidationDisclaimer(base);
+    }
+    return base;
+  }
+
+  private classifyPartialSuccessFailureClass(error: unknown): NonNullable<Task["failureClass"]> {
+    if (this.isSourceValidationGuardError(error)) return "contract_error";
+    return this.classifyFailure(error);
+  }
+
+  private maybeFinalizeAsPartialSuccess(error: unknown): boolean {
+    if (!this.shouldFinalizeAsPartialSuccess(error)) return false;
+
+    const partialText = this.getPartialSuccessSummary(error);
+    const failureClass = this.classifyPartialSuccessFailureClass(error);
+    this.terminalStatus = "partial_success";
+    this.failureClass = failureClass;
+    this.emitEvent("log", { metric: "agent_partial_success_total", value: 1 });
+    if (failureClass === "budget_exhausted") {
+      this.emitEvent("log", { metric: "agent_budget_exhausted_total", value: 1 });
+      if (this.isTurnLimitExceededError(error)) {
+        this.emitEvent("log", { metric: "agent_turn_limit_exceeded_total", value: 1 });
+      }
+    }
+    this.finalizeTaskBestEffort(partialText, this.getPartialSuccessReason(error), {
+      terminalStatus: "partial_success",
+      failureClass,
+    });
+    return true;
+  }
+
+  private finalizeTaskWithFallback(resultSummary?: string): void {
+    try {
+      this.finalizeTask(resultSummary);
+    } catch (error) {
+      if (this.maybeFinalizeAsPartialSuccess(error)) return;
+      throw error;
+    }
   }
 
   private classifyFailure(error: unknown): NonNullable<Task["failureClass"]> {
     if (this.isBudgetExhaustionError(error)) return "budget_exhausted";
+    if (this.isSourceValidationGuardError(error)) return "contract_error";
     const message = String((error as Any)?.message || error || "");
     if (/contract_unmet_write_required|artifact_write_checkpoint_failed|required artifact mutation/i.test(message))
       return "contract_unmet_write_required";
+    if (/required verification|high-risk verification gate did not pass|verification failed/i.test(message))
+      return "required_verification";
+    if (/optional|non-blocking|nice-to-have/i.test(message)) return "optional_enrichment";
+    if (
+      /dependency_unavailable|enotfound|err_network|network changed|opening handshake has timed out|status:\s*408/i.test(
+        message,
+      )
+    ) {
+      return "dependency_unavailable";
+    }
+    if (/provider_quota|rate limit|too many requests|429/i.test(message)) return "provider_quota";
+    if (/user action required|approval|user denied/i.test(message)) return "user_blocker";
     if (/tool|web_search|web_fetch|run_command|tool call/i.test(message)) return "tool_error";
     if (/final response|directly address|completion contract|verification/i.test(message))
       return "contract_error";
@@ -4198,8 +4309,7 @@ ${transcript}
   private extractRequiredToolsFromStepDescription(description: string): Set<string> {
     const desc = String(description || "").toLowerCase();
     const required = new Set<string>();
-    const hasWriteIntent =
-      /\b(write|create|build|generate|produce|save|author|implement|configure|add)\b/.test(desc);
+    const hasWriteIntent = descriptionHasWriteIntent(desc);
 
     const knownTools = [
       "create_document",
@@ -4902,50 +5012,50 @@ ${transcript}
     return contract.mode === "mutation_required";
   }
 
+  private isOptionalFailureStepForBalancedCompletion(step: PlanStep): boolean {
+    this.ensureVerificationOutcomeSets();
+    const id = String(step.id || "").trim();
+    if (!id) return false;
+    if (this.nonBlockingVerificationFailedStepIds.has(id)) return true;
+    if (this.getBudgetConstrainedFailureStepIdSet().has(id)) return true;
+    const error = String(step.error || "").toLowerCase();
+    return /\b(optional|non-blocking|nice-to-have|warning)\b/.test(error);
+  }
+
   /**
    * Returns failed step IDs that can be safely waived at completion.
    * We only waive explicit verification failures (or heuristic fallback when kind is absent)
    * when all non-verification work steps completed successfully.
    */
   private getWaivableFailedStepIdsAtCompletion(): string[] {
+    this.ensureVerificationOutcomeSets();
     if (!this.plan?.steps?.length) return [];
     const failedSteps = this.plan.steps.filter((step) => step.status === "failed");
     if (failedSteps.length === 0) return [];
     const waivable = new Set<string>();
 
-    // Verification-only waivers: preserve existing behavior.
+    // Verification-only waivers are allowed only for optional/non-blocking failures.
     if (failedSteps.every((step) => this.isVerificationStepForCompletion(step))) {
-      const nonVerificationSteps = this.plan.steps.filter(
-        (step) => !this.isVerificationStepForCompletion(step),
-      );
-      if (
-        nonVerificationSteps.length > 0 &&
-        nonVerificationSteps.every((step) => step.status === "completed")
-      ) {
-        for (const step of failedSteps) {
-          const id = String(step.id || "").trim();
-          if (id) waivable.add(id);
+      for (const step of failedSteps) {
+        const id = String(step.id || "").trim();
+        if (!id) continue;
+        if (this.isOptionalFailureStepForBalancedCompletion(step)) {
+          waivable.add(id);
         }
       }
     }
 
-    // Budget-constrained web_search failures: waive when completion evidence indicates
-    // meaningful progress (final step completed or majority steps completed), and no
-    // blocking verification failures remain.
+    // Budget-constrained optional search failures are waivable when non-mutation.
     const hasBlockingVerificationFailure = failedSteps.some((step) =>
       this.blockingVerificationFailedStepIds.has(step.id),
     );
-    const completedSteps = this.plan.steps.filter((step) => step.status === "completed");
-    const finalStep = this.plan.steps[this.plan.steps.length - 1];
-    const finalStepCompleted = finalStep?.status === "completed";
-    const majorityCompleted = completedSteps.length > failedSteps.length;
-    if (!hasBlockingVerificationFailure && (finalStepCompleted || majorityCompleted)) {
+    if (!hasBlockingVerificationFailure) {
       const budgetFailedStepIds = this.getBudgetConstrainedFailureStepIdSet();
       for (const step of failedSteps) {
         const id = String(step.id || "").trim();
         if (!id) continue;
         if (this.isMutationRequiredStepForCompletion(step)) continue;
-        if (budgetFailedStepIds.has(id)) {
+        if (budgetFailedStepIds.has(id) && this.isOptionalFailureStepForBalancedCompletion(step)) {
           waivable.add(id);
         }
       }
@@ -4970,9 +5080,9 @@ ${transcript}
       .filter((stepId) => stepId.length > 0);
     if (normalized.length === 0) return undefined;
     const budgetCount = normalized.filter((stepId) => budgetFailedStepIds.has(stepId)).length;
-    if (budgetCount === 0) return "contract_error";
+    if (budgetCount === 0) return "optional_enrichment";
     if (budgetCount === normalized.length) return "budget_exhausted";
-    return "contract_error";
+    return "optional_enrichment";
   }
 
   private getVerificationStepIds(stepIds: string[]): string[] {
@@ -5073,6 +5183,11 @@ ${transcript}
     this.task.completedAt = Date.now();
     this.task.terminalStatus = terminalStatus;
     this.task.failureClass = failureClass;
+    const reliabilityOutcomes = this.computeReliabilityOutcomes(terminalStatus, failureClass);
+    this.task.coreOutcome = reliabilityOutcomes.coreOutcome;
+    this.task.dependencyOutcome = reliabilityOutcomes.dependencyOutcome;
+    this.task.failureDomains = reliabilityOutcomes.failureDomains;
+    this.task.stopReasons = reliabilityOutcomes.stopReasons;
     this.task.budgetUsage = this.getBudgetUsage();
     this.task.continuationCount = this.continuationCount;
     this.task.continuationWindow = this.continuationWindow;
@@ -5171,6 +5286,14 @@ ${transcript}
     }
     this.task.terminalStatus = computedTerminalStatus;
     this.task.failureClass = computedFailureClass;
+    const reliabilityOutcomes = this.computeReliabilityOutcomes(
+      this.task.terminalStatus,
+      this.task.failureClass,
+    );
+    this.task.coreOutcome = reliabilityOutcomes.coreOutcome;
+    this.task.dependencyOutcome = reliabilityOutcomes.dependencyOutcome;
+    this.task.failureDomains = reliabilityOutcomes.failureDomains;
+    this.task.stopReasons = reliabilityOutcomes.stopReasons;
     this.task.budgetUsage = this.getBudgetUsage();
     this.task.continuationCount = this.continuationCount;
     this.task.continuationWindow = this.continuationWindow;
@@ -5757,7 +5880,7 @@ ${transcript}
       const policyFiltered = filterToolsByPolicy(tools, this.getToolPolicyContext());
       const modeFiltered = this.applyWebSearchModeFilter(policyFiltered.tools);
       const agentPolicyFiltered = this.applyAgentPolicyToolFilter(modeFiltered);
-      return this.applyIntentFilter(agentPolicyFiltered);
+      return this.applyStepScopedToolPolicy(this.applyIntentFilter(agentPolicyFiltered));
     }
 
     let filtered = allTools
@@ -5791,7 +5914,7 @@ ${transcript}
     }
     const modeFiltered = this.applyWebSearchModeFilter(policyFiltered.tools);
     const agentPolicyFiltered = this.applyAgentPolicyToolFilter(modeFiltered);
-    return this.applyIntentFilter(agentPolicyFiltered);
+    return this.applyStepScopedToolPolicy(this.applyIntentFilter(agentPolicyFiltered));
   }
 
   /**
@@ -5910,14 +6033,136 @@ ${transcript}
     return this.capToolCount(filtered);
   }
 
+  private buildStepToolAllowlist(
+    stepContract: StepExecutionContract,
+    stepKind: "analysis" | "mutation_required" | "verification",
+    taskDomain: TaskDomain,
+  ): Set<string> {
+    const always = new Set<string>([
+      "revise_plan",
+      "scratchpad_write",
+      "scratchpad_read",
+      "task_history",
+      "list_directory",
+      "glob",
+      "grep",
+      "read_file",
+      "search_files",
+    ]);
+
+    const analysis = new Set<string>([
+      ...always,
+      "read_multiple_files",
+      "web_search",
+      "web_fetch",
+      "get_file_info",
+      "count_text",
+      "text_metrics",
+      "analyze_image",
+    ]);
+
+    const mutation = new Set<string>([
+      ...analysis,
+      "write_file",
+      "edit_file",
+      "copy_file",
+      "create_directory",
+      "rename_file",
+      "create_document",
+      "generate_document",
+      "create_spreadsheet",
+      "generate_spreadsheet",
+      "create_presentation",
+      "generate_presentation",
+      "run_command",
+      "run_applescript",
+    ]);
+
+    const verification = new Set<string>([
+      ...analysis,
+      "browser_navigate",
+      "browser_get_content",
+      "browser_get_text",
+      "browser_wait",
+      "browser_screenshot",
+    ]);
+
+    const base =
+      stepKind === "mutation_required"
+        ? mutation
+        : stepKind === "verification"
+          ? verification
+          : analysis;
+
+    for (const requiredTool of stepContract.requiredTools.values()) {
+      base.add(requiredTool);
+    }
+
+    if (taskDomain === "operations") {
+      base.add("run_command");
+    }
+    if (taskDomain === "writing") {
+      base.add("create_document");
+      base.add("generate_document");
+    }
+    return base;
+  }
+
+  private applyStepScopedToolPolicy(tools: Any[]): Any[] {
+    if (this.reliabilityV2DisableStepToolScoping) {
+      return tools;
+    }
+    if (!this.currentStepId || !this.plan?.steps?.length) {
+      return tools;
+    }
+    const step = this.plan.steps.find((candidate) => candidate.id === this.currentStepId);
+    if (!step) return tools;
+
+    const stepContract = this.resolveStepExecutionContract(step);
+    const stepKind: "analysis" | "mutation_required" | "verification" = stepContract.requiresMutation
+      ? "mutation_required"
+      : this.isVerificationStepForCompletion(step)
+        ? "verification"
+        : "analysis";
+    const allowlist = this.buildStepToolAllowlist(
+      stepContract,
+      stepKind,
+      this.getEffectiveTaskDomain(),
+    );
+    const stepText = `${step.description || ""}\n${this.task.prompt || ""}\n${this.lastAssistantOutput || ""}`.toLowerCase();
+    const mcpReferenced =
+      /\bmcp[_\s-]|connector|slack|salesforce|jira|linear|notion|github|postgres|mysql|hubspot\b/.test(
+        stepText,
+      );
+
+    const scoped = tools.filter((tool) => {
+      const name = String(tool.name || "");
+      if (name.startsWith("mcp_")) {
+        if (!mcpReferenced && !this.toolUsageCounts.get(name)) return false;
+      }
+      return allowlist.has(name);
+    });
+
+    const deepWorkBlockedBoost =
+      this.task.agentConfig?.deepWorkMode &&
+      this.recoveryRequestActive &&
+      (stepKind === "analysis" || stepKind === "verification")
+        ? 12
+        : 0;
+    const stepCap = stepKind === "mutation_required" ? 56 : stepKind === "verification" ? 32 : 40;
+    return this.capToolCount(scoped, stepCap + deepWorkBlockedBoost, stepCap + deepWorkBlockedBoost);
+  }
+
   /**
    * Cap total tool count by trimming MCP tools when the total exceeds adaptive caps.
    * Built-in tools are always kept. MCP tools are scored by keyword relevance
    * to recent task context and the top-N are kept. In low-signal cases, the
    * cap expands toward the soft limit to avoid hiding necessary tools.
    */
-  private capToolCount(tools: Any[]): Any[] {
-    const { baseCap, softCap } = this.getToolCountCaps();
+  private capToolCount(tools: Any[], baseCapOverride?: number, softCapOverride?: number): Any[] {
+    const configuredCaps = this.getToolCountCaps();
+    const baseCap = Math.max(20, Math.floor(baseCapOverride ?? configuredCaps.baseCap));
+    const softCap = Math.max(baseCap, Math.floor(softCapOverride ?? configuredCaps.softCap));
     if (tools.length <= baseCap) return tools;
 
     const builtIn = tools.filter((t) => !t.name.startsWith("mcp_"));
@@ -7129,6 +7374,73 @@ You are continuing a previous conversation. The context from the previous conver
     );
   }
 
+  private async performDeterministicArtifactBootstrap(
+    step: PlanStep,
+    stepContract: StepExecutionContract,
+  ): Promise<{ attempted: boolean; succeeded: boolean; path?: string; error?: string }> {
+    const candidate =
+      stepContract.targetPaths[0] ||
+      this.extractStepPathCandidates(step)[0] ||
+      this.extractStepPathCandidates({ ...step, description: this.task.prompt || "" } as PlanStep)[0] ||
+      "";
+    if (!candidate) return { attempted: false, succeeded: false };
+
+    const resolved = path.isAbsolute(candidate)
+      ? candidate
+      : path.resolve(this.workspace.path, candidate);
+    const ext = String(path.extname(resolved || "")).toLowerCase();
+    const textStubByExtension: Record<string, string> = {
+      ".md": "# Draft\n\nBootstrap artifact stub.\n",
+      ".txt": "Bootstrap artifact stub.\n",
+      ".json": "{\n  \"status\": \"draft\",\n  \"note\": \"bootstrap artifact stub\"\n}\n",
+      ".csv": "column,value\nstatus,draft\n",
+      ".html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Draft</title></head><body><p>Bootstrap artifact stub.</p></body></html>\n",
+      ".ts": "export const bootstrapDraft = true;\n",
+      ".tsx": "export const BootstrapDraft = () => null;\n",
+      ".js": "module.exports = { bootstrapDraft: true };\n",
+      ".jsx": "export default function BootstrapDraft(){ return null; }\n",
+      ".py": "bootstrap_draft = True\n",
+      ".yml": "status: draft\nnote: bootstrap artifact stub\n",
+      ".yaml": "status: draft\nnote: bootstrap artifact stub\n",
+      ".toml": "status = \"draft\"\nnote = \"bootstrap artifact stub\"\n",
+      ".sql": "-- bootstrap artifact stub\n",
+    };
+
+    this.emitEvent("log", {
+      metric: "artifact_bootstrap_attempted",
+      stepId: step.id,
+      path: resolved,
+      extension: ext || null,
+    });
+
+    try {
+      if (!textStubByExtension[ext]) {
+        return { attempted: true, succeeded: false, path: resolved, error: "unsupported_extension" };
+      }
+      fs.mkdirSync(path.dirname(resolved), { recursive: true });
+      if (!fs.existsSync(resolved) || fs.statSync(resolved).size === 0) {
+        fs.writeFileSync(resolved, textStubByExtension[ext], "utf8");
+        this.emitEvent("file_created", { path: resolved, source: "artifact_bootstrap" });
+      }
+      this.emitEvent("log", {
+        metric: "artifact_bootstrap_succeeded",
+        stepId: step.id,
+        path: resolved,
+        extension: ext || null,
+      });
+      return { attempted: true, succeeded: true, path: resolved };
+    } catch (error) {
+      const message = String((error as Any)?.message || error || "artifact_bootstrap_failed");
+      this.emitEvent("log", {
+        metric: "artifact_bootstrap_failed",
+        stepId: step.id,
+        path: resolved,
+        error: message,
+      });
+      return { attempted: true, succeeded: false, path: resolved, error: message };
+    }
+  }
+
   private buildWriteRecoveryTemplate(step: PlanStep, stepContract: StepExecutionContract): {
     templateId: string;
     steps: Array<{ description: string; kind?: PlanStep["kind"] }>;
@@ -8283,6 +8595,71 @@ You are continuing a previous conversation. The context from the previous conver
     this.trimWebEvidenceMemory();
   }
 
+  private formatDateAsIsoLocal(value: Date): string {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  private estimateRelativeDateSignal(quantity: number, rawUnit: string): string | null {
+    if (!Number.isFinite(quantity) || quantity <= 0) return null;
+    const unit = String(rawUnit || "").toLowerCase().replace(/\./g, "");
+    const unitMs =
+      /^(minute|min|mins|m)$/.test(unit)
+        ? 60_000
+        : /^(hour|hours|hr|hrs|h)$/.test(unit)
+          ? 3_600_000
+          : /^(day|days|d)$/.test(unit)
+            ? 86_400_000
+            : /^(week|weeks|wk|wks|w)$/.test(unit)
+              ? 604_800_000
+              : /^(month|months|mo|mos)$/.test(unit)
+                ? 2_592_000_000
+                : /^(year|years|yr|yrs|y)$/.test(unit)
+                  ? 31_536_000_000
+                  : 0;
+    if (!unitMs) return null;
+    return this.formatDateAsIsoLocal(new Date(Date.now() - quantity * unitMs));
+  }
+
+  private extractPublicationRelativeDateSignals(text: string, maxMatches = 3): string[] {
+    const value = String(text || "");
+    if (!value) return [];
+
+    const results: string[] = [];
+    const pushUnique = (candidate: string | null) => {
+      const normalized = String(candidate || "").trim();
+      if (!normalized) return;
+      if (results.includes(normalized)) return;
+      results.push(normalized);
+    };
+    const pushFromMatch = (quantityRaw: string, unitRaw: string) => {
+      const quantity = Number.parseInt(quantityRaw, 10);
+      if (!Number.isFinite(quantity) || quantity <= 0) return;
+      pushUnique(this.estimateRelativeDateSignal(quantity, unitRaw));
+    };
+
+    const cueRelative =
+      /\b(?:published|posted|updated|last updated|last modified|modified|as of|date)\b[^.\n]{0,100}?\b(\d+)\s*(minutes?|mins?|min\.?|hours?|hrs?|hr\.?|days?|weeks?|wks?|wk|months?|mos?|years?|yrs?)\s*ago\b/gi;
+    let match: RegExpExecArray | null;
+    while ((match = cueRelative.exec(value)) && results.length < maxMatches) {
+      pushFromMatch(match[1], match[2]);
+    }
+
+    const cueTodayYesterday =
+      /\b(?:published|posted|updated|last updated|last modified|modified|as of|date)\b[^.\n]{0,60}?\b(today|yesterday)\b/gi;
+    while ((match = cueTodayYesterday.exec(value)) && results.length < maxMatches) {
+      if (String(match[1]).toLowerCase() === "today") {
+        pushUnique(this.formatDateAsIsoLocal(new Date()));
+      } else {
+        pushUnique(this.formatDateAsIsoLocal(new Date(Date.now() - 86_400_000)));
+      }
+    }
+
+    return results.slice(0, maxMatches);
+  }
+
   private extractDateSignals(text: string, maxMatches = 3): string[] {
     const value = String(text || "");
     if (!value) return [];
@@ -8350,8 +8727,15 @@ You are continuing a previous conversation. The context from the previous conver
     if (!url) return;
     const title = typeof result?.title === "string" ? result.title.trim() : "";
     const content = typeof result?.content === "string" ? result.content : "";
+    const fetchSucceeded = result?.success !== false;
+    if (!fetchSucceeded && !title && !content.trim()) return;
     const sampled = `${title}\n${content.slice(0, 12000)}`;
-    const publishDate = this.extractDateSignals(`${sampled}\n${url}`, 1)[0];
+    const explicitPublishDate =
+      typeof result?.publishDate === "string" ? result.publishDate.trim() : "";
+    const publishDate =
+      explicitPublishDate ||
+      this.extractDateSignals(`${sampled}\n${url}`, 1)[0] ||
+      this.extractPublicationRelativeDateSignals(sampled, 1)[0];
     this.addWebEvidenceEntry({
       tool: "web_fetch",
       url,
@@ -8712,6 +9096,23 @@ You are continuing a previous conversation. The context from the previous conver
     };
   }
 
+  private ensureReliabilityTrackingSets(): void {
+    if (!(this.stepStopReasons instanceof Set)) {
+      this.stepStopReasons = new Set<
+        | "completed"
+        | "max_turns"
+        | "tool_error"
+        | "contract_block"
+        | "verification_block"
+        | "awaiting_user_input"
+        | "dependency_unavailable"
+      >();
+    }
+    if (!(this.taskFailureDomains instanceof Set)) {
+      this.taskFailureDomains = new Set();
+    }
+  }
+
   private ensureVerificationOutcomeSets(): void {
     if (!(this.nonBlockingVerificationFailedStepIds instanceof Set)) {
       this.nonBlockingVerificationFailedStepIds = new Set();
@@ -8719,6 +9120,7 @@ You are continuing a previous conversation. The context from the previous conver
     if (!(this.blockingVerificationFailedStepIds instanceof Set)) {
       this.blockingVerificationFailedStepIds = new Set();
     }
+    this.ensureReliabilityTrackingSets();
   }
 
   private getNonBlockingFailedStepIdsAtCompletion(): string[] {
@@ -8847,9 +9249,11 @@ You are continuing a previous conversation. The context from the previous conver
     step: PlanStep,
   ): "artifact_write_required" | "artifact_presence_required" {
     const desc = String(step.description || "").toLowerCase();
+    const hasWriteIntent = descriptionHasWriteIntent(desc);
     if (
       this.isSummaryStep(step) ||
-      /\b(compile|finalize|package|bundle|deliver|report|summary)\b/.test(desc)
+      /\b(compile|finalize|package|bundle|deliver|report|summary)\b/.test(desc) ||
+      !hasWriteIntent
     ) {
       return "artifact_presence_required";
     }
@@ -9130,9 +9534,8 @@ You are continuing a previous conversation. The context from the previous conver
   private isVerificationOnlyPathStep(step: PlanStep): boolean {
     const desc = String(step.description || "").toLowerCase();
     const hasWriteOutputCue =
-      /\b(add|create|build|implement|scaffold|bootstrap|initialize|set up|setup|write|generate|render|provide|append|update|document|note)\b/.test(
-        desc,
-      );
+      descriptionHasWriteIntent(desc) ||
+      /\b(provide|note)\b/.test(desc);
     const explicitlyVerificationOnly = /\b(verify only|verification only|read-only|readonly)\b/.test(
       desc,
     );
@@ -9389,6 +9792,14 @@ You are continuing a previous conversation. The context from the previous conver
         .map((entry) => `${entry.url}|${entry.publishDate}`),
     );
     return datedFetched.size >= minSources;
+  }
+
+  private hasFetchedWebEvidence(minSources = 1): boolean {
+    const evidence = this.ensureWebEvidenceMemory();
+    const fetched = new Set(
+      evidence.filter((entry) => entry.tool === "web_fetch" && entry.url).map((entry) => entry.url),
+    );
+    return fetched.size >= minSources;
   }
 
   private requiresStrictResearchClaimValidation(candidate: string): boolean {
@@ -9956,10 +10367,67 @@ You are continuing a previous conversation. The context from the previous conver
     });
   }
 
+  private evaluateToolPolicy(toolCall: {
+    name: string;
+    input: Any;
+    followUp: boolean;
+  }): { decision: "deny" | "ask" | "allow"; reason: string } {
+    const toolName = String(toolCall.name || "").trim();
+    const configuredDenylist = String(process.env.COWORK_RELIABILITY_V2_TOOL_DENYLIST || "")
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const taskDenylist = Array.isArray(this.task.agentConfig?.toolRestrictions)
+      ? this.task.agentConfig?.toolRestrictions || []
+      : [];
+    const denylist = new Set<string>([...taskDenylist, ...configuredDenylist]);
+    if (denylist.has(toolName)) {
+      return { decision: "deny", reason: "deny_rule" };
+    }
+
+    if (this.slashBatchExternalPolicy === "confirm" && this.isExternalSideEffectToolCall(toolName, toolCall.input)) {
+      return { decision: "ask", reason: "ask_rule" };
+    }
+
+    return { decision: "allow", reason: "allow_rule" };
+  }
+
   private async maybeBlockToolByBatchExternalPolicy(
     content: Pick<LLMToolUse, "id" | "name" | "input">,
     followUp = false,
   ): Promise<LLMToolResult | null> {
+    const policyDecision = this.evaluateToolPolicy({
+      name: content.name,
+      input: content.input,
+      followUp,
+    });
+    this.emitEvent("log", {
+      metric: "tool_policy_decision",
+      tool: content.name,
+      decision: policyDecision.decision,
+      reason: policyDecision.reason,
+      followUp,
+    });
+    if (policyDecision.decision === "deny") {
+      const deniedMessage = `Tool "${content.name}" blocked by deny policy.`;
+      this.emitEvent("tool_blocked", {
+        tool: content.name,
+        reason: "tool_policy_deny",
+        message: deniedMessage,
+        followUp,
+      });
+      return {
+        type: "tool_result",
+        tool_use_id: content.id,
+        content: JSON.stringify({
+          error: deniedMessage,
+          blocked: true,
+          reason: "tool_policy_deny",
+        }),
+        is_error: true,
+      };
+    }
+
     const policy = this.slashBatchExternalPolicy;
     if (!policy || policy === "execute") {
       return null;
@@ -10773,6 +11241,8 @@ You are continuing a previous conversation. The context from the previous conver
       this.ensureVerificationOutcomeSets();
       this.nonBlockingVerificationFailedStepIds.clear();
       this.blockingVerificationFailedStepIds.clear();
+      this.stepStopReasons.clear();
+      this.taskFailureDomains.clear();
       this.getBudgetConstrainedFailureStepIdSet().clear();
       this.terminalStatus = "ok";
       this.failureClass = undefined;
@@ -11044,7 +11514,7 @@ You are continuing a previous conversation. The context from the previous conver
       await this.spawnVerificationAgent();
 
       // Phase 3: Completion (single guarded finalizer path)
-      this.finalizeTask(this.buildResultSummary());
+      this.finalizeTaskWithFallback(this.buildResultSummary());
     } catch (error: Any) {
       // Wrap-up during any phase (including planning): treat as soft-deadline
       // and produce a best-effort completed answer.
@@ -11086,27 +11556,7 @@ You are continuing a previous conversation. The context from the previous conver
         }
       }
 
-      if (this.shouldFinalizeAsPartialSuccess(error)) {
-        const partialText =
-          this.buildResultSummary() || this.getContentFallback() || "Completed with partial results.";
-        const failureClass = this.classifyFailure(error);
-        this.terminalStatus = "partial_success";
-        this.failureClass = failureClass;
-        this.emitEvent("log", { metric: "agent_partial_success_total", value: 1 });
-        if (failureClass === "budget_exhausted") {
-          this.emitEvent("log", { metric: "agent_budget_exhausted_total", value: 1 });
-          if (this.isTurnLimitExceededError(error)) {
-            this.emitEvent("log", { metric: "agent_turn_limit_exceeded_total", value: 1 });
-          }
-        }
-        this.finalizeTaskBestEffort(
-          partialText,
-          "Execution budget exhausted. Finalized with partial results.",
-          {
-            terminalStatus: "partial_success",
-            failureClass,
-          },
-        );
+      if (this.maybeFinalizeAsPartialSuccess(error)) {
         return;
       }
 
@@ -12000,29 +12450,17 @@ Return ONLY a JSON object:
         );
       }
 
-      // If the only failures are verification steps AND all non-verification steps
-      // succeeded, treat as "completed with warnings" rather than hard failure.
-      // A verification step failing due to tool errors (e.g. bad params for read_file)
-      // should not negate successfully completed work.
-      const onlyVerificationStepsFailed = unrecoveredFailedSteps.every((s) =>
-        this.isVerificationStepForCompletion(s),
-      );
-      const nonVerificationSteps = this.plan.steps.filter(
-        (s) => !this.isVerificationStepForCompletion(s),
-      );
-      const allNonVerificationSucceeded =
-        nonVerificationSteps.length > 0 &&
-        nonVerificationSteps.every((s) => s.status === "completed");
-
-      // Check if the final plan step completed — meaning the deliverable was produced
-      // even though some earlier steps failed (e.g. a research step failed but others
-      // gathered enough context for the final output).
+      // Reliability V2 balanced mode: only optional failures may complete as warnings.
+      // Required failures must block completion (fail-closed) unless explicitly disabled.
       const lastStep = this.plan.steps[this.plan.steps.length - 1];
       const finalStepCompleted = lastStep?.status === "completed";
       const majorityCompleted = successfulSteps.length > blockingFailedSteps.length;
       const hasBlockingVerificationFailure = unrecoveredFailedSteps.some((s) =>
         this.blockingVerificationFailedStepIds.has(s.id),
       );
+      const optionalOnlyFailures =
+        unrecoveredFailedSteps.length > 0 &&
+        unrecoveredFailedSteps.every((s) => this.isOptionalFailureStepForBalancedCompletion(s));
 
       if (hasBlockingVerificationFailure) {
         const totalSteps = this.plan.steps.length;
@@ -12040,9 +12478,9 @@ Return ONLY a JSON object:
         throw new Error(
           `Task failed: high-risk verification gate did not pass - ${unrecoveredFailedSteps.map((s) => s.description).join("; ")}`,
         );
-      } else if (onlyVerificationStepsFailed && allNonVerificationSucceeded) {
+      } else if (optionalOnlyFailures) {
         console.log(
-          `${this.logTag} Only verification step(s) failed but all work steps completed. ` +
+          `${this.logTag} Only optional step(s) failed while required work succeeded. ` +
             `Treating as completed with warnings: ${failedDescriptions}`,
         );
         this.emitEvent("progress_update", {
@@ -12050,12 +12488,12 @@ Return ONLY a JSON object:
           completedSteps: successfulSteps.length,
           totalSteps: this.plan.steps.length,
           progress: 100,
-          message: `Completed with warnings: verification step(s) failed but all work steps succeeded`,
+          message: `Completed with warnings: optional step(s) failed but required work succeeded`,
           hasWarnings: true,
         });
         // Don't throw — allow task to complete
         this.planCompletedEffectively = true;
-      } else if (finalStepCompleted) {
+      } else if (this.reliabilityV2DisableCompletionReform && finalStepCompleted) {
         // Final deliverable step completed — the task produced useful output
         // even though some earlier steps failed. Treat as completed with warnings.
         console.log(
@@ -12072,7 +12510,7 @@ Return ONLY a JSON object:
         });
         // Don't throw — allow task to complete with warnings
         this.planCompletedEffectively = true;
-      } else if (majorityCompleted) {
+      } else if (this.reliabilityV2DisableCompletionReform && majorityCompleted) {
         // More steps succeeded than failed — the task produced enough useful output
         // to be considered partially successful. Common for tool errors (e.g. web_search
         // unavailable) where some steps fail but core work was still completed.
@@ -12166,6 +12604,7 @@ Return ONLY a JSON object:
   }
 
   private async executeStepLegacy(step: PlanStep): Promise<void> {
+    this.ensureVerificationOutcomeSets();
     const isPlanVerifyStep = isVerificationStepDescription(step.description);
     const stepContract = this.resolveStepExecutionContract(step);
     this.emitEvent("step_started", {
@@ -12782,6 +13221,10 @@ TASK / CONVERSATION HISTORY:
       let firstWriteCheckpointEscalated = false;
       let consecutiveToolUseStops = 0;
       let consecutiveMaxTokenStops = 0;
+      let verificationRewindAttempted = false;
+      let verificationCheckpointEmitted = false;
+      let bootstrapMutationAttempted = false;
+      let bootstrapMutationSucceeded = false;
       // Varied failure detection: non-resetting per-tool failure counter (not reset on success)
       const persistentToolFailures = new Map<string, number>();
       let variedFailureNudgeInjected = false;
@@ -12874,6 +13317,23 @@ TASK / CONVERSATION HISTORY:
           reasonCode: "missing_required_workspace_artifact",
           reason: workspacePreflightFailure,
         });
+      }
+
+      if (
+        continueLoop &&
+        !workspacePreflightFailure &&
+        stepContract.requiresMutation &&
+        !this.reliabilityV2DisableBootstrapWrite
+      ) {
+        this.emitEvent("log", {
+          metric: "checkpoint_id",
+          checkpointId: `mutation:${step.id}:pre_write`,
+          stepId: step.id,
+          checkpointType: "mutation",
+        });
+        const bootstrap = await this.performDeterministicArtifactBootstrap(step, stepContract);
+        bootstrapMutationAttempted = bootstrap.attempted;
+        bootstrapMutationSucceeded = bootstrap.succeeded;
       }
 
       while (continueLoop && iterationCount < maxIterations) {
@@ -13255,7 +13715,8 @@ TASK / CONVERSATION HISTORY:
           const pendingRequiredTools = Array.from(stepContract.requiredTools.values()).filter(
             (toolName) => !requiredToolsSucceeded.has(toolName),
           );
-          const mutationSatisfied = stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
+          const mutationSatisfied =
+            stepSucceededWithFileMutation || stepSucceededWithCanvasMutation || bootstrapMutationSucceeded;
           const stopReasonToolUseStreakThreshold =
             stepContract.mode === "mutation_required" && !mutationSatisfied
               ? Math.max(loopGuardrail.stopReasonToolUseStreak, 8)
@@ -14430,7 +14891,8 @@ TASK / CONVERSATION HISTORY:
             }
 
             if (!hasTextInThisResponse) {
-              const mutationSatisfied = stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
+              const mutationSatisfied =
+                stepSucceededWithFileMutation || stepSucceededWithCanvasMutation || bootstrapMutationSucceeded;
               const requireWriteNow = stepContract.mode === "mutation_required" && !mutationSatisfied;
               messages.push({
                 role: "user",
@@ -14574,18 +15036,22 @@ TASK / CONVERSATION HISTORY:
           }
         }
 
-        const mutationSatisfied = stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
+        const mutationSatisfied =
+          stepSucceededWithFileMutation || stepSucceededWithCanvasMutation || bootstrapMutationSucceeded;
         const creationHeavyStep =
           this.isScaffoldCreateStep(step) ||
-          /\b(add|create|build|implement|write|generate|render)\b/i.test(step.description || "");
+          descriptionHasWriteIntent(step.description || "") ||
+          /\b(render)\b/i.test(step.description || "");
         const firstWriteCheckpointEscalationIteration = creationHeavyStep ? 3 : 2;
-        const firstWriteCheckpointFailIteration = creationHeavyStep ? 6 : 4;
+        const firstWriteCheckpointFailIteration =
+          (creationHeavyStep ? 6 : 4) + (bootstrapMutationAttempted && !bootstrapMutationSucceeded ? 1 : 0);
 
         if (
           !stepFailed &&
           stepContract.requiresMutation &&
           iterationCount >= firstWriteCheckpointEscalationIteration &&
           !mutationAttempted &&
+          !bootstrapMutationSucceeded &&
           !firstWriteCheckpointEscalated
         ) {
           firstWriteCheckpointEscalated = true;
@@ -14723,7 +15189,8 @@ TASK / CONVERSATION HISTORY:
       const createdFilesAfterStep = createdFilesAfterStepList.length;
       const createdFileDetected = createdFilesAfterStep > createdFilesBeforeStep;
       const artifactPresenceSatisfied = createdFileDetected || foundArtifactVerificationEvidence;
-      const mutationSatisfied = stepSucceededWithFileMutation || stepSucceededWithCanvasMutation;
+      const mutationSatisfied =
+        stepSucceededWithFileMutation || stepSucceededWithCanvasMutation || bootstrapMutationSucceeded;
       const missingRequiredArtifactExtensions = requiredArtifactExtensions.filter(
         (extension) => !artifactExtensionsAvailable.has(extension),
       );
@@ -14860,6 +15327,15 @@ TASK / CONVERSATION HISTORY:
       const enforceVerificationOk =
         isVerifyStep &&
         (isPlanVerifyStep || isLastStep || /\bfinal verification\b/i.test(step.description || ""));
+      if (enforceVerificationOk && !verificationCheckpointEmitted) {
+        verificationCheckpointEmitted = true;
+        this.emitEvent("log", {
+          metric: "checkpoint_id",
+          checkpointId: `verify:${step.id}:pre_final`,
+          stepId: step.id,
+          checkpointType: "verification",
+        });
+      }
       if (!stepFailed && enforceVerificationOk && !this.isVerificationPassing(finalAssistantText)) {
         stepFailed = true;
         if (!lastFailureReason) {
@@ -14870,23 +15346,36 @@ TASK / CONVERSATION HISTORY:
       }
 
       let verificationAssessment: VerificationAssessment | null = null;
+      let strictVerificationOutcome: "required_fail" | "optional_fail" | "pending_user_action" | null =
+        null;
       if (
         stepFailed &&
         this.verificationOutcomeV2Enabled &&
         this.isVerificationStepForCompletion(step)
       ) {
+        strictVerificationOutcome = this.classifyVerificationOutcomeV2(
+          finalAssistantText,
+          lastFailureReason || "",
+        );
         verificationAssessment = this.assessVerificationFailure(
           step,
           finalAssistantText,
           lastFailureReason,
         );
-        if (verificationAssessment.outcome === "fail_blocking") {
+        if (
+          strictVerificationOutcome === "required_fail" ||
+          verificationAssessment.outcome === "fail_blocking"
+        ) {
           this.blockingVerificationFailedStepIds.add(step.id);
+          this.nonBlockingVerificationFailedStepIds.delete(step.id);
         } else {
           this.blockingVerificationFailedStepIds.delete(step.id);
           this.nonBlockingVerificationFailedStepIds.add(step.id);
           this.upsertCompletionVerificationMetadata(verificationAssessment);
-          if (verificationAssessment.outcome === "pending_user_action") {
+          if (
+            strictVerificationOutcome === "pending_user_action" ||
+            verificationAssessment.outcome === "pending_user_action"
+          ) {
             this.emitEvent("verification_pending_user_action", {
               stepId: step.id,
               stepDescription: step.description,
@@ -14909,6 +15398,33 @@ TASK / CONVERSATION HISTORY:
         }
       }
 
+      if (
+        stepFailed &&
+        strictVerificationOutcome === "required_fail" &&
+        enforceVerificationOk &&
+        !verificationRewindAttempted
+      ) {
+        verificationRewindAttempted = true;
+        this.emitEvent("log", {
+          metric: "checkpoint_id",
+          checkpointId: `verify:${step.id}:rewind_attempt_1`,
+          stepId: step.id,
+          checkpointType: "rewind",
+          rewindAttempt: 1,
+        });
+        messages.push({
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                "Verification rewind attempt: fix only required checklist gaps now. " +
+                "Keep optional enhancements out of scope and return explicit pass/fail for required checks.",
+            },
+          ],
+        });
+      }
+
       // Step completed or failed
 
       this.recordAssistantOutput(messages, step);
@@ -14917,6 +15433,12 @@ TASK / CONVERSATION HISTORY:
       this.updateConversationHistory(messages);
 
       if (awaitingUserInput) {
+        this.stepStopReasons.add("awaiting_user_input");
+        this.emitEvent("log", {
+          metric: "step_stop_reason",
+          stepId: step.id,
+          reason: "awaiting_user_input",
+        });
         throw new AwaitingUserInputError(awaitingUserInputReason || "Awaiting user input");
       }
 
@@ -14925,6 +15447,20 @@ TASK / CONVERSATION HISTORY:
       } else {
         this.consecutiveSearchStepCount = 0;
       }
+
+      const stepStopReason = this.deriveStepStopReason({
+        stepFailed,
+        failureReason: String(lastFailureReason || ""),
+        awaitingUserInput,
+        iterationCount,
+        maxIterations,
+      });
+      this.stepStopReasons.add(stepStopReason);
+      this.emitEvent("log", {
+        metric: "step_stop_reason",
+        stepId: step.id,
+        reason: stepStopReason,
+      });
 
       // Mark step as failed if all tools failed/were disabled
       if (stepFailed) {
@@ -14938,6 +15474,9 @@ TASK / CONVERSATION HISTORY:
           this.getBudgetConstrainedFailureStepIdSet().add(step.id);
         } else {
           this.getBudgetConstrainedFailureStepIdSet().delete(step.id);
+        }
+        for (const domain of this.inferFailureDomainsFromReason(lastFailureReason || "")) {
+          this.taskFailureDomains.add(domain);
         }
         const isNonBlockingVerificationFailure = this.nonBlockingVerificationFailedStepIds.has(
           step.id,
@@ -15268,7 +15807,7 @@ TASK / CONVERSATION HISTORY:
         }
       }
 
-      this.finalizeTask(this.buildResultSummary());
+      this.finalizeTaskWithFallback(this.buildResultSummary());
     } finally {
       await this.toolRegistry.cleanup().catch((e) => {
         console.error("Cleanup error:", e);
@@ -15302,7 +15841,7 @@ TASK / CONVERSATION HISTORY:
       if (pendingSteps.length === 0) {
         // All steps were already completed before interruption — just finalize
         console.log(`${this.logTag} All plan steps already completed, finalizing`);
-        this.finalizeTask(this.buildResultSummary());
+        this.finalizeTaskWithFallback(this.buildResultSummary());
         return;
       }
 
@@ -15375,7 +15914,7 @@ TASK / CONVERSATION HISTORY:
         }
       }
 
-      this.finalizeTask(this.buildResultSummary());
+      this.finalizeTaskWithFallback(this.buildResultSummary());
     } catch (error: Any) {
       if (this.cancelled) {
         console.log(
@@ -15513,7 +16052,7 @@ TASK / CONVERSATION HISTORY:
       if (pendingSteps.length === 0) {
         // All steps were already completed — just finalize
         console.log(`${this.logTag} All plan steps already completed, finalizing`);
-        this.finalizeTask(this.buildResultSummary());
+        this.finalizeTaskWithFallback(this.buildResultSummary());
         return;
       }
 
@@ -15595,7 +16134,7 @@ TASK / CONVERSATION HISTORY:
         }
       }
 
-      this.finalizeTask(this.buildResultSummary());
+      this.finalizeTaskWithFallback(this.buildResultSummary());
     } catch (error: Any) {
       if (this.cancelled) {
         console.log(
@@ -15974,6 +16513,149 @@ TASK / CONVERSATION HISTORY:
       compact +
       " Please retry and I’ll continue from the same context."
     );
+  }
+
+  private classifyVerificationOutcomeV2(
+    assistantText: string,
+    failureReason: string,
+  ): "required_fail" | "optional_fail" | "pending_user_action" {
+    const lower = `${String(assistantText || "")}\n${String(failureReason || "")}`.toLowerCase();
+    if (
+      /\bpending user action\b|\bneeds user action\b|\bawaiting user\b|\buser action required\b/.test(
+        lower,
+      )
+    ) {
+      return "pending_user_action";
+    }
+    if (
+      /\boptional\b|\bnice[-\s]?to[-\s]?have\b|\bnon[-\s]?blocking\b|\bwarning\b|\bwould improve\b/.test(
+        lower,
+      )
+    ) {
+      return "optional_fail";
+    }
+    return "required_fail";
+  }
+
+  private deriveStepStopReason(opts: {
+    stepFailed: boolean;
+    failureReason: string;
+    awaitingUserInput: boolean;
+    iterationCount: number;
+    maxIterations: number;
+  }):
+    | "completed"
+    | "max_turns"
+    | "tool_error"
+    | "contract_block"
+    | "verification_block"
+    | "awaiting_user_input"
+    | "dependency_unavailable" {
+    if (opts.awaitingUserInput) return "awaiting_user_input";
+    const lower = String(opts.failureReason || "").toLowerCase();
+    if (!opts.stepFailed) return "completed";
+    if (opts.iterationCount >= opts.maxIterations) return "max_turns";
+    if (
+      /enotfound|err_network|network changed|opening handshake has timed out|dependency_unavailable|status:\s*408/.test(
+        lower,
+      )
+    ) {
+      return "dependency_unavailable";
+    }
+    if (/contract_unmet_write_required|artifact_write_checkpoint_failed|required artifact/.test(lower)) {
+      return "contract_block";
+    }
+    if (/verification failed|required verification|does \*\*not\*\* pass the completion criteria/.test(lower)) {
+      return "verification_block";
+    }
+    return "tool_error";
+  }
+
+  private inferFailureDomainsFromReason(reason: string): string[] {
+    const lower = String(reason || "").toLowerCase();
+    const domains = new Set<string>();
+    if (/contract_unmet_write_required|artifact_write_checkpoint_failed|required artifact/.test(lower)) {
+      domains.add("required_contract");
+    }
+    if (/verification failed|required verification|platform minimums not met/.test(lower)) {
+      domains.add("required_verification");
+    }
+    if (
+      /dependency_unavailable|enotfound|err_network|network changed|opening handshake has timed out|status:\s*408/.test(
+        lower,
+      )
+    ) {
+      domains.add("dependency_unavailable");
+    }
+    if (/provider_quota|rate limit|too many requests|429/.test(lower)) {
+      domains.add("provider_quota");
+    }
+    if (/user action required|approval|user denied/.test(lower)) {
+      domains.add("user_blocker");
+    }
+    if (/\boptional\b|\bnon[-\s]?blocking\b|\bnice[-\s]?to[-\s]?have\b/.test(lower)) {
+      domains.add("optional_enrichment");
+    }
+    return Array.from(domains.values());
+  }
+
+  private computeReliabilityOutcomes(
+    terminalStatus: Task["terminalStatus"],
+    failureClass: Task["failureClass"],
+  ): {
+    coreOutcome: "ok" | "partial" | "failed";
+    dependencyOutcome: "healthy" | "degraded" | "down";
+    failureDomains: string[];
+    stopReasons: Array<
+      | "completed"
+      | "max_turns"
+      | "tool_error"
+      | "contract_block"
+      | "verification_block"
+      | "awaiting_user_input"
+      | "dependency_unavailable"
+    >;
+  } {
+    this.ensureVerificationOutcomeSets();
+    const domains = new Set<string>(this.taskFailureDomains);
+    const fc = String(failureClass || "").toLowerCase();
+    if (fc.includes("required_contract") || fc.includes("contract_unmet_write_required")) {
+      domains.add("required_contract");
+    }
+    if (fc.includes("required_verification")) {
+      domains.add("required_verification");
+    }
+    if (fc.includes("optional_enrichment")) {
+      domains.add("optional_enrichment");
+    }
+    if (fc.includes("dependency_unavailable") || fc.includes("external_unknown") || fc.includes("tool_error")) {
+      domains.add("dependency_unavailable");
+    }
+    if (fc.includes("provider_quota")) {
+      domains.add("provider_quota");
+    }
+    if (fc.includes("user_blocker")) {
+      domains.add("user_blocker");
+    }
+
+    const coreOutcome: "ok" | "partial" | "failed" =
+      terminalStatus === "failed"
+        ? "failed"
+        : terminalStatus === "partial_success" || terminalStatus === "needs_user_action"
+          ? "partial"
+          : "ok";
+
+    let dependencyOutcome: "healthy" | "degraded" | "down" = "healthy";
+    if (domains.has("dependency_unavailable") || domains.has("provider_quota")) {
+      dependencyOutcome = coreOutcome === "failed" ? "down" : "degraded";
+    }
+
+    return {
+      coreOutcome,
+      dependencyOutcome,
+      failureDomains: Array.from(domains.values()),
+      stopReasons: Array.from(this.stepStopReasons.values()),
+    };
   }
 
   /**
