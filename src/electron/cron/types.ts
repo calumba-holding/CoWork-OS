@@ -233,6 +233,12 @@ export interface CronServiceDeps {
           | "tool_error"
           | "contract_error"
           | "contract_unmet_write_required"
+          | "required_contract"
+          | "required_verification"
+          | "optional_enrichment"
+          | "dependency_unavailable"
+          | "provider_quota"
+          | "user_blocker"
           | "unknown"
           | null;
         budgetUsage?: {
