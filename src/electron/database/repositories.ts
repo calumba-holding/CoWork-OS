@@ -2624,6 +2624,11 @@ export interface MemoryStats {
   compressionRatio: number;
 }
 
+// Imported memories can optionally carry a lightweight control header on the first line.
+const IMPORTED_PROMPT_RECALL_IGNORE_MARKER = "[cowork:prompt_recall=ignore]";
+const buildImportedMemoryFilterSql = (contentExpr: string): string =>
+  `(${contentExpr} LIKE '[Imported from %' OR ${contentExpr} LIKE '${IMPORTED_PROMPT_RECALL_IGNORE_MARKER}%[Imported from %')`;
+
 export class MemoryRepository {
   constructor(private db: Database.Database) {}
 
@@ -2725,7 +2730,10 @@ export class MemoryRepository {
     return newMemory;
   }
 
-  update(id: string, updates: Partial<Pick<Memory, "summary" | "tokens" | "isCompressed">>): void {
+  update(
+    id: string,
+    updates: Partial<Pick<Memory, "summary" | "tokens" | "isCompressed" | "content">>,
+  ): void {
     const fields: string[] = [];
     const values: unknown[] = [];
 
@@ -2740,6 +2748,10 @@ export class MemoryRepository {
     if (updates.isCompressed !== undefined) {
       fields.push("is_compressed = ?");
       values.push(updates.isCompressed ? 1 : 0);
+    }
+    if (updates.content !== undefined) {
+      fields.push("content = ?");
+      values.push(updates.content);
     }
 
     if (fields.length === 0) return;
@@ -2886,7 +2898,7 @@ export class MemoryRepository {
         FROM memories_fts f
         JOIN memories m ON f.rowid = m.rowid
         WHERE memories_fts MATCH ?
-          AND m.content LIKE '[Imported from %'
+          AND ${buildImportedMemoryFilterSql("m.content")}
           ${privacyFilter}
         ORDER BY score
         LIMIT ?
@@ -2944,7 +2956,7 @@ export class MemoryRepository {
     const stmt = this.db.prepare(`
       SELECT m.id, m.summary, m.content, m.type, m.created_at, m.task_id
       FROM memories m
-      WHERE m.content LIKE '[Imported from %'
+      WHERE ${buildImportedMemoryFilterSql("m.content")}
         ${includePrivate ? "" : "AND m.is_private = 0"}
         ${where}
       ORDER BY m.created_at DESC
@@ -3025,7 +3037,7 @@ export class MemoryRepository {
     const privacyFilter = includePrivate ? "" : "AND is_private = 0";
     const stmt = this.db.prepare(`
       SELECT * FROM memories
-      WHERE content LIKE '[Imported from %' ${privacyFilter}
+      WHERE ${buildImportedMemoryFilterSql("content")} ${privacyFilter}
       ORDER BY created_at DESC
       LIMIT ?
     `);
@@ -3194,7 +3206,7 @@ export class MemoryRepository {
     const stmt = this.db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(tokens), 0) as total_tokens
       FROM memories
-      WHERE workspace_id = ? AND content LIKE '[Imported from %'
+      WHERE workspace_id = ? AND ${buildImportedMemoryFilterSql("content")}
     `);
     const row = stmt.get(workspaceId) as Record<string, unknown>;
     return {
@@ -3209,7 +3221,7 @@ export class MemoryRepository {
   findImported(workspaceId: string, limit = 50, offset = 0): Memory[] {
     const stmt = this.db.prepare(`
       SELECT * FROM memories
-      WHERE workspace_id = ? AND content LIKE '[Imported from %'
+      WHERE workspace_id = ? AND ${buildImportedMemoryFilterSql("content")}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
     `);
@@ -3222,7 +3234,7 @@ export class MemoryRepository {
    */
   deleteImported(workspaceId: string): number {
     const stmt = this.db.prepare(
-      `DELETE FROM memories WHERE workspace_id = ? AND content LIKE '[Imported from %'`,
+      `DELETE FROM memories WHERE workspace_id = ? AND ${buildImportedMemoryFilterSql("content")}`,
     );
     const result = stmt.run(workspaceId);
     return result.changes;
@@ -3362,7 +3374,7 @@ export class MemoryEmbeddingRepository {
       SELECT e.memory_id, e.workspace_id, e.embedding, e.updated_at
       FROM memory_embeddings e
       JOIN memories m ON m.id = e.memory_id
-      WHERE m.content LIKE '[Imported from %'
+      WHERE ${buildImportedMemoryFilterSql("m.content")}
       ORDER BY e.updated_at DESC
       LIMIT ? OFFSET ?
     `);
@@ -3402,7 +3414,7 @@ export class MemoryEmbeddingRepository {
       SELECT m.id as memory_id, m.workspace_id, m.updated_at, m.content, m.summary, e.updated_at as emb_updated_at
       FROM memories m
       LEFT JOIN memory_embeddings e ON e.memory_id = m.id
-      WHERE m.content LIKE '[Imported from %'
+      WHERE ${buildImportedMemoryFilterSql("m.content")}
         AND (e.memory_id IS NULL OR e.updated_at < m.updated_at)
       ORDER BY m.updated_at DESC
       LIMIT ?
@@ -3448,7 +3460,7 @@ export class MemoryEmbeddingRepository {
       WHERE workspace_id = ?
         AND memory_id IN (
           SELECT id FROM memories
-          WHERE workspace_id = ? AND content LIKE '[Imported from %'
+          WHERE workspace_id = ? AND ${buildImportedMemoryFilterSql("content")}
         )
     `);
     const result = stmt.run(workspaceId, workspaceId);
