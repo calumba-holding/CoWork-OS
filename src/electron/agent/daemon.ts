@@ -5032,6 +5032,7 @@ export class AgentDaemon extends EventEmitter {
             existingTask.title,
             typeof updates.resultSummary === "string" ? updates.resultSummary : undefined,
             taskId,
+            existingTask.source ?? "manual",
           );
         }
       }
