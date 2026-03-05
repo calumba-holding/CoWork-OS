@@ -9,6 +9,8 @@ describe("New Methods constants", () => {
   it("has approval methods", () => {
     expect(Methods.APPROVAL_RESPOND).toBe("approval.respond");
     expect(Methods.APPROVAL_LIST).toBe("approval.list");
+    expect(Methods.INPUT_REQUEST_LIST).toBe("input_request.list");
+    expect(Methods.INPUT_REQUEST_RESPOND).toBe("input_request.respond");
   });
 
   it("has task event methods", () => {
