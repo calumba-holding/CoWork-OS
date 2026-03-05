@@ -150,7 +150,7 @@ export class IntentRouter {
       "execution",
       3,
       "action-verb",
-      /\b(create|build|edit|write|fix|deploy|run|install|execute|open|search|fetch|schedule|configure|implement|check|read|review|find|analyze|examine|inspect|list|show|scan|look|update|modify|delete|remove|rename|move|copy|test|verify|continue|commit|push|pull|merge|raise|raised|cherry-?pick|rebase|revert|publish|release|tag|submit|approve|request|close|research|investigate|summarize|compare|generate|draft|prepare|export|troubleshoot|diagnose)\b/.test(
+      /\b(create|build|make|edit|write|fix|deploy|run|install|execute|open|search|fetch|schedule|configure|implement|check|read|review|find|analyze|examine|inspect|list|show|scan|look|update|modify|delete|remove|rename|move|copy|test|verify|continue|commit|push|pull|merge|raise|raised|cherry-?pick|rebase|revert|publish|release|tag|submit|approve|request|close|research|investigate|summarize|compare|generate|draft|prepare|export|troubleshoot|diagnose)\b/.test(
         lower,
       ),
     );
@@ -158,7 +158,7 @@ export class IntentRouter {
       "execution",
       2,
       "execution-target",
-      /\b(files?|folders?|repos?|projects?|commands?|scripts?|code|apps?|databases?|tests?|workspaces?|docs?|documents?|directories?|packages?|prs?|pull\s*requests?|branches?|commits?|releases?|tags?|issues?|pipelines?|builds?|reports?|presentations?|spreadsheets?|data|results|findings|sources|summary|analysis|insights|metrics)\b/.test(
+      /\b(files?|folders?|repos?|projects?|commands?|scripts?|code|apps?|databases?|tests?|workspaces?|docs?|documents?|directories?|packages?|prs?|pull\s*requests?|branches?|commits?|releases?|tags?|issues?|pipelines?|builds?|reports?|presentations?|spreadsheets?|data|results|findings|sources|summary|analysis|insights|metrics|websites?|web\s*pages?|webapps?|frontend|landing\s*pages?)\b/.test(
         lower,
       ),
     );
@@ -230,9 +230,17 @@ export class IntentRouter {
       "thinking",
       2,
       "exploratory-reasoning",
-      /\b(pros and cons|trade-?offs|what if|devil'?s advocate|on the other hand|explore (the |my )?(idea|options|angles))\b/.test(
+      /\b(pros and cons|trade-?offs|devil'?s advocate|on the other hand|explore (the |my )?(idea|options|angles))\b/.test(
         lower,
       ),
+    );
+    add(
+      "thinking",
+      2,
+      "what-if-exploration",
+      /\bwhat if\b/.test(lower) &&
+        /\?/.test(text) &&
+        !/\b(toggle|mode|button|switch|option|panel|feature|tab)\b/.test(lower),
     );
 
     // Workflow detection — sequential multi-phase prompts ("research X then create Y then email Z")
@@ -241,7 +249,7 @@ export class IntentRouter {
     const hasWorkflowConnectives = workflowConnectives.test(lower);
     const actionVerbMatches =
       lower.match(
-        /\b(create|build|edit|write|fix|deploy|run|install|execute|configure|implement|update|modify|delete|remove|test|verify|research|analyze|summarize|generate|send|email|present|export|schedule|review|compile|draft|prepare|deliver|share|upload|publish|troubleshoot|diagnose)\b/g,
+        /\b(create|build|make|edit|write|fix|deploy|run|install|execute|configure|implement|update|modify|delete|remove|test|verify|research|analyze|summarize|generate|send|email|present|export|schedule|review|compile|draft|prepare|deliver|share|upload|publish|troubleshoot|diagnose)\b/g,
       ) || [];
     const uniqueActionVerbs = new Set(actionVerbMatches).size;
 
@@ -270,7 +278,7 @@ export class IntentRouter {
     const wordCount = text.split(/\s+/).length;
     const actionVerbCount = (
       lower.match(
-        /\b(create|build|edit|write|fix|deploy|run|install|execute|configure|implement|update|modify|delete|remove|test|verify|troubleshoot|diagnose)\b/g,
+        /\b(create|build|make|edit|write|fix|deploy|run|install|execute|configure|implement|update|modify|delete|remove|test|verify|troubleshoot|diagnose)\b/g,
       ) || []
     ).length;
     const hasMultipleSteps =
