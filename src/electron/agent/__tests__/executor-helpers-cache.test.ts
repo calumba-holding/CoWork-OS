@@ -89,6 +89,27 @@ describe("ToolCallDeduplicator read-history invalidation", () => {
     expect(createCall.isDuplicate).toBe(true);
     expect(createCall.reason || "").toContain("Rate limit exceeded");
   });
+
+  it("resets mutation duplicate history per step while preserving read duplicates", () => {
+    const dedupe = new ToolCallDeduplicator(2, 60_000, 4, 20);
+
+    dedupe.recordCall("read_file", { path: "styles.css" }, '{"content":"..."}');
+    dedupe.recordCall("read_file", { path: "styles.css" }, '{"content":"..."}');
+    dedupe.recordCall("write_file", { path: "styles.css", content: "a" }, '{"success":true}');
+    dedupe.recordCall("write_file", { path: "styles.css", content: "a" }, '{"success":true}');
+
+    expect(dedupe.checkDuplicate("read_file", { path: "styles.css" }).isDuplicate).toBe(true);
+    expect(dedupe.checkDuplicate("write_file", { path: "styles.css", content: "a" }).isDuplicate).toBe(
+      true,
+    );
+
+    dedupe.resetMutationHistoryForNewStep();
+
+    expect(dedupe.checkDuplicate("read_file", { path: "styles.css" }).isDuplicate).toBe(true);
+    expect(dedupe.checkDuplicate("write_file", { path: "styles.css", content: "a" }).isDuplicate).toBe(
+      false,
+    );
+  });
 });
 
 describe("FileOperationTracker cache invalidation", () => {
