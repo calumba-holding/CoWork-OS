@@ -260,6 +260,17 @@ export const ApprovalResponseSchema = z.object({
   approved: z.boolean(),
 });
 
+const InputRequestAnswerSchema = z.object({
+  optionLabel: z.string().min(1).max(200).optional(),
+  otherText: z.string().min(1).max(MAX_PROMPT_LENGTH).optional(),
+});
+
+export const InputRequestResponseSchema = z.object({
+  requestId: z.string().uuid(),
+  status: z.enum(["submitted", "dismissed"]),
+  answers: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/), InputRequestAnswerSchema).optional(),
+});
+
 // ============ LLM Settings Schemas ============
 
 export const LLMProviderTypeSchema = z.enum(LLM_PROVIDER_TYPES);
