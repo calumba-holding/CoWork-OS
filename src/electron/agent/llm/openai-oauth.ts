@@ -1,9 +1,24 @@
-import {
-  loginOpenAICodex,
-  refreshOpenAICodexToken,
-  getOAuthApiKey,
-  OAuthCredentials,
-} from "@mariozechner/pi-ai";
+import type { OAuthAuthInfo, OAuthCredentials, OAuthPrompt } from "@mariozechner/pi-ai";
+import { loadPiAiOAuthModule } from "./pi-ai-loader";
+
+let proxyBootstrapPromise: Promise<void> | null = null;
+
+function ensureNodeFetchProxySupport(): void {
+  if (proxyBootstrapPromise || typeof process === "undefined" || !process.versions?.node) {
+    return;
+  }
+
+  // pi-ai <= 0.55.x set up Undici's env-based proxy agent as an OAuth import side effect.
+  proxyBootstrapPromise = import("undici")
+    .then(({ EnvHttpProxyAgent, setGlobalDispatcher }) => {
+      setGlobalDispatcher(new EnvHttpProxyAgent());
+    })
+    .catch((error) => {
+      console.warn("[OpenAI OAuth] Failed to initialize HTTP proxy support:", error);
+    });
+}
+
+ensureNodeFetchProxySupport();
 
 function getElectronShell(): Any | null {
   try {
@@ -64,9 +79,10 @@ export class OpenAIOAuth {
    */
   async authenticate(): Promise<OpenAIOAuthTokens> {
     console.log("[OpenAI OAuth] Starting authentication flow with pi-ai SDK...");
+    const { loginOpenAICodex } = await loadPiAiOAuthModule();
 
     const credentials = await loginOpenAICodex({
-      onAuth: (info) => {
+      onAuth: (info: OAuthAuthInfo) => {
         console.log("[OpenAI OAuth] Opening browser for authentication...");
         const shell = getElectronShell();
         if (shell?.openExternal) {
@@ -81,13 +97,13 @@ export class OpenAIOAuth {
           console.log("[OpenAI OAuth] Instructions:", info.instructions);
         }
       },
-      onPrompt: async (prompt) => {
+      onPrompt: async (prompt: OAuthPrompt) => {
         // This is called if manual input is needed (shouldn't happen with browser flow)
         console.log("[OpenAI OAuth] Prompt:", prompt.message);
         // Return empty string - browser flow should handle this
         return "";
       },
-      onProgress: (message) => {
+      onProgress: (message: string) => {
         console.log("[OpenAI OAuth] Progress:", message);
       },
       originator: "cowork-os",
@@ -106,6 +122,7 @@ export class OpenAIOAuth {
    */
   static async refreshTokens(tokens: OpenAIOAuthTokens): Promise<OpenAIOAuthTokens> {
     console.log("[OpenAI OAuth] Refreshing tokens...");
+    const { refreshOpenAICodexToken } = await loadPiAiOAuthModule();
 
     // refreshOpenAICodexToken expects the refresh token string, not the full credentials
     const newCredentials = await refreshOpenAICodexToken(tokens.refresh_token);
@@ -121,6 +138,7 @@ export class OpenAIOAuth {
   static async getApiKeyFromTokens(
     tokens: OpenAIOAuthTokens,
   ): Promise<{ apiKey: string; newTokens?: OpenAIOAuthTokens }> {
+    const { getOAuthApiKey } = await loadPiAiOAuthModule();
     const credentials = tokensToCredentials(tokens);
 
     const result = await getOAuthApiKey("openai-codex", { "openai-codex": credentials });
