@@ -288,6 +288,7 @@ function getConnectorEntries(): MCPRegistryEntry[] {
   const googleCalendarCommand = getConnectorCommandArgs("google-calendar-mcp");
   const googleDriveCommand = getConnectorCommandArgs("google-drive-mcp");
   const gmailCommand = getConnectorCommandArgs("gmail-mcp");
+  const googleWorkspaceCommand = getConnectorCommandArgs("google-workspace-mcp");
   // OAuth connectors
   const docusignCommand = getConnectorCommandArgs("docusign-mcp");
   const outreachCommand = getConnectorCommandArgs("outreach-mcp");
@@ -691,6 +692,47 @@ function getConnectorEntries(): MCPRegistryEntry[] {
       ],
       tags: ["google", "gmail", "email", "enterprise", "connector"],
       category: "communication",
+      verified: true,
+      featured: true,
+    },
+    {
+      id: "google-workspace",
+      name: "Google Workspace",
+      description:
+        "Unified Google Workspace connector for CoWork OS. Access Sheets, Docs, Chat, Drive, Gmail, and Calendar through one OAuth connection. Requires Google OAuth credentials with full Workspace scopes.",
+      version: LOCAL_CONNECTOR_VERSION,
+      author: "CoWork OS",
+      homepage: "https://github.com/CoWork-OS/CoWork-OS",
+      repository: "https://github.com/CoWork-OS/CoWork-OS",
+      license: "MIT",
+      installMethod: "manual",
+      transport: "stdio",
+      defaultCommand: googleWorkspaceCommand.command,
+      defaultArgs: googleWorkspaceCommand.args,
+      defaultEnv: {
+        GOOGLE_CLIENT_ID: "",
+        GOOGLE_CLIENT_SECRET: "",
+        GOOGLE_ACCESS_TOKEN: "",
+        GOOGLE_REFRESH_TOKEN: "",
+      },
+      tools: [
+        { name: "google-workspace.health", description: "Check connector health and auth status" },
+        { name: "google-workspace.sheets_create", description: "Create a new Google Spreadsheet" },
+        { name: "google-workspace.sheets_get", description: "Get spreadsheet metadata and sheet list" },
+        { name: "google-workspace.sheets_values_get", description: "Read cell values from a range" },
+        { name: "google-workspace.sheets_values_update", description: "Write values to a range" },
+        { name: "google-workspace.sheets_values_append", description: "Append rows to a spreadsheet" },
+        { name: "google-workspace.docs_create", description: "Create a new Google Document" },
+        { name: "google-workspace.docs_get", description: "Get document content and structure" },
+        { name: "google-workspace.docs_append_text", description: "Append text to a document" },
+        { name: "google-workspace.chat_spaces_list", description: "List Google Chat spaces" },
+        { name: "google-workspace.chat_messages_list", description: "List messages in a Chat space" },
+        { name: "google-workspace.chat_messages_create", description: "Send a message to a Chat space" },
+        { name: "google-workspace.drive_files_list", description: "List or search Drive files" },
+        { name: "google-workspace.drive_files_get", description: "Get Drive file metadata" },
+      ],
+      tags: ["google", "workspace", "sheets", "docs", "chat", "drive", "enterprise", "connector"],
+      category: "enterprise",
       verified: true,
       featured: true,
     },

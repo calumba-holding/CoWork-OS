@@ -16,6 +16,7 @@ export type ConnectorCapabilityId =
   | "google-calendar"
   | "google-drive"
   | "gmail"
+  | "google-workspace"
   | "slack";
 
 export type Tier1IntegrationProvider =
@@ -24,6 +25,7 @@ export type Tier1IntegrationProvider =
   | "gmail"
   | "google-calendar"
   | "google-drive"
+  | "google-workspace"
   | "jira"
   | "linear"
   | "hubspot";
@@ -307,6 +309,24 @@ const CAPABILITIES: Record<ConnectorCapabilityId, ConnectorCapability> = {
     },
     tier1: true,
   },
+  "google-workspace": {
+    id: "google-workspace",
+    name: "Google Workspace",
+    registryEntryId: "google-workspace",
+    authMethods: ["oauth"],
+    oauthProvider: "google-workspace",
+    // One token covers all Google Workspace services
+    readinessAny: [["GOOGLE_ACCESS_TOKEN"]],
+    readinessByAuth: {
+      oauth: [["GOOGLE_ACCESS_TOKEN", "GOOGLE_REFRESH_TOKEN"]],
+    },
+    healthTool: "google-workspace.health",
+    links: {
+      dashboard: "https://console.cloud.google.com/apis/credentials",
+      oauth_docs: "https://developers.google.com/workspace/guides/auth-overview",
+    },
+    tier1: true,
+  },
 };
 
 export const TIER1_CONNECTOR_IDS: Tier1IntegrationProvider[] = [
@@ -315,6 +335,7 @@ export const TIER1_CONNECTOR_IDS: Tier1IntegrationProvider[] = [
   "gmail",
   "google-calendar",
   "google-drive",
+  "google-workspace",
   "jira",
   "linear",
   "hubspot",

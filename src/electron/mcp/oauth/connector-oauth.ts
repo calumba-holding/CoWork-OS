@@ -10,6 +10,7 @@ export type ConnectorOAuthProvider =
   | "google-calendar"
   | "google-drive"
   | "gmail"
+  | "google-workspace"
   | "docusign"
   | "outreach"
   | "slack";
@@ -80,6 +81,7 @@ export async function startConnectorOAuth(
     case "google-calendar":
     case "google-drive":
     case "gmail":
+    case "google-workspace":
       return startGoogleOAuth(request);
     case "docusign":
       return startDocusignOAuth(request);
@@ -492,7 +494,7 @@ async function startZendeskOAuth(request: ConnectorOAuthRequest): Promise<Connec
   };
 }
 
-// --- Google OAuth (Calendar, Drive, Gmail) ---
+// --- Google OAuth (Calendar, Drive, Gmail, full Workspace) ---
 
 const GOOGLE_SCOPES_MAP: Record<string, string> = {
   "google-calendar":
@@ -501,6 +503,15 @@ const GOOGLE_SCOPES_MAP: Record<string, string> = {
     "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
   gmail:
     "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.labels",
+  // Full Google Workspace: covers Sheets, Docs, Chat, Drive, Gmail, Calendar in one OAuth consent
+  "google-workspace":
+    "https://www.googleapis.com/auth/drive " +
+    "https://www.googleapis.com/auth/spreadsheets " +
+    "https://www.googleapis.com/auth/documents " +
+    "https://www.googleapis.com/auth/gmail.modify " +
+    "https://www.googleapis.com/auth/calendar " +
+    "https://www.googleapis.com/auth/chat.messages " +
+    "https://www.googleapis.com/auth/chat.spaces.readonly",
 };
 
 async function startGoogleOAuth(request: ConnectorOAuthRequest): Promise<ConnectorOAuthResult> {
