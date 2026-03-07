@@ -11,6 +11,9 @@ const XML_TOOL_PATTERNS: RegExp[] = [
   /<tool_name>\s*[^<]+<\/tool_name>\s*<parameters>\s*[\s\S]*?<\/parameters>/gi,
   /<tool_name>\s*[^<]+<\/tool_name>/gi,
   /<parameters>\s*[\s\S]*?<\/parameters>/gi,
+  // Bracket-style format used by some providers (e.g. MiniMax Portal)
+  /\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/gi,
+  /\[TOOL_RESULT\][\s\S]*?\[\/TOOL_RESULT\]/gi,
 ];
 
 const TOOL_TEXT_MARKERS = [
@@ -24,6 +27,10 @@ const TOOL_TEXT_MARKERS = [
   "</tool_result>",
   "\"tool_name\"",
   "\"tool_call\"",
+  "[TOOL_CALL]",
+  "[/TOOL_CALL]",
+  "[TOOL_RESULT]",
+  "[/TOOL_RESULT]",
 ];
 
 function stripFencedToolBlocks(input: string): { text: string; removed: number } {
