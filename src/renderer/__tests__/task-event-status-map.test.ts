@@ -18,7 +18,7 @@ describe("TASK_EVENT_STATUS_MAP", () => {
   it("keeps approval event semantics stable", () => {
     expect(TASK_EVENT_STATUS_MAP.approval_requested).toBe("blocked");
     expect(TASK_EVENT_STATUS_MAP.approval_granted).toBe("executing");
-    expect(TASK_EVENT_STATUS_MAP.approval_denied).toBe("failed");
+    expect(TASK_EVENT_STATUS_MAP.approval_denied).toBe("paused");
   });
 
   it("tracks structured input-request lifecycle semantics", () => {
@@ -28,6 +28,8 @@ describe("TASK_EVENT_STATUS_MAP", () => {
   });
 
   it("does not force terminal failure on intermediate execution failures", () => {
+    expect(TASK_EVENT_STATUS_MAP.auto_continuation_blocked).toBe("paused");
+    expect(TASK_EVENT_STATUS_MAP.no_progress_circuit_breaker).toBe("paused");
     expect(TASK_EVENT_STATUS_MAP.step_failed).toBeUndefined();
     expect(TASK_EVENT_STATUS_MAP.verification_failed).toBeUndefined();
     expect(TASK_EVENT_STATUS_MAP.timeline_error).toBeUndefined();
