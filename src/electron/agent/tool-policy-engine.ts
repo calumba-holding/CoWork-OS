@@ -138,7 +138,8 @@ function applyModeGate(toolName: string, mode: ExecutionMode): string | null {
     return `Tool "${toolName}" is only available in propose mode. Switch mode to propose to request structured user input.`;
   }
 
-  if (mode === "execute") return null;
+  // Verified mode allows mutations (like execute) but adds external verification after steps.
+  if (mode === "execute" || mode === "verified") return null;
   if (!isMutatingTool(toolName)) return null;
 
   if (mode === "propose") {
