@@ -65,6 +65,10 @@ const COMMAND_PREFIX_REGEX =
   /(^|\s)(python3?|node|npm|npx|pnpm|yarn|bash|sh|zsh|git|curl|wget|make|cmake|xcodebuild|uv|pip3?|go|cargo|java|ruby|php|ssh|scp|sftp|ping|traceroute|mtr|nc|netcat|telnet|dig|nslookup|nmap)\b/i;
 const SHELL_OPERATOR_REGEX = /(?:\|\||&&|[|;<>])/;
 const URL_LIKE_REGEX = /^[a-z][a-z0-9+.-]*:\/\//i;
+const STRONG_WRITE_VERB_REGEX =
+  /\b(write|create|draft|generate|produce|compose|build|save|author|scaffold|bootstrap|initialize|implement|configure|add|edit|update|append|rewrite)\b/;
+const PASSIVE_ARTIFACT_WRITE_CUE_REGEX =
+  /\b(saved|written|created|generated|produced|updated|edited|rewritten|appended|stored|placed)\s+(?:as|to|at|in|under)\b/;
 
 function normalizeWithLeadingDot(extension: string): string {
   const raw = String(extension || "").trim().toLowerCase();
@@ -173,11 +177,7 @@ export function extractArtifactPathCandidates(text: string): string[] {
 
 export function descriptionHasWriteIntent(text: string): boolean {
   const desc = String(text || "").toLowerCase();
-  const explicitWriteVerb =
-    /\b(write|create|draft|generate|produce|compose|build|save|author|scaffold|bootstrap|initialize|implement|configure|add|edit|update|append|rewrite)\b/.test(
-      desc,
-    );
-  if (explicitWriteVerb) return true;
+  if (descriptionHasStrongWriteIntent(desc)) return true;
 
   const structuredWriteVerb = /\b(lock|define|specify|establish|set)\b/.test(desc);
   if (structuredWriteVerb) {
@@ -200,6 +200,11 @@ export function descriptionHasWriteIntent(text: string): boolean {
       desc,
     );
   return prepareArtifactCue;
+}
+
+export function descriptionHasStrongWriteIntent(text: string): boolean {
+  const desc = String(text || "").toLowerCase();
+  return STRONG_WRITE_VERB_REGEX.test(desc) || PASSIVE_ARTIFACT_WRITE_CUE_REGEX.test(desc);
 }
 
 export function descriptionHasReadOnlyIntent(text: string): boolean {
