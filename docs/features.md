@@ -59,6 +59,27 @@
 - **Graceful Uncertainty**: Agent expresses uncertainty honestly and rates confidence on recommendations. Low-confidence messages display with an amber indicator.
 - **AI Playbook**: Auto-captures successful patterns (approach, outcome, tools) and lessons from failures with error classification (7 categories: tool failure, wrong approach, missing context, permission denied, timeout, rate limit, user correction). Time-based decay scoring deprioritises stale entries. Proven patterns reinforced on repeated success. Mid-task user corrections automatically detected and captured. Relevant entries injected into system prompts. View in Settings > AI Playbook.
 
+### Zero-Human Company Ops
+
+CoWork OS can also be configured as a founder-directed autonomous company shell by composing several existing systems into one operating loop:
+
+- **Venture operator workspace kit**: initializes `.cowork/` with `COMPANY.md`, `OPERATIONS.md`, `KPIS.md`, `PRIORITIES.md`, and `HEARTBEAT.md`
+- **Companies control surface**: `Settings > Companies` centralizes company creation, company-graph editing, linked operators, and direct handoff into Digital Twins or Mission Control
+- **Operator twins**: venture-oriented personas such as `Founder Office Operator`, `Company Planner`, `Growth Operator`, and `Customer Ops Lead`
+- **Heartbeat-driven follow-up**: lead operators can proactively run recurring checks defined in `HEARTBEAT.md`
+- **Strategic planner**: turns company goals, projects, and stalled work into planner-managed issues and optionally auto-dispatches them into tasks
+- **Mission Control ops view**: exposes planner config, planner runs, goals, projects, issues, linked tasks, issue comments, and run events
+- **Autonomy policy integration**: operator roles can carry reusable autonomy presets instead of relying on one global all-or-nothing mode
+- **Persisted company-linked operators**: venture/operator twins can be assigned to a company so the same operator set stays visible across Companies, Digital Twins, and Mission Control
+
+This workflow is designed for "human-directed, agent-operated" execution:
+
+- humans define business goals, guardrails, and irreversible approval policy
+- agents continuously create, route, and execute operational work
+- Mission Control becomes the monitoring and intervention cockpit
+
+See [Zero-Human Company Operations](zero-human-company.md) for architecture, setup recipe, monitoring flow, and example operating models.
+
 ### Reliability Flywheel
 
 Reliability is built as a continuous loop: capture failures -> replay deterministically -> gate risky completions -> harden nightly/release workflows.
@@ -113,7 +134,7 @@ The runtime now includes a set of decision and recovery contracts aimed at keepi
 
 Pre-built AI agent templates that create role-specific digital twins for team members. Each twin absorbs cognitively draining work so the human can stay in deep focus.
 
-- **10 built-in templates**: Software Engineer, Hardware Engineer, Engineering Manager, QA/Test Engineer, Technical Director, VP of Engineering, Product Manager, DevOps/SRE, Technical Writer, Data Scientist
+- **Built-in templates across engineering, management, product, data, operations, and venture/operator roles**: including Software Engineer, Engineering Manager, Product Manager, Company Planner, Founder Office Operator, Growth Operator, and Customer Ops Lead
 - **Proactive heartbeat tasks**: PR triage, status digests, dependency scans, test coverage checks — run automatically on a configurable interval
 - **10 cognitive offload categories**: context-switching, status-reporting, information-triage, decision-preparation, documentation, review-preparation, dependency-tracking, compliance-checks, knowledge-curation, routine-automation
 - **4 bundled skills**: `twin-status-report`, `twin-pr-triage`, `twin-meeting-prep`, `twin-decision-prep`
