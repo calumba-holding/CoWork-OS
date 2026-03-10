@@ -87,7 +87,7 @@
     "dev:start": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
     "dev:log": "cross-env COWORK_DEV_LOG_CAPTURE=1 node scripts/dev_with_logs.mjs",
     "dev:react": "vite",
-    "dev:electron": "tsc -p tsconfig.electron.json && cross-env NODE_ENV=development electron .",
+    "dev:electron": "tsc -p tsconfig.electron.json && cross-env ELECTRON_RUN_AS_NODE= NODE_ENV=development electron .",
     "build": "npm run build:react && concurrently -n electron,daemon \"npm run build:electron\" \"npm run build:daemon\" && npm run build:connectors",
     "build:react": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
