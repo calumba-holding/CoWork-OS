@@ -2202,8 +2202,10 @@ export async function setupIpcHandlers(
       cachedKimiModels: existingSettings.cachedKimiModels,
       cachedOpenAICompatibleModels: existingSettings.cachedOpenAICompatibleModels,
     });
-    // Clear cache so next task uses new settings
-    LLMProviderFactory.clearCache();
+    // saveSettings() already updates the in-memory cache; calling clearCache() here
+    // would throw away the updated cache and force a DB re-read, which can return
+    // stale data (e.g. if safeStorage decryption fails) and prevent mid-session
+    // provider changes from being detected by refreshProviderIfSettingsChanged().
     return { success: true };
   });
 
@@ -2370,6 +2372,18 @@ export async function setupIpcHandlers(
     const modelStatus = LLMProviderFactory.getProviderModelStatus(modifiedSettings);
     return modelStatus.models;
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.LLM_REFRESH_CUSTOM_PROVIDER_MODELS,
+    async (
+      _,
+      providerType: string,
+      overrides?: { apiKey?: string; baseUrl?: string },
+    ) => {
+      checkRateLimit(IPC_CHANNELS.LLM_REFRESH_CUSTOM_PROVIDER_MODELS);
+      return LLMProviderFactory.getCustomProviderModels(providerType as Any, overrides);
+    },
+  );
 
   // Set the current model (persists selection across sessions)
   ipcMain.handle(IPC_CHANNELS.LLM_SET_MODEL, async (_, modelKey: string) => {
@@ -3400,13 +3414,20 @@ export async function setupIpcHandlers(
     if (agentRoleRepo.findByName(request.name)) {
       throw new Error(`Agent role with name "${request.name}" already exists`);
     }
+    if (request.companyId !== undefined && request.companyId !== null) {
+      request.companyId = validateInput(UUIDSchema, request.companyId, "company ID");
+    }
     return agentRoleRepo.create(request);
   });
 
   ipcMain.handle(IPC_CHANNELS.AGENT_ROLE_UPDATE, async (_, request) => {
     checkRateLimit(IPC_CHANNELS.AGENT_ROLE_UPDATE);
     const validated = validateInput(UUIDSchema, request.id, "agent role ID");
-    const result = agentRoleRepo.update({ ...request, id: validated });
+    const normalizedRequest = { ...request, id: validated };
+    if (normalizedRequest.companyId !== undefined && normalizedRequest.companyId !== null) {
+      normalizedRequest.companyId = validateInput(UUIDSchema, normalizedRequest.companyId, "company ID");
+    }
+    const result = agentRoleRepo.update(normalizedRequest);
     if (!result) {
       throw new Error("Agent role not found");
     }
@@ -5513,6 +5534,9 @@ function setupKitHandlers(workspaceRepo: WorkspaceRepository): void {
       path.join(kitDirName, "LORE.md"),
       path.join(kitDirName, "HEARTBEAT.md"),
       path.join(kitDirName, "PRIORITIES.md"),
+      path.join(kitDirName, "COMPANY.md"),
+      path.join(kitDirName, "OPERATIONS.md"),
+      path.join(kitDirName, "KPIS.md"),
       path.join(kitDirName, "CROSS_SIGNALS.md"),
       path.join(kitDirName, "MISTAKES.md"),
       path.join(kitDirName, "memory"),
@@ -5563,8 +5587,12 @@ function setupKitHandlers(workspaceRepo: WorkspaceRepository): void {
     };
   };
 
-  const templatesForInit = (now: Date): Array<{ relPath: string; content: string }> => {
+  const templatesForInit = (
+    now: Date,
+    preset: "default" | "venture_operator" = "default",
+  ): Array<{ relPath: string; content: string }> => {
     const stamp = getLocalDateStamp(now);
+    const isVenturePreset = preset === "venture_operator";
     return [
       {
         relPath: path.join(kitDirName, "AGENTS.md"),
@@ -5586,6 +5614,79 @@ function setupKitHandlers(workspaceRepo: WorkspaceRepository): void {
           `- Preferences:\n` +
           `- Timezone:\n` +
           `- Communication style:\n`,
+      },
+      {
+        relPath: path.join(kitDirName, "COMPANY.md"),
+        content: isVenturePreset
+          ? `# Company Operating Profile\n\n` +
+            `## Mission\n` +
+            `- What are we trying to achieve?\n\n` +
+            `## Business Model\n` +
+            `- ICP:\n` +
+            `- Offer:\n` +
+            `- Pricing:\n` +
+            `- Growth loop:\n\n` +
+            `## Guardrails\n` +
+            `- Never do without founder approval:\n` +
+            `- Allowed to do autonomously:\n` +
+            `- Budget / risk thresholds:\n\n` +
+            `## Current Quarter\n` +
+            `- Primary company goal:\n` +
+            `- Main constraints:\n`
+          : `# Company Operating Profile\n\n` +
+            `## Mission\n` +
+            `- \n\n` +
+            `## Operating Guardrails\n` +
+            `- \n\n` +
+            `## Current Focus\n` +
+            `- \n`,
+      },
+      {
+        relPath: path.join(kitDirName, "OPERATIONS.md"),
+        content: isVenturePreset
+          ? `# Operating System\n\n` +
+            `## Work Loops\n` +
+            `- Product discovery:\n` +
+            `- Build / ship:\n` +
+            `- Customer support:\n` +
+            `- Growth / distribution:\n` +
+            `- Finance / admin:\n\n` +
+            `## Escalation Rules\n` +
+            `- When to wake the founder:\n` +
+            `- When to create a blocker issue:\n` +
+            `- When to pause outbound actions:\n\n` +
+            `## Definitions Of Done\n` +
+            `- Shipping:\n` +
+            `- Customer reply:\n` +
+            `- Experiment review:\n`
+          : `# Operating System\n\n` +
+            `## Recurring Loops\n` +
+            `- \n\n` +
+            `## Escalations\n` +
+            `- \n`,
+      },
+      {
+        relPath: path.join(kitDirName, "KPIS.md"),
+        content: isVenturePreset
+          ? `# KPIs\n\n` +
+            `## North Star\n` +
+            `- Metric:\n` +
+            `- Current:\n` +
+            `- Target:\n\n` +
+            `## Weekly Dashboard\n` +
+            `- Revenue:\n` +
+            `- New customers:\n` +
+            `- Churn / refunds:\n` +
+            `- Activation / conversion:\n` +
+            `- Support backlog:\n` +
+            `- Ship velocity:\n\n` +
+            `## Notes\n` +
+            `- \n`
+          : `# KPIs\n\n` +
+            `## Core Metrics\n` +
+            `- \n\n` +
+            `## Notes\n` +
+            `- \n`,
       },
       {
         relPath: path.join(kitDirName, "SOUL.md"),
@@ -5668,8 +5769,12 @@ function setupKitHandlers(workspaceRepo: WorkspaceRepository): void {
           `1. Fill in \`.cowork/USER.md\` (who you are, preferences).\n` +
           `2. Fill in \`.cowork/IDENTITY.md\` and \`.cowork/SOUL.md\` (how the assistant should act).\n` +
           `3. Add durable rules/constraints to \`.cowork/MEMORY.md\`.\n` +
-          `4. Add recurring checks to \`.cowork/HEARTBEAT.md\`.\n` +
-          `5. Review \`.cowork/VIBES.md\` and \`.cowork/LORE.md\` over time.\n\n` +
+          `4. Fill in \`.cowork/COMPANY.md\`, \`.cowork/OPERATIONS.md\`, and \`.cowork/KPIS.md\`.\n` +
+          `5. Add recurring checks to \`.cowork/HEARTBEAT.md\`.\n` +
+          `6. Review \`.cowork/VIBES.md\` and \`.cowork/LORE.md\` over time.\n\n` +
+          (isVenturePreset
+            ? `Suggested next step for venture mode: activate a founder-office or operator twin and link each active project to a workspace.\n\n`
+            : ``) +
           `When onboarding is complete, you can delete this file.\n`,
       },
       {
@@ -5768,20 +5873,38 @@ function setupKitHandlers(workspaceRepo: WorkspaceRepository): void {
         relPath: path.join(kitDirName, "HEARTBEAT.md"),
         content:
           `# Recurring Checks\n\n` +
+          `Use this file as the proactive maintenance contract for heartbeat runs.\n` +
+          `If a check turns up nothing actionable, the assistant stays silent.\n\n` +
           `## Daily\n` +
-          `- Review open loops and next actions\n` +
-          `- Summarize key decisions into .cowork/MEMORY.md\n\n` +
+          (isVenturePreset
+            ? `- Review open loops, priority issues, and due customer commitments\n` +
+              `- Check KPI deltas and write notable changes into .cowork/KPIS.md\n` +
+              `- Summarize key decisions into .cowork/MEMORY.md\n\n`
+            : `- Review open loops and next actions\n` +
+              `- Summarize key decisions into .cowork/MEMORY.md\n\n`) +
           `## Weekly\n` +
-          `- Review team performance and update autonomy levels if needed\n`,
+          (isVenturePreset
+            ? `- Review team performance and update autonomy levels if needed\n` +
+              `- Review experiment outcomes, blocked deals, and operator handoffs\n`
+            : `- Review team performance and update autonomy levels if needed\n`),
       },
       {
         relPath: path.join(kitDirName, "PRIORITIES.md"),
         content:
           `# Priorities\n\n` +
-          `## Current\n` +
-          `1. \n` +
-          `2. \n` +
-          `3. \n\n` +
+          (isVenturePreset
+            ? `## Company\n` +
+              `1. \n` +
+              `2. \n` +
+              `3. \n\n` +
+              `## Department / Operator\n` +
+              `1. \n` +
+              `2. \n` +
+              `3. \n\n`
+            : `## Current\n` +
+              `1. \n` +
+              `2. \n` +
+              `3. \n\n`) +
           `## Notes\n` +
           `- \n\n` +
           `## History\n`,
@@ -6131,6 +6254,7 @@ function setupKitHandlers(workspaceRepo: WorkspaceRepository): void {
   ipcMain.handle(IPC_CHANNELS.KIT_INIT, async (_event, request: WorkspaceKitInitRequest) => {
     checkRateLimit(IPC_CHANNELS.KIT_INIT, RATE_LIMIT_CONFIGS.limited);
     const mode = request?.mode === "overwrite" ? "overwrite" : "missing";
+    const preset = request?.templatePreset === "venture_operator" ? "venture_operator" : "default";
     const workspacePath = getWorkspacePath(request.workspaceId);
     const workspaceStateBefore = await readWorkspaceState(workspacePath);
 
@@ -6146,7 +6270,7 @@ function setupKitHandlers(workspaceRepo: WorkspaceRepository): void {
     await ensureDir(workspacePath, path.join(kitDirName, "feedback"));
 
     const now = new Date();
-    const templates = templatesForInit(now);
+    const templates = templatesForInit(now, preset);
     for (const t of templates) {
       const isBootstrapTemplate = t.relPath === path.join(kitDirName, "BOOTSTRAP.md");
       if (
