@@ -204,7 +204,7 @@ export class PersonaTemplateService {
     const soulJson = JSON.stringify(soulData);
 
     // Generate unique role name
-    const roleName = this.generateRoleName(template.id);
+    const roleName = this.generateRoleName(template.id, customization.companyId);
 
     // Check for name collision
     const existing = this.agentRoleRepo.findByName(roleName);
@@ -217,6 +217,7 @@ export class PersonaTemplateService {
     // Build CreateAgentRoleRequest
     const createRequest: CreateAgentRoleRequest = {
       name: roleName,
+      companyId: customization.companyId,
       displayName: customization.displayName || template.name + " Twin",
       description: template.description,
       icon: customization.icon || template.icon,
@@ -305,8 +306,9 @@ export class PersonaTemplateService {
   /**
    * Generate a unique role name from template ID
    */
-  private generateRoleName(templateId: string): string {
-    const baseName = `twin-${templateId}`;
+  private generateRoleName(templateId: string, companyId?: string): string {
+    const companySuffix = companyId ? `-${companyId.replace(/-/g, "").slice(0, 8)}` : "";
+    const baseName = `twin-${templateId}${companySuffix}`;
 
     // Check if base name is available
     if (!this.agentRoleRepo.findByName(baseName)) {
