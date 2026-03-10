@@ -5,6 +5,7 @@ import {
   HeartbeatEvent,
   HeartbeatStatus,
   HeartbeatConfig,
+  MemoryFeaturesSettings,
   AgentMention,
   Task,
   Activity,
@@ -15,6 +16,16 @@ import { MentionRepository } from "./MentionRepository";
 import { ActivityRepository } from "../activity/ActivityRepository";
 import { WorkingStateRepository } from "./WorkingStateRepository";
 import { buildRolePersonaPrompt } from "./role-persona";
+import {
+  buildHeartbeatWorkspaceContext,
+  HeartbeatMaintenanceStateStore,
+  type HeartbeatChecklistItem,
+  readHeartbeatChecklist,
+} from "./heartbeat-maintenance";
+import {
+  buildAgentConfigFromAutonomyPolicy,
+  resolveOperationalAutonomyPolicy,
+} from "./autonomy-policy";
 
 type HeartbeatWakeMode = "now" | "next-heartbeat";
 
@@ -41,6 +52,21 @@ interface WorkItems {
   relevantActivities: Activity[];
 }
 
+interface MaintenanceWorkspaceContext {
+  workspaceId: string;
+  workspacePath: string;
+}
+
+interface DueChecklistItem {
+  item: HeartbeatChecklistItem;
+  stateKey: string;
+}
+
+interface DueProactiveTask {
+  task: ProactiveTaskDefinition;
+  stateKey: string;
+}
+
 /**
  * Dependencies for HeartbeatService
  */
@@ -54,11 +80,24 @@ export interface HeartbeatServiceDeps {
     prompt: string,
     title: string,
     agentRoleId?: string,
+    options?: {
+      source?: Task["source"];
+      agentConfig?: Task["agentConfig"];
+    },
   ) => Promise<Task>;
   getTasksForAgent: (agentRoleId: string, workspaceId?: string) => Task[];
   getDefaultWorkspaceId: () => string | undefined;
   getDefaultWorkspacePath: () => string | undefined;
   getWorkspacePath: (workspaceId: string) => string | undefined;
+  recordActivity?: (params: {
+    workspaceId: string;
+    agentRoleId: string;
+    title: string;
+    description?: string;
+    metadata?: Record<string, unknown>;
+  }) => void;
+  listWorkspaceContexts?: () => MaintenanceWorkspaceContext[];
+  getMemoryFeaturesSettings?: () => MemoryFeaturesSettings;
 }
 
 /**
@@ -80,6 +119,7 @@ export class HeartbeatService extends EventEmitter {
   private proactiveTaskLastRunAt: Map<string, number> = new Map();
   private wakeNowThrottleUntil: Map<string, number> = new Map();
   private wakeImmediateTimers: Map<string, NodeJS.Timeout> = new Map();
+  private readonly maintenanceState = new HeartbeatMaintenanceStateStore();
   private started = false;
 
   private static readonly WAKE_COALESCE_MS = 30_000;
@@ -355,19 +395,27 @@ export class HeartbeatService extends EventEmitter {
         assignedTasks: workItems.assignedTasks.length,
         relevantActivities: workItems.relevantActivities.length,
       };
+      const maintenanceWorkspace = this.selectMaintenanceWorkspace(workItems);
+      const checklistItems = this.extractDueChecklistItems(agent, maintenanceWorkspace);
       const proactiveTasks = this.extractProactiveTasks(agent);
+      if (maintenanceWorkspace) {
+        result.maintenanceWorkspaceId = maintenanceWorkspace.workspaceId;
+      }
+      result.maintenanceChecks = checklistItems.length;
 
       // If work is found, create a task or process it
       const hasWork =
         workItems.pendingMentions.length > 0 ||
         workItems.assignedTasks.length > 0 ||
         wakeRequests.length > 0 ||
-        proactiveTasks.length > 0;
+        proactiveTasks.length > 0 ||
+        checklistItems.length > 0;
 
       if (hasWork) {
         result.status = "work_done";
 
-        const selectedWorkspace = this.selectWorkspaceForWork(workItems);
+        const selectedWorkspace =
+          this.selectWorkspaceForWork(workItems) ?? maintenanceWorkspace;
         const workspacePath = selectedWorkspace
           ? selectedWorkspace.workspacePath
           : this.deps.getDefaultWorkspacePath();
@@ -378,6 +426,7 @@ export class HeartbeatService extends EventEmitter {
           workItems,
           wakeRequests,
           proactiveTasks,
+          checklistItems,
           workspacePath,
         );
         const workspaceId = selectedWorkspace?.workspaceId || this.deps.getDefaultWorkspaceId();
@@ -388,8 +437,30 @@ export class HeartbeatService extends EventEmitter {
             prompt,
             `Heartbeat: ${agent.displayName}`,
             agent.id,
+            {
+              source: "api",
+              agentConfig: {
+                ...buildAgentConfigFromAutonomyPolicy(resolveOperationalAutonomyPolicy(agent)),
+                allowUserInput: false,
+                gatewayContext: "private",
+              },
+            },
           );
           result.taskCreated = task.id;
+          this.deps.recordActivity?.({
+            workspaceId,
+            agentRoleId: agent.id,
+            title: `Heartbeat surfaced work for ${agent.displayName}`,
+            description: this.describeHeartbeatWork(workItems, wakeRequests, proactiveTasks, checklistItems),
+            metadata: {
+              taskId: task.id,
+              maintenanceChecks: checklistItems.length,
+              wakeRequests: wakeRequests.length,
+              proactiveTasks: proactiveTasks.length,
+            },
+          });
+          this.commitChecklistRunState(checklistItems, Date.now());
+          this.commitProactiveTaskRunState(proactiveTasks, Date.now());
         } else {
           console.warn(
             "[HeartbeatService] Heartbeat skipped task creation: no workspace available",
@@ -404,6 +475,7 @@ export class HeartbeatService extends EventEmitter {
           result,
         });
       } else {
+        result.silent = true;
         this.emitHeartbeatEvent({
           type: "no_work",
           agentRoleId: agent.id,
@@ -669,14 +741,39 @@ export class HeartbeatService extends EventEmitter {
     // Get assigned tasks (in progress or pending)
     const assignedTasks = this.deps.getTasksForAgent(agent.id);
 
-    // Get recent relevant activities (last hour)
-    // Could be enhanced to filter by agent capabilities
+    const workspaceIds = new Set<string>();
+    for (const mention of pendingMentions) {
+      if (mention.workspaceId?.trim()) workspaceIds.add(mention.workspaceId.trim());
+    }
+    for (const task of assignedTasks) {
+      if (task.workspaceId?.trim()) workspaceIds.add(task.workspaceId.trim());
+    }
+    const fallbackWorkspaceId = this.deps.getDefaultWorkspaceId();
+    if (workspaceIds.size === 0 && fallbackWorkspaceId?.trim()) {
+      workspaceIds.add(fallbackWorkspaceId.trim());
+    }
+
     const relevantActivities: Activity[] = [];
+    const seenActivityIds = new Set<string>();
+    for (const workspaceId of Array.from(workspaceIds).slice(0, 3)) {
+      const entries =
+        this.deps.activityRepo.list?.({
+          workspaceId,
+          limit: 10,
+        }) || [];
+      for (const entry of entries) {
+        if (!entry?.id || seenActivityIds.has(entry.id)) continue;
+        if (Date.now() - entry.createdAt > 60 * 60 * 1000) continue;
+        seenActivityIds.add(entry.id);
+        relevantActivities.push(entry);
+      }
+    }
+    relevantActivities.sort((a, b) => b.createdAt - a.createdAt);
 
     return {
       pendingMentions,
       assignedTasks,
-      relevantActivities,
+      relevantActivities: relevantActivities.slice(0, 12),
     };
   }
 
@@ -744,7 +841,8 @@ export class HeartbeatService extends EventEmitter {
     agent: AgentRole,
     work: WorkItems,
     wakeRequests: HeartbeatWakeRequest[],
-    proactiveTasks: ProactiveTaskDefinition[],
+    proactiveTasks: DueProactiveTask[],
+    checklistItems: DueChecklistItem[],
     workspacePath?: string,
   ): string {
     const lines: string[] = [
@@ -764,6 +862,13 @@ export class HeartbeatService extends EventEmitter {
     const rolePersona = buildRolePersonaPrompt(agent, workspacePath);
     if (rolePersona) {
       lines.push(rolePersona);
+      lines.push("");
+    }
+
+    const workspaceContext = buildHeartbeatWorkspaceContext(workspacePath);
+    if (workspaceContext) {
+      lines.push("## Focused Workspace Context");
+      lines.push(workspaceContext);
       lines.push("");
     }
 
@@ -788,6 +893,26 @@ export class HeartbeatService extends EventEmitter {
       lines.push("");
     }
 
+    if (work.relevantActivities.length > 0) {
+      lines.push("## Recent Workspace Activity");
+      for (const activity of work.relevantActivities.slice(0, 8)) {
+        const detail = activity.description ? ` — ${activity.description}` : "";
+        lines.push(`- [${activity.activityType}] ${activity.title}${detail}`);
+      }
+      lines.push("");
+    }
+
+    if (checklistItems.length > 0) {
+      lines.push("## HEARTBEAT.md Recurring Checks");
+      lines.push("Run these user-defined checks proactively during this heartbeat:");
+      lines.push("");
+      for (const entry of checklistItems) {
+        lines.push(`### ${entry.item.sectionTitle}`);
+        lines.push(`- ${entry.item.title}`);
+        lines.push("");
+      }
+    }
+
     // Add proactive tasks from digital twin cognitive offload config
     if (proactiveTasks.length > 0) {
       lines.push("## Proactive Tasks");
@@ -795,7 +920,8 @@ export class HeartbeatService extends EventEmitter {
         "As part of this heartbeat, perform these proactive checks for your human counterpart:",
       );
       lines.push("");
-      for (const task of proactiveTasks) {
+      for (const entry of proactiveTasks) {
+        const task = entry.task;
         lines.push(`### ${task.name}`);
         lines.push(task.promptTemplate);
         lines.push("");
@@ -808,12 +934,18 @@ export class HeartbeatService extends EventEmitter {
       work.pendingMentions.length > 0 ||
       work.assignedTasks.length > 0 ||
       wakeRequests.length > 0 ||
-      proactiveTasks.length > 0;
+      proactiveTasks.length > 0 ||
+      checklistItems.length > 0;
 
     if (hasWorkOrSignal) {
       lines.push("Please review the above items and take appropriate action.");
       lines.push("For mentions, acknowledge them and respond as needed.");
       lines.push("For assigned tasks, continue working on them or report any blockers.");
+      if (checklistItems.length > 0) {
+        lines.push(
+          "For HEARTBEAT.md checks, use the normal toolset proactively. If nothing requires the user's attention after investigating, your final response should be exactly HEARTBEAT_OK.",
+        );
+      }
       if (wakeRequests.length > 0) {
         lines.push("For wake requests, treat them as explicit check-in prompts.");
       }
@@ -827,7 +959,7 @@ export class HeartbeatService extends EventEmitter {
   /**
    * Extract enabled proactive tasks from an agent's soul JSON (digital twin config)
    */
-  private extractProactiveTasks(agent: AgentRole): ProactiveTaskDefinition[] {
+  private extractProactiveTasks(agent: AgentRole): DueProactiveTask[] {
     if (!agent.soul || !agent.soul.trim()) return [];
     try {
       const soulData = JSON.parse(agent.soul);
@@ -840,7 +972,7 @@ export class HeartbeatService extends EventEmitter {
             (a.priority ?? 99) - (b.priority ?? 99),
         );
       const now = Date.now();
-      const dueTasks: ProactiveTaskDefinition[] = [];
+      const dueTasks: DueProactiveTask[] = [];
       for (const task of sortedTasks) {
         const frequencyMinutes =
           typeof task.frequencyMinutes === "number" && Number.isFinite(task.frequencyMinutes)
@@ -848,10 +980,10 @@ export class HeartbeatService extends EventEmitter {
             : 15;
         const frequencyMs = frequencyMinutes * 60 * 1000;
         const key = this.getProactiveTaskKey(agent.id, task.id);
-        const lastRunAt = this.proactiveTaskLastRunAt.get(key) || 0;
+        const lastRunAt =
+          this.proactiveTaskLastRunAt.get(key) || this.maintenanceState.getProactiveLastRunAt(key) || 0;
         if (!lastRunAt || now - lastRunAt >= frequencyMs) {
-          dueTasks.push(task);
-          this.proactiveTaskLastRunAt.set(key, now);
+          dueTasks.push({ task, stateKey: key });
         }
       }
       return dueTasks;
@@ -864,6 +996,98 @@ export class HeartbeatService extends EventEmitter {
     return `${agentRoleId}:${taskId}`;
   }
 
+  private getChecklistRunStateKey(
+    agentRoleId: string,
+    workspaceId: string,
+    checklistItemId: string,
+  ): string {
+    return `${agentRoleId}:${workspaceId}:${checklistItemId}`;
+  }
+
+  private selectMaintenanceWorkspace(work: WorkItems): MaintenanceWorkspaceContext | undefined {
+    const defaultWorkspaceId = this.deps.getDefaultWorkspaceId();
+    const defaultWorkspacePath = defaultWorkspaceId
+      ? this.deps.getWorkspacePath(defaultWorkspaceId)
+      : this.deps.getDefaultWorkspacePath();
+    const preferred: MaintenanceWorkspaceContext[] = [];
+    if (defaultWorkspaceId && defaultWorkspacePath?.trim()) {
+      preferred.push({
+        workspaceId: defaultWorkspaceId,
+        workspacePath: defaultWorkspacePath,
+      });
+    }
+
+    const others = (this.deps.listWorkspaceContexts?.() || []).filter(
+      (workspace) =>
+        workspace.workspaceId !== defaultWorkspaceId && typeof workspace.workspacePath === "string",
+    );
+
+    for (const workspace of [...preferred, ...others]) {
+      if (readHeartbeatChecklist(workspace.workspacePath).length > 0) {
+        return workspace;
+      }
+    }
+
+    return preferred[0];
+  }
+
+  private extractDueChecklistItems(
+    agent: AgentRole,
+    workspace: MaintenanceWorkspaceContext | undefined,
+  ): DueChecklistItem[] {
+    if (!workspace || !this.isMaintenanceHeartbeatEnabled(agent)) {
+      return [];
+    }
+    const items = readHeartbeatChecklist(workspace.workspacePath);
+    if (items.length === 0) return [];
+    const now = Date.now();
+    return items.filter((item) => {
+      const key = this.getChecklistRunStateKey(agent.id, workspace.workspaceId, item.id);
+      const lastRunAt = this.maintenanceState.getChecklistLastRunAt(key) || 0;
+      return item.cadenceMs === 0 || !lastRunAt || now - lastRunAt >= item.cadenceMs;
+    }).map((item) => ({
+      item,
+      stateKey: this.getChecklistRunStateKey(agent.id, workspace.workspaceId, item.id),
+    }));
+  }
+
+  private isMaintenanceHeartbeatEnabled(agent: AgentRole): boolean {
+    const features =
+      this.deps.getMemoryFeaturesSettings?.() || {
+        contextPackInjectionEnabled: true,
+        heartbeatMaintenanceEnabled: true,
+      };
+    return features.heartbeatMaintenanceEnabled && agent.autonomyLevel === "lead";
+  }
+
+  private commitChecklistRunState(items: DueChecklistItem[], runAt: number): void {
+    for (const entry of items) {
+      this.maintenanceState.setChecklistLastRunAt(entry.stateKey, runAt);
+    }
+  }
+
+  private commitProactiveTaskRunState(tasks: DueProactiveTask[], runAt: number): void {
+    for (const entry of tasks) {
+      this.proactiveTaskLastRunAt.set(entry.stateKey, runAt);
+      this.maintenanceState.setProactiveLastRunAt(entry.stateKey, runAt);
+    }
+  }
+
+  private describeHeartbeatWork(
+    work: WorkItems,
+    wakeRequests: HeartbeatWakeRequest[],
+    proactiveTasks: DueProactiveTask[],
+    checklistItems: DueChecklistItem[],
+  ): string {
+    const parts: string[] = [];
+    if (work.pendingMentions.length > 0) parts.push(`${work.pendingMentions.length} mention(s)`);
+    if (work.assignedTasks.length > 0) parts.push(`${work.assignedTasks.length} assigned task(s)`);
+    if (wakeRequests.length > 0) parts.push(`${wakeRequests.length} wake request(s)`);
+    if (proactiveTasks.length > 0) parts.push(`${proactiveTasks.length} proactive task(s)`);
+    if (checklistItems.length > 0) parts.push(`${checklistItems.length} HEARTBEAT.md check(s)`);
+    return parts.length > 0 ? parts.join(", ") : "Scheduled maintenance heartbeat found follow-up work.";
+  }
+
   private clearProactiveTaskRunState(agentRoleId: string): void {
     const prefix = `${agentRoleId}:`;
     for (const key of this.proactiveTaskLastRunAt.keys()) {
@@ -871,6 +1095,7 @@ export class HeartbeatService extends EventEmitter {
         this.proactiveTaskLastRunAt.delete(key);
       }
     }
+    this.maintenanceState.clearAgent(agentRoleId);
   }
 
   /**
