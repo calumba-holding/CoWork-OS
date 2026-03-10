@@ -166,6 +166,21 @@ function buildKitSections(
       extractor: (raw) => sanitizeForInjection(extractBulletSections(raw, { maxSections: 12 })),
     },
     {
+      relPath: path.join(KIT_DIRNAME, "COMPANY.md"),
+      title: "Company Operating Profile",
+      extractor: (raw) => sanitizeForInjection(clampSection(raw, MAX_SECTION_CHARS)),
+    },
+    {
+      relPath: path.join(KIT_DIRNAME, "OPERATIONS.md"),
+      title: "Operating System",
+      extractor: (raw) => sanitizeForInjection(clampSection(raw, MAX_SECTION_CHARS)),
+    },
+    {
+      relPath: path.join(KIT_DIRNAME, "KPIS.md"),
+      title: "KPIs",
+      extractor: (raw) => sanitizeForInjection(clampSection(raw, MAX_SECTION_CHARS)),
+    },
+    {
       relPath: path.join(KIT_DIRNAME, "USER.md"),
       title: "User Profile",
       extractor: (raw) => sanitizeForInjection(extractFilledFieldLines(raw)),
