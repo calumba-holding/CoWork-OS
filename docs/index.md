@@ -21,6 +21,9 @@ hero:
       text: Reliability Flywheel
       link: /reliability-flywheel
     - theme: alt
+      text: Zero-Human Company Ops
+      link: /zero-human-company
+    - theme: alt
       text: GitHub
       link: https://github.com/CoWork-OS/CoWork-OS
 
@@ -41,4 +44,6 @@ features:
     details: Local-first architecture, sandboxed execution, guardrails, approval workflows, encrypted storage, and 3200+ tests.
   - title: Best-Fit Operational Workflows
     details: Purpose-built packs for Support Ops, IT Ops, and Sales Ops — governed outcome delivery for the workflows where AI assistance has the clearest ROI. See the Best-Fit Workflows guide.
+  - title: Zero-Human Company Ops
+    details: Venture operator workspace kits, a dedicated Companies control surface, persistent operator twins, strategic planner issue generation, and Mission Control monitoring for founder-directed autonomous company loops.
 ---
