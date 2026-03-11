@@ -128,6 +128,37 @@ describeWithSqlite("StrategicPlannerService", () => {
     ).toBe(true);
   });
 
+  it("uses the company default workspace instead of creating workspace-link issues", async () => {
+    const company = core.createCompany({
+      name: "Planner Workspace Co",
+      slug: "planner-workspace-co",
+    });
+    core.createProject({
+      companyId: company.id,
+      name: "Growth Engine",
+    });
+
+    planner.updateConfig(company.id, {
+      enabled: true,
+      maxIssuesPerRun: 5,
+      autoDispatch: false,
+    });
+
+    const run = await planner.runNow({ companyId: company.id, trigger: "manual" });
+    const issues = core.listIssues({ companyId: company.id, limit: 20 });
+
+    expect(run.status).toBe("completed");
+    expect(issues.some((issue) => issue.title === "Link a workspace for project: Growth Engine")).toBe(false);
+    expect(
+      issues.some(
+        (issue) =>
+          issue.title === "Define next deliverable for project: Growth Engine" &&
+          issue.workspaceId === core.getCompany(company.id)?.defaultWorkspaceId,
+      ),
+    ).toBe(true);
+    expect(core.listProjectWorkspaces(core.listProjects({ companyId: company.id })[0]!.id)).toHaveLength(1);
+  });
+
   it("auto-dispatches planner-managed issues into task runs when enabled", async () => {
     const workspace = insertWorkspace();
     const company = core.getDefaultCompany();
@@ -187,5 +218,56 @@ describeWithSqlite("StrategicPlannerService", () => {
     expect(tasks[0]?.issueId).toBeTruthy();
     expect(tasks[0]?.heartbeatRunId).toBeTruthy();
     expect(tasks[0]?.agentConfig?.autonomousMode).toBe(true);
+  });
+
+  it("uses the control-plane workspace link tool instructions for project workspace issues", async () => {
+    const workspace = insertWorkspace();
+    const company = core.getDefaultCompany();
+    core.createProject({
+      companyId: company.id,
+      name: "Docs Workspace Mapping",
+    });
+
+    const plannerAgent =
+      agentRoleRepo.findByName("project_manager") ||
+      agentRoleRepo.create({
+        name: "planner-agent",
+        displayName: "Planner Agent",
+        capabilities: ["plan", "manage"],
+        heartbeatEnabled: true,
+      });
+
+    const prompts: string[] = [];
+    planner = new (await import("../StrategicPlannerService")).StrategicPlannerService({
+      db,
+      agentDaemon: {
+        createTask: async (params: { title: string; prompt: string; workspaceId: string; agentConfig?: Any }) => {
+          prompts.push(params.prompt);
+          return taskRepo.create({
+            title: params.title,
+            prompt: params.prompt,
+            status: "pending",
+            workspaceId: params.workspaceId,
+            agentConfig: params.agentConfig,
+            source: "api",
+          });
+        },
+      } as Any,
+    });
+
+    planner.updateConfig(company.id, {
+      enabled: true,
+      autoDispatch: true,
+      maxIssuesPerRun: 1,
+      plannerAgentRoleId: plannerAgent.id,
+      planningWorkspaceId: workspace.id,
+    });
+
+    const run = await planner.runNow({ companyId: company.id });
+
+    expect(run.status).toBe("completed");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("link_project_workspace");
+    expect(prompts[0]).toContain("Do not treat ad hoc files in .cowork/");
   });
 });
