@@ -21,12 +21,16 @@ export function setupImprovementHandlers(service: ImprovementLoopService): void 
   );
 
   ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_LIST_RUNS, async (_event, workspaceId?: string) =>
-    service.listRuns(workspaceId),
+    service.listRunsFresh(workspaceId),
   );
 
   ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_REFRESH, async () => service.refreshCandidates());
 
   ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_RUN_NEXT, async () => service.runNextExperiment());
+
+  ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_RETRY_RUN, async (_event, runId: string) =>
+    service.retryRun(runId),
+  );
 
   ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_DISMISS_CANDIDATE, async (_event, candidateId: string) =>
     service.dismissCandidate(candidateId),
