@@ -5,6 +5,7 @@ import { Check, X, Play, Loader2 } from "lucide-react";
 import type { Task, TaskEvent } from "../../shared/types";
 import { getEmojiIcon } from "../utils/emoji-icon-map";
 import { getEffectiveTaskEventType } from "../utils/task-event-compat";
+import { sanitizeToolCallTextFromAssistant } from "../../shared/tool-call-text-sanitizer";
 
 interface AgentRoleInfo {
   id: string;
@@ -88,17 +89,18 @@ function formatEventContent(type: StreamEventType, payload: TaskEvent["payload"]
   const p = payload as Record<string, unknown> | undefined;
   const step = p?.step as Record<string, unknown> | undefined;
   const plan = p?.plan as Record<string, unknown> | undefined;
+  const sanitize = (value: unknown): string => sanitizeToolCallTextFromAssistant(String(value || "")).text;
   switch (type) {
     case "assistant_message":
-      return (p?.message as string) || "";
+      return sanitize(p?.message);
     case "step_started":
-      return `Starting: ${(step?.description as string) || (p?.description as string) || "step"}`;
+      return `Starting: ${sanitize(step?.description || p?.description || "step") || "step"}`;
     case "progress_update":
-      return (p?.message as string) || "";
+      return sanitize(p?.message);
     case "step_completed":
-      return `Completed: ${(step?.description as string) || (p?.description as string) || "step"}`;
+      return `Completed: ${sanitize(step?.description || p?.description || "step") || "step"}`;
     case "step_failed":
-      return `Failed: ${(step?.description as string) || (p?.description as string) || "step"} — ${(p?.error as string) || ""}`;
+      return `Failed: ${sanitize(step?.description || p?.description || "step") || "step"} — ${sanitize(p?.error)}`;
     case "plan_created": {
       const steps = (plan?.steps as unknown[]) || (p?.steps as unknown[]) || [];
       return `Created plan with ${steps.length} step${steps.length !== 1 ? "s" : ""}`;
@@ -108,7 +110,7 @@ function formatEventContent(type: StreamEventType, payload: TaskEvent["payload"]
     case "task_cancelled":
       return "Task was cancelled";
     case "error":
-      return (p?.message as string) || (p?.error as string) || "An error occurred";
+      return sanitize(p?.message || p?.error || "An error occurred");
     default:
       return "";
   }
