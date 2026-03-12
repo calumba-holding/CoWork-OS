@@ -9,7 +9,16 @@ import * as fs from "fs";
 import * as path from "path";
 import crypto from "crypto";
 import type { TailscaleMode } from "../tailscale/settings";
-import type { ControlPlaneConnectionMode, RemoteGatewayConfig } from "../../shared/types";
+import {
+  LOCAL_MANAGED_DEVICE_ID,
+} from "../../shared/types";
+import type {
+  ControlPlaneConnectionMode,
+  ManagedDevice,
+  ManagedDeviceTransport,
+  RemoteGatewayConfig,
+  SavedRemoteGatewayDevice,
+} from "../../shared/types";
 import { SecureSettingsRepository } from "../database/SecureSettingsRepository";
 import { getUserDataDir } from "../utils/user-data-dir";
 import { getSafeStorage } from "../utils/safe-storage";
@@ -46,6 +55,14 @@ export interface ControlPlaneSettings {
   connectionMode: ControlPlaneConnectionMode;
   /** Remote gateway configuration (used when connectionMode is 'remote') */
   remote?: RemoteGatewayConfig;
+  /** Saved remote devices shown in the Devices UI */
+  savedRemoteDevices?: SavedRemoteGatewayDevice[];
+  /** Saved remote device currently mapped to the active remote config */
+  activeRemoteDeviceId?: string;
+  /** Managed fleet devices shown in the Devices UI */
+  managedDevices?: ManagedDevice[];
+  /** Selected managed device for legacy remote actions */
+  activeManagedDeviceId?: string;
 }
 
 /**
@@ -65,6 +82,10 @@ export const DEFAULT_CONTROL_PLANE_SETTINGS: ControlPlaneSettings = {
   },
   connectionMode: "local",
   remote: undefined,
+  savedRemoteDevices: [],
+  activeRemoteDeviceId: undefined,
+  managedDevices: [],
+  activeManagedDeviceId: LOCAL_MANAGED_DEVICE_ID,
 };
 
 /**
@@ -78,6 +99,55 @@ export const DEFAULT_REMOTE_GATEWAY_CONFIG: RemoteGatewayConfig = {
   reconnectIntervalMs: 5000,
   maxReconnectAttempts: 10,
 };
+
+function inferTransport(config: RemoteGatewayConfig): ManagedDeviceTransport {
+  if (config.sshTunnel?.enabled) return "ssh";
+  try {
+    const url = new URL(config.url);
+    if (url.hostname.endsWith(".ts.net")) return "tailscale";
+    if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+      return config.sshTunnel?.enabled ? "ssh" : "direct";
+    }
+    return "direct";
+  } catch {
+    return "unknown";
+  }
+}
+
+function toManagedDevice(device: SavedRemoteGatewayDevice): ManagedDevice {
+  return {
+    id: device.id,
+    name: device.name || device.config.deviceName || "Remote Device",
+    role: "remote",
+    purpose: "general",
+    transport: inferTransport(device.config),
+    status: "disconnected",
+    platform: "linux",
+    clientId: device.clientId,
+    connectedAt: device.connectedAt,
+    lastSeenAt: device.lastActivityAt || device.connectedAt,
+    taskNodeId: `remote-gateway:${device.id}`,
+    config: {
+      ...DEFAULT_REMOTE_GATEWAY_CONFIG,
+      ...device.config,
+    },
+    autoConnect: device.autoConnect === true,
+    tags: [],
+    activeRunCount: 0,
+    attentionState: "none",
+    storageSummary: {
+      workspaceCount: 0,
+      artifactCount: 0,
+    },
+    appsSummary: {
+      channelsTotal: 0,
+      channelsEnabled: 0,
+      workspacesTotal: 0,
+      approvalsPending: 0,
+      inputRequestsPending: 0,
+    },
+  };
+}
 
 /**
  * Generate a secure random token
@@ -247,6 +317,31 @@ export class ControlPlaneSettingsManager {
               ...stored.remote,
             };
           }
+          merged.savedRemoteDevices = Array.isArray(stored.savedRemoteDevices)
+            ? stored.savedRemoteDevices.map((device) => ({
+                ...device,
+                config: {
+                  ...DEFAULT_REMOTE_GATEWAY_CONFIG,
+                  ...device.config,
+                },
+              }))
+            : [];
+          merged.managedDevices = Array.isArray(stored.managedDevices)
+            ? stored.managedDevices.map((device) => ({
+                ...device,
+                config: device.config
+                  ? {
+                      ...DEFAULT_REMOTE_GATEWAY_CONFIG,
+                      ...device.config,
+                    }
+                  : undefined,
+              }))
+            : merged.savedRemoteDevices.map((device) => toManagedDevice(device));
+          merged.activeManagedDeviceId =
+            stored.activeManagedDeviceId ||
+            stored.activeRemoteDeviceId ||
+            merged.managedDevices[0]?.id ||
+            LOCAL_MANAGED_DEVICE_ID;
           this.cachedSettings = merged;
           logger.debug("Loaded settings from encrypted database");
           return this.cachedSettings;
@@ -303,6 +398,15 @@ export class ControlPlaneSettingsManager {
       ...updates,
       tailscale,
       remote,
+      savedRemoteDevices: updates.savedRemoteDevices ?? settings.savedRemoteDevices ?? [],
+      managedDevices:
+        updates.managedDevices ??
+        settings.managedDevices ??
+        (updates.savedRemoteDevices ?? settings.savedRemoteDevices ?? []).map((device) =>
+          toManagedDevice(device),
+        ),
+      activeManagedDeviceId:
+        updates.activeManagedDeviceId ?? settings.activeManagedDeviceId ?? LOCAL_MANAGED_DEVICE_ID,
     };
     this.saveSettings(updated);
     return updated;
