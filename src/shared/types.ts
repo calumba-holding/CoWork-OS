@@ -1094,6 +1094,7 @@ export type ImprovementCandidateStatus =
   | "open"
   | "running"
   | "review"
+  | "parked"
   | "resolved"
   | "dismissed";
 
@@ -1109,10 +1110,27 @@ export type ImprovementPromotionMode = "merge" | "github_pr";
 export type ImprovementPromotionStatus =
   | "idle"
   | "promoting"
-  | "applied"
-  | "merged"
+  | "applied" // legacy-only
+  | "merged" // legacy/manual-only
   | "pr_opened"
   | "promotion_failed";
+
+export type ImprovementFailureClass =
+  | "provider_tool_protocol_error"
+  | "provider_rate_limited"
+  | "provider_model_missing"
+  | "provider_network_failure"
+  | "provider_config_error"
+  | "provider_unknown"
+  | "plan_timeout"
+  | "task_timeout"
+  | "mutation_contract_unmet"
+  | "artifact_contract_unmet"
+  | "verification_failed"
+  | "missing_resumable_state"
+  | "non_promotable_result"
+  | "preflight_failed"
+  | "unknown";
 
 export interface ImprovementEvidence {
   type: ImprovementCandidateSource;
@@ -1143,8 +1161,22 @@ export interface ImprovementCandidate {
   firstSeenAt: number;
   lastSeenAt: number;
   lastExperimentAt?: number;
+  failureStreak?: number;
+  cooldownUntil?: number;
+  parkReason?: string;
+  parkedAt?: number;
+  lastAttemptFingerprint?: string;
+  lastFailureClass?: ImprovementFailureClass;
   resolvedAt?: number;
 }
+
+export type ImprovementCampaignStage =
+  | "queued"
+  | "preflight"
+  | "reproducing"
+  | "implementing"
+  | "verifying"
+  | "completed";
 
 export interface ImprovementLoopSettings {
   enabled: boolean;
@@ -1153,6 +1185,8 @@ export interface ImprovementLoopSettings {
   intervalMinutes: number;
   variantsPerCampaign: number;
   maxConcurrentCampaigns: number;
+  maxConcurrentImprovementExecutors: number;
+  maxQueuedImprovementCampaigns: number;
   maxOpenCandidatesPerWorkspace: number;
   requireWorktree: boolean;
   reviewRequired: boolean;
@@ -1160,6 +1194,9 @@ export interface ImprovementLoopSettings {
   promotionMode: ImprovementPromotionMode;
   evalWindowDays: number;
   replaySetSize: number;
+  campaignTimeoutMinutes: number;
+  campaignTokenBudget: number;
+  campaignCostBudget: number;
   improvementProgramPath?: string;
 }
 
@@ -1168,15 +1205,20 @@ export const DEFAULT_IMPROVEMENT_LOOP_SETTINGS: ImprovementLoopSettings = {
   autoRun: true,
   includeDevLogs: true,
   intervalMinutes: 24 * 60,
-  variantsPerCampaign: 4,
+  variantsPerCampaign: 1,
   maxConcurrentCampaigns: 1,
+  maxConcurrentImprovementExecutors: 1,
+  maxQueuedImprovementCampaigns: 1,
   maxOpenCandidatesPerWorkspace: 25,
   requireWorktree: true,
-  reviewRequired: true,
-  judgeRequired: true,
+  reviewRequired: false,
+  judgeRequired: false,
   promotionMode: "github_pr",
   evalWindowDays: 14,
   replaySetSize: 3,
+  campaignTimeoutMinutes: 30,
+  campaignTokenBudget: 60000,
+  campaignCostBudget: 15,
 };
 
 export interface ImprovementExperimentConfig {
@@ -1226,6 +1268,13 @@ export type ImprovementVariantLane =
   | "guardrail_hardening";
 
 export type ImprovementCampaignStatus =
+  | "queued"
+  | "preflight"
+  | "reproducing"
+  | "implementing"
+  | "verifying"
+  | "pr_opened"
+  | "parked"
   | "planning"
   | "running_variants"
   | "judging"
@@ -1316,8 +1365,13 @@ export interface ImprovementCampaign {
   executionWorkspaceId?: string;
   rootTaskId?: string;
   status: ImprovementCampaignStatus;
+  stage?: ImprovementCampaignStage;
   reviewStatus: ImprovementReviewStatus;
   promotionStatus?: ImprovementPromotionStatus;
+  stopReason?: string;
+  providerHealthSnapshot?: Record<string, unknown>;
+  stageBudget?: Record<string, unknown>;
+  prRequired?: boolean;
   winnerVariantId?: string;
   promotedTaskId?: string;
   promotedBranchName?: string;
@@ -3511,7 +3565,14 @@ export const IPC_CHANNELS = {
   NODE_EVENT: "node:event",
 
   // Device Management
+  DEVICE_LIST_MANAGED: "device:listManaged",
+  DEVICE_GET_SUMMARY: "device:getSummary",
+  DEVICE_CONNECT: "device:connect",
+  DEVICE_DISCONNECT: "device:disconnect",
+  DEVICE_PROXY_REQUEST: "device:proxyRequest",
   DEVICE_LIST_TASKS: "device:listTasks",
+  DEVICE_LIST_FILES: "device:listFiles",
+  DEVICE_LIST_REMOTE_WORKSPACES: "device:listRemoteWorkspaces",
   DEVICE_ASSIGN_TASK: "device:assignTask",
   DEVICE_GET_PROFILES: "device:getProfiles",
   DEVICE_UPDATE_PROFILE: "device:updateProfile",
@@ -4906,6 +4967,14 @@ export interface ControlPlaneSettingsData {
   connectionMode?: ControlPlaneConnectionMode;
   /** Remote gateway configuration (used when connectionMode is 'remote') */
   remote?: RemoteGatewayConfig;
+  /** Saved remote devices shown in the Devices UI */
+  savedRemoteDevices?: SavedRemoteGatewayDevice[];
+  /** Saved remote device currently mapped to the active remote config */
+  activeRemoteDeviceId?: string;
+  /** Managed devices shown in the Devices fleet UI */
+  managedDevices?: ManagedDevice[];
+  /** Currently selected managed device for legacy remote actions */
+  activeManagedDeviceId?: string;
 }
 
 /**
@@ -5299,6 +5368,132 @@ export interface RemoteGatewayConfig {
   maxReconnectAttempts?: number;
   /** SSH tunnel configuration (when using SSH tunnel for connection) */
   sshTunnel?: SSHTunnelConfig;
+}
+
+export interface SavedRemoteGatewayDevice {
+  id: string;
+  name: string;
+  config: RemoteGatewayConfig;
+  clientId?: string;
+  connectedAt?: number;
+  lastActivityAt?: number;
+  autoConnect?: boolean;
+}
+
+export const LOCAL_MANAGED_DEVICE_ID = "local:this-device";
+export const LOCAL_MANAGED_DEVICE_NODE_ID = "local:this-device";
+
+export type ManagedDeviceRole = "local" | "remote";
+export type ManagedDevicePurpose =
+  | "primary"
+  | "work"
+  | "personal"
+  | "automation"
+  | "archive"
+  | "general";
+export type ManagedDeviceTransport = "local" | "direct" | "ssh" | "tailscale" | "unknown";
+export type ManagedDeviceAttentionState = "none" | "info" | "warning" | "critical";
+
+export interface ManagedDeviceStorageSummary {
+  totalBytes?: number;
+  freeBytes?: number;
+  usedBytes?: number;
+  usagePercent?: number;
+  workspaceCount: number;
+  artifactCount: number;
+}
+
+export interface ManagedDeviceAppsSummary {
+  channelsTotal: number;
+  channelsEnabled: number;
+  workspacesTotal: number;
+  approvalsPending: number;
+  inputRequestsPending: number;
+  accountsTotal?: number;
+}
+
+export interface ManagedDeviceAlert {
+  id: string;
+  level: ManagedDeviceAttentionState;
+  title: string;
+  description?: string;
+  kind:
+    | "approval"
+    | "input_request"
+    | "channel"
+    | "connection"
+    | "storage"
+    | "status"
+    | "warning";
+}
+
+export interface ManagedDevice {
+  id: string;
+  name: string;
+  role: ManagedDeviceRole;
+  purpose: ManagedDevicePurpose;
+  transport: ManagedDeviceTransport;
+  status: RemoteGatewayConnectionState | "local";
+  platform: NodePlatform;
+  version?: string;
+  modelIdentifier?: string;
+  clientId?: string;
+  connectedAt?: number;
+  lastSeenAt?: number;
+  taskNodeId?: string | null;
+  tags?: string[];
+  config?: RemoteGatewayConfig;
+  autoConnect?: boolean;
+  attentionState?: ManagedDeviceAttentionState;
+  activeRunCount?: number;
+  storageSummary?: ManagedDeviceStorageSummary;
+  appsSummary?: ManagedDeviceAppsSummary;
+}
+
+export interface ManagedDeviceSummary {
+  device: ManagedDevice;
+  runtime?: {
+    platform?: string;
+    arch?: string;
+    node?: string;
+    electron?: string;
+    coworkVersion?: string;
+    cwd?: string;
+    userDataDir?: string;
+    headless?: boolean;
+  };
+  tasks: {
+    total: number;
+    active: number;
+    attention: number;
+    recent: Task[];
+  };
+  apps: ManagedDeviceAppsSummary & {
+    channels?: Any[];
+    workspaces?: Any[];
+    accounts?: Any[];
+  };
+  storage: ManagedDeviceStorageSummary & {
+    workspaceRoots: Array<{ id: string; name: string; path: string }>;
+  };
+  alerts: ManagedDeviceAlert[];
+  observer: Array<{
+    id: string;
+    timestamp: number;
+    title: string;
+    detail?: string;
+    level: ManagedDeviceAttentionState;
+  }>;
+}
+
+/**
+ * Request to proxy a control-plane method to a managed device.
+ * @property method - Protocol method name (e.g. "task.get", "task.events", "task.sendMessage", "task.cancel", "task.list", "workspace.list", "config.get", etc.)
+ */
+export interface DeviceProxyRequest {
+  deviceId: string;
+  method: string;
+  params?: unknown;
 }
 
 /**
