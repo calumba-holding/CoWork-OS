@@ -7,17 +7,32 @@
 import { app, ipcMain, BrowserWindow } from "electron";
 import { randomUUID } from "crypto";
 import * as fs from "fs/promises";
+import os from "os";
 import path from "path";
-import { IPC_CHANNELS, isTempWorkspaceId } from "../../shared/types";
+import {
+  IPC_CHANNELS,
+  isTempWorkspaceId,
+  LOCAL_MANAGED_DEVICE_ID,
+  LOCAL_MANAGED_DEVICE_NODE_ID,
+} from "../../shared/types";
 import type {
   ControlPlaneSettingsData,
   ControlPlaneStatus,
   TailscaleAvailability,
   TailscaleMode,
+  DeviceProxyRequest,
+  ImageAttachment,
+  ManagedDevice,
+  ManagedDeviceAlert,
+  ManagedDeviceAttentionState,
+  ManagedDeviceSummary,
+  NodeInfo,
+  NodePlatform,
   RemoteGatewayConfig,
   RemoteGatewayStatus,
   SSHTunnelConfig,
   SSHTunnelStatus,
+  Task,
 } from "../../shared/types";
 import { ControlPlaneServer, ControlPlaneSettingsManager } from "./index";
 import { Methods, Events, ErrorCodes } from "./protocol";
@@ -27,6 +42,9 @@ import type { DatabaseManager } from "../database/schema";
 import type { ChannelGateway } from "../gateway";
 import {
   ApprovalRepository,
+  ArtifactRepository,
+  ChannelRepository,
+  InputRequestRepository,
   TaskEventRepository,
   TaskRepository,
   WorkspaceRepository,
@@ -39,9 +57,6 @@ import { AgentRoleRepository } from "../agents/AgentRoleRepository";
 import { TailscaleSettingsManager } from "../tailscale/settings";
 import {
   RemoteGatewayClient,
-  initRemoteGatewayClient,
-  getRemoteGatewayClient,
-  shutdownRemoteGatewayClient,
 } from "./remote-client";
 import {
   SSHTunnelManager,
@@ -60,6 +75,16 @@ import { TASK_EVENT_BRIDGE_ALLOWLIST } from "./task-event-bridge-contract";
 import { registerControlPlaneCoreMethods } from "./registerControlPlaneCoreMethods";
 import { registerStrategicPlannerMethods } from "./registerStrategicPlannerMethods";
 import { getStrategicPlannerService } from "./StrategicPlannerService";
+import {
+  getFleetConnectionManager,
+  initFleetConnectionManager,
+  shutdownFleetConnectionManager,
+} from "./fleet-manager";
+import { ManagedAccountManager } from "../accounts/managed-account-manager";
+import {
+  normalizeImagesForRemote,
+  sanitizeTaskMessageParams,
+} from "./sanitize";
 
 // Server instance
 let controlPlaneServer: ControlPlaneServer | null = null;
@@ -96,67 +121,15 @@ function toNodePlatform(platform?: string): "ios" | "android" | "macos" | "linux
 
 async function getRemoteGatewayNodeInfo():
   Promise<import("../../shared/types").NodeInfo | null> {
-  const client = getRemoteGatewayClient();
-  if (!client || client.getStatus().state !== "connected") {
-    return null;
-  }
-
-  const status = client.getStatus();
-  let remoteConfig: any = null;
-  try {
-    remoteConfig = await client.request(Methods.CONFIG_GET, undefined, 5000);
-  } catch {
-    remoteConfig = null;
-  }
-
-  const runtime = remoteConfig?.runtime || {};
-  const hostname = (() => {
-    try {
-      return status.url ? new URL(status.url).hostname : undefined;
-    } catch {
-      return undefined;
-    }
-  })();
-  const stableRemoteNodeId =
-    hostname && hostname.length > 0
-      ? `remote-gateway:${hostname}`
-      : status.url
-        ? `remote-gateway:${status.url}`
-        : "remote-gateway";
-
-  return {
-    id: stableRemoteNodeId,
-    displayName:
-      hostname && hostname !== "127.0.0.1" && hostname !== "localhost"
-        ? `CoWork Remote (${hostname})`
-        : "CoWork Remote",
-    platform: toNodePlatform(runtime.platform),
-    version: typeof runtime.coworkVersion === "string" ? runtime.coworkVersion : "unknown",
-    deviceId: status.clientId,
-    modelIdentifier: hostname,
-    capabilities: [],
-    commands: [],
-    permissions: {},
-    connectedAt: status.connectedAt || Date.now(),
-    lastActivityAt: status.lastActivityAt || status.connectedAt || Date.now(),
-    isForeground: false,
-  };
-}
-
-async function getRemoteGatewayNodeAliases(nodeId?: string): Promise<string[]> {
-  const aliases = new Set<string>();
-  if (typeof nodeId === "string" && nodeId.trim()) {
-    aliases.add(nodeId.trim());
-  }
-
-  const remoteNode = await getRemoteGatewayNodeInfo();
-  if (remoteNode) {
-    aliases.add(remoteNode.id);
-    if (remoteNode.deviceId) aliases.add(remoteNode.deviceId);
-    if (remoteNode.displayName) aliases.add(remoteNode.displayName);
-  }
-
-  return Array.from(aliases);
+  const settings = ControlPlaneSettingsManager.loadSettings();
+  const activeRemoteId =
+    settings.activeManagedDeviceId && settings.activeManagedDeviceId !== LOCAL_MANAGED_DEVICE_ID
+      ? settings.activeManagedDeviceId
+      : settings.activeRemoteDeviceId;
+  if (!activeRemoteId) return null;
+  const device = findManagedDeviceById(activeRemoteId);
+  if (!device || device.role !== "remote") return null;
+  return getManagedRemoteNodeInfo(device);
 }
 
 /**
@@ -172,83 +145,1298 @@ function requireScope(client: any, scope: "admin" | "read" | "write" | "operator
   }
 }
 
-async function syncRemoteShadowTasksForNode(nodeId: string): Promise<void> {
-  if (!controlPlaneDeps?.dbManager) return;
-  const remoteClient = getRemoteGatewayClient();
-  if (!remoteClient || remoteClient.getStatus().state !== "connected") return;
+const ACTIVE_TASK_STATUSES = new Set([
+  "queued",
+  "pending",
+  "planning",
+  "executing",
+  "interrupted",
+  "paused",
+]);
+const ATTENTION_LEVEL_ORDER: ManagedDeviceAttentionState[] = [
+  "none",
+  "info",
+  "warning",
+  "critical",
+];
+
+function isLocalManagedDeviceIdentifier(deviceId?: string | null): boolean {
+  return (
+    !deviceId ||
+    deviceId === LOCAL_MANAGED_DEVICE_ID ||
+    deviceId === LOCAL_MANAGED_DEVICE_NODE_ID
+  );
+}
+
+function getHostnameFromUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeGatewayUrl(url?: string): string {
+  return typeof url === "string" ? url.trim().replace(/\/+$/, "") : "";
+}
+
+function getLegacyRemoteNodeId(url?: string): string | undefined {
+  const hostname = getHostnameFromUrl(url);
+  if (hostname) return `remote-gateway:${hostname}`;
+  return url ? `remote-gateway:${url}` : undefined;
+}
+
+function inferManagedTransport(config?: RemoteGatewayConfig): ManagedDevice["transport"] {
+  if (config?.sshTunnel?.enabled) return "ssh";
+  const hostname = getHostnameFromUrl(config?.url);
+  if (hostname?.endsWith(".ts.net")) return "tailscale";
+  if (hostname === "127.0.0.1" || hostname === "localhost") return "direct";
+  return hostname ? "direct" : "unknown";
+}
+
+function normalizeManagedRemoteDevice(device: ManagedDevice): ManagedDevice {
+  return {
+    ...device,
+    role: "remote",
+    autoConnect: device.autoConnect === true,
+    transport: device.transport || inferManagedTransport(device.config),
+    status: device.status || "disconnected",
+    platform: device.platform || "linux",
+    name: device.name || device.config?.deviceName || "Remote Device",
+    taskNodeId: device.taskNodeId || `remote-gateway:${device.id}`,
+    config: device.config
+      ? {
+          autoReconnect: true,
+          reconnectIntervalMs: 5000,
+          maxReconnectAttempts: 10,
+          deviceName: "CoWork Remote Client",
+          ...device.config,
+        }
+      : undefined,
+    attentionState: device.attentionState || "none",
+    activeRunCount: device.activeRunCount || 0,
+    storageSummary: {
+      workspaceCount: device.storageSummary?.workspaceCount || 0,
+      artifactCount: device.storageSummary?.artifactCount || 0,
+      ...(device.storageSummary?.freeBytes !== undefined
+        ? { freeBytes: device.storageSummary.freeBytes }
+        : {}),
+      ...(device.storageSummary?.usedBytes !== undefined
+        ? { usedBytes: device.storageSummary.usedBytes }
+        : {}),
+      ...(device.storageSummary?.totalBytes !== undefined
+        ? { totalBytes: device.storageSummary.totalBytes }
+        : {}),
+    },
+    appsSummary: {
+      channelsTotal: device.appsSummary?.channelsTotal || 0,
+      channelsEnabled: device.appsSummary?.channelsEnabled || 0,
+      workspacesTotal: device.appsSummary?.workspacesTotal || 0,
+      approvalsPending: device.appsSummary?.approvalsPending || 0,
+      inputRequestsPending: device.appsSummary?.inputRequestsPending || 0,
+    },
+    tags: Array.isArray(device.tags) ? device.tags : [],
+  };
+}
+
+function toManagedDeviceFromSaved(settings: ControlPlaneSettingsData, saved: Any): ManagedDevice {
+  const config = saved?.config as RemoteGatewayConfig | undefined;
+  return normalizeManagedRemoteDevice({
+    id: typeof saved?.id === "string" ? saved.id : `remote:${config?.url || Date.now()}`,
+    name:
+      (typeof saved?.name === "string" && saved.name.trim()) ||
+      config?.deviceName ||
+      "Remote Device",
+    role: "remote",
+    purpose: "general",
+    transport: inferManagedTransport(config),
+    status: "disconnected",
+    platform: "linux",
+    clientId: typeof saved?.clientId === "string" ? saved.clientId : undefined,
+    connectedAt: typeof saved?.connectedAt === "number" ? saved.connectedAt : undefined,
+    lastSeenAt:
+      typeof saved?.lastActivityAt === "number"
+        ? saved.lastActivityAt
+        : typeof saved?.connectedAt === "number"
+          ? saved.connectedAt
+          : undefined,
+    taskNodeId: `remote-gateway:${typeof saved?.id === "string" ? saved.id : "remote"}`,
+    config,
+    autoConnect: saved?.autoConnect === true,
+    attentionState: "none",
+    activeRunCount: 0,
+    storageSummary: { workspaceCount: 0, artifactCount: 0 },
+    appsSummary: {
+      channelsTotal: 0,
+      channelsEnabled: 0,
+      workspacesTotal: 0,
+      approvalsPending: 0,
+      inputRequestsPending: 0,
+    },
+  });
+}
+
+function listStoredManagedDevices(): ManagedDevice[] {
+  const settings = ControlPlaneSettingsManager.loadSettings() as ControlPlaneSettingsData;
+  const byId = new Map<string, ManagedDevice>();
+
+  for (const raw of settings.managedDevices || []) {
+    if (!raw || raw.role !== "remote") continue;
+    byId.set(raw.id, normalizeManagedRemoteDevice(raw));
+  }
+
+  for (const saved of settings.savedRemoteDevices || []) {
+    if (!saved?.id) continue;
+    if (!byId.has(saved.id)) {
+      byId.set(saved.id, toManagedDeviceFromSaved(settings, saved));
+    }
+  }
+
+  if (settings.remote?.url && settings.remote?.token) {
+    const legacyId =
+      (settings.activeManagedDeviceId && settings.activeManagedDeviceId !== LOCAL_MANAGED_DEVICE_ID
+        ? settings.activeManagedDeviceId
+        : settings.activeRemoteDeviceId) || `remote:${settings.remote.url}`;
+    if (!byId.has(legacyId)) {
+      byId.set(
+        legacyId,
+        normalizeManagedRemoteDevice({
+          id: legacyId,
+          name: settings.remote.deviceName || "CoWork Remote Client",
+          role: "remote",
+          purpose: "general",
+          transport: inferManagedTransport(settings.remote),
+          status: "disconnected",
+          platform: "linux",
+          taskNodeId: `remote-gateway:${legacyId}`,
+          config: settings.remote,
+          attentionState: "none",
+          activeRunCount: 0,
+          storageSummary: { workspaceCount: 0, artifactCount: 0 },
+          appsSummary: {
+            channelsTotal: 0,
+            channelsEnabled: 0,
+            workspacesTotal: 0,
+            approvalsPending: 0,
+            inputRequestsPending: 0,
+          },
+        }),
+      );
+    }
+  }
+
+  return Array.from(byId.values());
+}
+
+function buildLocalManagedDevice(): ManagedDevice {
+  return {
+    id: LOCAL_MANAGED_DEVICE_ID,
+    name: "This device",
+    role: "local",
+    purpose: "primary",
+    transport: "local",
+    status: "local",
+    platform: toNodePlatform(process.platform),
+    version: typeof app.getVersion === "function" ? app.getVersion() : undefined,
+    modelIdentifier: os.hostname(),
+    taskNodeId: LOCAL_MANAGED_DEVICE_NODE_ID,
+    attentionState: "none",
+    activeRunCount: 0,
+    storageSummary: { workspaceCount: 0, artifactCount: 0 },
+    appsSummary: {
+      channelsTotal: 0,
+      channelsEnabled: 0,
+      workspacesTotal: 0,
+      approvalsPending: 0,
+      inputRequestsPending: 0,
+    },
+  };
+}
+
+function findManagedDeviceById(deviceId?: string | null): ManagedDevice | null {
+  if (isLocalManagedDeviceIdentifier(deviceId)) {
+    return buildLocalManagedDevice();
+  }
+  return listStoredManagedDevices().find((device) => device.id === deviceId) || null;
+}
+
+async function getManagedRemoteNodeInfo(device: ManagedDevice): Promise<NodeInfo | null> {
+  const fleetManager = getFleetConnectionManager();
+  const client = fleetManager?.getClient(device.id);
+  const status = fleetManager?.getStatus(device.id);
+  if (!client || status?.state !== "connected") {
+    return null;
+  }
+
+  let configSnapshot: Any = null;
+  try {
+    configSnapshot = await client.request(Methods.CONFIG_GET, undefined, 5000);
+  } catch {
+    configSnapshot = null;
+  }
+
+  const runtime = configSnapshot?.runtime || {};
+  const hostname = getHostnameFromUrl(device.config?.url) || device.modelIdentifier;
+  return {
+    id: device.taskNodeId || `remote-gateway:${device.id}`,
+    displayName: device.name || "Remote Device",
+    platform: toNodePlatform(runtime.platform || device.platform),
+    version:
+      typeof runtime.coworkVersion === "string"
+        ? runtime.coworkVersion
+        : device.version || "unknown",
+    deviceId: status.clientId,
+    modelIdentifier: hostname,
+    capabilities: [],
+    commands: [],
+    permissions: {},
+    connectedAt: status.connectedAt || Date.now(),
+    lastActivityAt: status.lastActivityAt || status.connectedAt || Date.now(),
+    isForeground: false,
+  };
+}
+
+async function listManagedRemoteNodes(): Promise<NodeInfo[]> {
+  const remoteDevices = listStoredManagedDevices();
+  const nodes = await Promise.all(remoteDevices.map((device) => getManagedRemoteNodeInfo(device)));
+  return nodes.filter((node): node is NodeInfo => !!node);
+}
+
+async function getManagedRemoteNodeAliases(device: ManagedDevice, nodeId?: string): Promise<string[]> {
+  const aliases = new Set<string>();
+  if (typeof nodeId === "string" && nodeId.trim()) {
+    aliases.add(nodeId.trim());
+  }
+  aliases.add(device.taskNodeId || `remote-gateway:${device.id}`);
+  const legacyRemoteNodeId = getLegacyRemoteNodeId(device.config?.url);
+  if (legacyRemoteNodeId) aliases.add(legacyRemoteNodeId);
+  if (device.clientId) aliases.add(device.clientId);
+
+  const remoteNode = await getManagedRemoteNodeInfo(device);
+  if (remoteNode) {
+    aliases.add(remoteNode.id);
+    if (remoteNode.deviceId) aliases.add(remoteNode.deviceId);
+  }
+
+  return Array.from(aliases);
+}
+
+async function findManagedRemoteDeviceByNodeId(nodeId: string): Promise<ManagedDevice | null> {
+  const normalized = nodeId.trim();
+  if (!normalized || isLocalManagedDeviceIdentifier(normalized)) {
+    return null;
+  }
+  const remoteDevices = listStoredManagedDevices();
+  for (const device of remoteDevices) {
+    const aliases = await getManagedRemoteNodeAliases(device, normalized);
+    if (aliases.includes(normalized)) {
+      return device;
+    }
+  }
+  return null;
+}
+
+function getDefaultLocalWorkspaceId(db: Any): string | undefined {
+  const workspaceRepo = new WorkspaceRepository(db);
+  return workspaceRepo.findAll()[0]?.id;
+}
+
+/** Normalize path for cross-machine comparison (trim, unify slashes, remove trailing slash). */
+function normalizePathForMatch(p: string): string {
+  return path.normalize(String(p || "").trim().replace(/\\/g, "/")).replace(/\/+$/, "") || "";
+}
+
+/** Case-insensitive path equality for cross-platform workspace matching (macOS/Windows). */
+function pathsMatch(a: string, b: string): boolean {
+  const na = normalizePathForMatch(a);
+  const nb = normalizePathForMatch(b);
+  if (na === nb) return true;
+  if (process.platform === "darwin" || process.platform === "win32") {
+    return na.toLowerCase() === nb.toLowerCase();
+  }
+  return false;
+}
+
+/**
+ * Resolve the local workspace ID for a remote task by matching remote workspace path to a local workspace.
+ * Falls back to the default (most recently used) local workspace when no path match is found.
+ */
+function resolveLocalWorkspaceIdForRemoteTask(
+  db: Any,
+  remoteWorkspaces: Array<{ id?: string; path?: string }>,
+  remoteTask: { workspaceId?: string },
+  fallbackWorkspaceId: string | undefined,
+): string | undefined {
+  const workspaceRepo = new WorkspaceRepository(db);
+  const remoteWorkspaceId = remoteTask?.workspaceId;
+  if (!remoteWorkspaceId) return fallbackWorkspaceId;
+
+  const remoteWorkspace = remoteWorkspaces.find((w) => w.id === remoteWorkspaceId);
+  const remotePath = remoteWorkspace?.path;
+  if (!remotePath || typeof remotePath !== "string") return fallbackWorkspaceId;
+
+  const normalizedRemote = normalizePathForMatch(remotePath);
+  if (!normalizedRemote) return fallbackWorkspaceId;
+
+  const localWorkspaces = workspaceRepo
+    .findAll()
+    .filter((w) => !w.isTemp && !isTempWorkspaceId(w.id));
+  const match = localWorkspaces.find((w) => pathsMatch(w.path, remotePath));
+  return match?.id ?? fallbackWorkspaceId;
+}
+
+function isActiveTaskStatus(status?: string): boolean {
+  return !!status && ACTIVE_TASK_STATUSES.has(status);
+}
+
+function isTaskAttention(task: Partial<Task> | null | undefined): boolean {
+  if (!task) return false;
+  return (
+    task.status === "blocked" ||
+    task.terminalStatus === "needs_user_action" ||
+    task.terminalStatus === "awaiting_approval"
+  );
+}
+
+function maxAttentionLevel(
+  ...levels: Array<ManagedDeviceAttentionState | undefined>
+): ManagedDeviceAttentionState {
+  let currentIndex = 0;
+  for (const level of levels) {
+    if (!level) continue;
+    const nextIndex = ATTENTION_LEVEL_ORDER.indexOf(level);
+    if (nextIndex > currentIndex) currentIndex = nextIndex;
+  }
+  return ATTENTION_LEVEL_ORDER[currentIndex] || "none";
+}
+
+async function getLocalConfigSnapshot(): Promise<Any> {
+  if (!controlPlaneDeps?.dbManager) {
+    return {
+      runtime: {
+        platform: process.platform,
+        arch: process.arch,
+        node: process.version,
+        electron: process.versions.electron,
+        coworkVersion: typeof app.getVersion === "function" ? app.getVersion() : undefined,
+        headless: isHeadlessMode(),
+        cwd: process.cwd(),
+        userDataDir: getUserDataDir(),
+      },
+      workspaces: { count: 0, workspaces: [] },
+      tasks: { total: 0, byStatus: {} },
+      channels: { count: 0, enabled: 0, channels: [] },
+    };
+  }
 
   const db = controlPlaneDeps.dbManager.getDatabase();
-  const { TaskRepository } = require("../database/repositories");
-  const repo = new TaskRepository(db);
-  const aliases = await getRemoteGatewayNodeAliases(nodeId);
-  const localTasks = repo.findByTargetNodeIds(aliases, 50);
-  if (localTasks.length === 0) return;
+  const workspaceRepo = new WorkspaceRepository(db);
+  const taskRepo = new TaskRepository(db);
+  const channelRepo = new ChannelRepository(db);
 
-  await Promise.all(
-    localTasks.map(async (task: Any) => {
-      try {
-        const remoteRes = (await remoteClient.request("task.get", { taskId: task.id })) as Any;
-        const remoteTask = remoteRes?.task;
-        if (!remoteTask) return;
-        const nextTitle = remoteTask.title || task.title;
-        const nextStatus = remoteTask.status || task.status;
-        const nextCompletedAt =
-          typeof remoteTask.completedAt === "number" ? remoteTask.completedAt : null;
-        const nextError = remoteTask.error ?? null;
-        const nextTerminalStatus = remoteTask.terminalStatus ?? null;
-        const nextFailureClass = remoteTask.failureClass ?? null;
-        const nextBestKnownOutcome = remoteTask.bestKnownOutcome
-          ? JSON.stringify(remoteTask.bestKnownOutcome)
-          : null;
-        const nextResultSummary = remoteTask.resultSummary ?? null;
-        const nextUpdatedAt =
-          typeof remoteTask.updatedAt === "number" && Number.isFinite(remoteTask.updatedAt)
-            ? remoteTask.updatedAt
-            : task.updatedAt;
-
-        const hasMeaningfulChange =
-          nextTitle !== task.title ||
-          nextStatus !== task.status ||
-          nextCompletedAt !== (task.completedAt ?? null) ||
-          nextError !== (task.error ?? null) ||
-          nextTerminalStatus !== (task.terminalStatus ?? null) ||
-          nextFailureClass !== (task.failureClass ?? null) ||
-          nextBestKnownOutcome !==
-            (task.bestKnownOutcome ? JSON.stringify(task.bestKnownOutcome) : null) ||
-          nextResultSummary !== (task.resultSummary ?? null) ||
-          nextUpdatedAt !== task.updatedAt;
-
-        if (!hasMeaningfulChange) return;
-
-        db.prepare(
-          `UPDATE tasks
-           SET title = ?,
-               status = ?,
-               completed_at = ?,
-               error = ?,
-               terminal_status = ?,
-               failure_class = ?,
-               best_known_outcome = ?,
-               result_summary = ?,
-               updated_at = ?
-           WHERE id = ?`
-        ).run(
-          nextTitle,
-          nextStatus,
-          nextCompletedAt,
-          nextError,
-          nextTerminalStatus,
-          nextFailureClass,
-          nextBestKnownOutcome,
-          nextResultSummary,
-          nextUpdatedAt,
-          task.id,
-        );
-      } catch (error) {
-        console.warn(`[ControlPlane] Failed to sync remote shadow task ${task.id}:`, error);
-      }
-    }),
+  const allWorkspaces = workspaceRepo
+    .findAll()
+    .filter((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id));
+  const allLocalTasks = taskRepo
+    .findAll(250, 0)
+    .filter((task) => !task.targetNodeId || isLocalManagedDeviceIdentifier(task.targetNodeId));
+  const byStatus = allLocalTasks.reduce(
+    (acc: Record<string, number>, task) => {
+      const key = task.status || "unknown";
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
   );
+  const channels = channelRepo.findAll();
+
+  return {
+    runtime: {
+      platform: process.platform,
+      arch: process.arch,
+      node: process.version,
+      electron: process.versions.electron,
+      coworkVersion: typeof app.getVersion === "function" ? app.getVersion() : undefined,
+      headless: isHeadlessMode(),
+      cwd: process.cwd(),
+      userDataDir: getUserDataDir(),
+    },
+    workspaces: {
+      count: allWorkspaces.length,
+      workspaces: allWorkspaces,
+    },
+    tasks: {
+      total: allLocalTasks.length,
+      byStatus,
+    },
+    channels: {
+      count: channels.length,
+      enabled: channels.filter((channel) => channel.enabled).length,
+      channels,
+    },
+  };
+}
+
+async function getLocalStorageSummary(db: Any): Promise<{
+  storage: ManagedDeviceSummary["storage"];
+  workspaceRoots: Array<{ id: string; name: string; path: string }>;
+}> {
+  const workspaceRepo = new WorkspaceRepository(db);
+  const artifactRepo = new ArtifactRepository(db);
+  const workspaces = workspaceRepo
+    .findAll()
+    .filter((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id));
+  const workspaceRoots = workspaces.map((workspace) => ({
+    id: workspace.id,
+    name: workspace.name,
+    path: workspace.path,
+  }));
+
+  let totalBytes: number | undefined;
+  let freeBytes: number | undefined;
+  const probePath = workspaceRoots[0]?.path || getUserDataDir();
+  if (typeof fs.statfs === "function") {
+    try {
+      const stat = await fs.statfs(probePath);
+      const blockSize = Number((stat as Any).bsize || (stat as Any).frsize || 0);
+      const blocks = Number((stat as Any).blocks || 0);
+      const availableBlocks = Number((stat as Any).bavail || (stat as Any).bfree || 0);
+      if (Number.isFinite(blockSize) && blockSize > 0 && Number.isFinite(blocks) && blocks > 0) {
+        totalBytes = blockSize * blocks;
+        freeBytes = blockSize * availableBlocks;
+      }
+    } catch (err) {
+      console.warn("[ControlPlane] statfs failed (disk stats unavailable):", probePath, err);
+    }
+  }
+
+  const artifactCount = db.prepare("SELECT COUNT(1) AS count FROM artifacts").get() as Any;
+  return {
+    storage: {
+      workspaceCount: workspaceRoots.length,
+      artifactCount: Number(artifactCount?.count || 0),
+      ...(totalBytes !== undefined ? { totalBytes } : {}),
+      ...(freeBytes !== undefined ? { freeBytes } : {}),
+      ...(totalBytes !== undefined && freeBytes !== undefined
+        ? { usedBytes: totalBytes - freeBytes }
+        : {}),
+      workspaceRoots,
+    },
+    workspaceRoots,
+  };
+}
+
+function upsertRemoteShadowTask(db: Any, workspaceId: string, nodeId: string, task: Any): void {
+  const id = task?.id || randomUUID();
+  const now = Date.now();
+  const nextUpdatedAt =
+    typeof task?.updatedAt === "number" && Number.isFinite(task.updatedAt) ? task.updatedAt : now;
+  db.prepare(
+    `INSERT INTO tasks (id, title, prompt, status, workspace_id, target_node_id, terminal_status, error, completed_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       title = excluded.title,
+       prompt = excluded.prompt,
+       status = excluded.status,
+       workspace_id = excluded.workspace_id,
+       target_node_id = excluded.target_node_id,
+       terminal_status = excluded.terminal_status,
+       error = excluded.error,
+       completed_at = excluded.completed_at,
+       updated_at = excluded.updated_at`
+  ).run(
+    id,
+    task?.title || task?.prompt || "Remote task",
+    task?.prompt || task?.title || "",
+    task?.status || "pending",
+    workspaceId,
+    nodeId,
+    task?.terminalStatus || null,
+    task?.error || null,
+    task?.completedAt || null,
+    typeof task?.createdAt === "number" && Number.isFinite(task.createdAt) ? task.createdAt : now,
+    nextUpdatedAt,
+  );
+}
+
+async function syncRemoteShadowTasksForNode(nodeId: string): Promise<void> {
+  if (!controlPlaneDeps?.dbManager) return;
+  const remoteDevice = await findManagedRemoteDeviceByNodeId(nodeId);
+  if (!remoteDevice) return;
+
+  const fleetManager = getFleetConnectionManager();
+  const remoteClient = fleetManager?.getClient(remoteDevice.id);
+  const status = fleetManager?.getStatus(remoteDevice.id);
+  if (!remoteClient || status?.state !== "connected") return;
+
+  const db = controlPlaneDeps.dbManager.getDatabase();
+  const fallbackWorkspaceId = getDefaultLocalWorkspaceId(db);
+  if (!fallbackWorkspaceId) return;
+
+  try {
+    const [taskRes, workspaceRes] = await Promise.all([
+      remoteClient.request(Methods.TASK_LIST, { limit: 50, offset: 0 }),
+      remoteClient.request(Methods.WORKSPACE_LIST, undefined, 5000),
+    ]);
+    const remoteTasks = Array.isArray((taskRes as Any)?.tasks) ? (taskRes as Any).tasks : [];
+    const remoteWorkspaces = Array.isArray((workspaceRes as Any)?.workspaces)
+      ? (workspaceRes as Any).workspaces
+      : [];
+    const targetNodeId = remoteDevice.taskNodeId || `remote-gateway:${remoteDevice.id}`;
+    for (const remoteTask of remoteTasks) {
+      const workspaceId = resolveLocalWorkspaceIdForRemoteTask(
+        db,
+        remoteWorkspaces,
+        remoteTask,
+        fallbackWorkspaceId,
+      );
+      if (workspaceId) {
+        upsertRemoteShadowTask(db, workspaceId, targetNodeId, remoteTask);
+      }
+    }
+  } catch (error) {
+    console.warn(`[ControlPlane] Failed to sync remote task list for ${remoteDevice.id}:`, error);
+  }
+}
+
+function listLocalDeviceTasks(taskRepo: TaskRepository, limit = 50): Task[] {
+  return taskRepo
+    .findAll(Math.max(limit * 3, limit), 0)
+    .filter((task) => !task.targetNodeId || isLocalManagedDeviceIdentifier(task.targetNodeId))
+    .slice(0, limit);
+}
+
+async function listTasksForNode(nodeId: string): Promise<Task[]> {
+  if (!controlPlaneDeps?.dbManager) return [];
+  const db = controlPlaneDeps.dbManager.getDatabase();
+  const taskRepo = new TaskRepository(db);
+
+  if (isLocalManagedDeviceIdentifier(nodeId)) {
+    return listLocalDeviceTasks(taskRepo, 50);
+  }
+
+  await syncRemoteShadowTasksForNode(nodeId);
+  const remoteDevice = await findManagedRemoteDeviceByNodeId(nodeId);
+  if (!remoteDevice) return [];
+  const aliases = await getManagedRemoteNodeAliases(remoteDevice, nodeId);
+  return taskRepo.findByTargetNodeIds(aliases, 50);
+}
+
+function buildAlertsFromSummaryParts(params: {
+  device: ManagedDevice;
+  recentTasks: Task[];
+  channels?: Any[];
+  approvalsPending?: number;
+  inputRequestsPending?: number;
+  freeBytes?: number;
+}): ManagedDeviceAlert[] {
+  const alerts: ManagedDeviceAlert[] = [];
+  const connectionState = params.device.status;
+  if (params.device.role === "remote" && connectionState !== "connected") {
+    alerts.push({
+      id: `${params.device.id}:connection`,
+      level:
+        connectionState === "error" ? "critical" : connectionState === "reconnecting" ? "warning" : "info",
+      title:
+        connectionState === "disconnected" ? "Device offline" : `Connection ${connectionState}`,
+      description:
+        connectionState === "disconnected"
+          ? "Saved for later. Connect this device to run or inspect live work."
+          : undefined,
+      kind: "connection",
+    });
+  }
+
+  if ((params.approvalsPending || 0) > 0) {
+    alerts.push({
+      id: `${params.device.id}:approvals`,
+      level: "warning",
+      title: `${params.approvalsPending} approval${params.approvalsPending === 1 ? "" : "s"} pending`,
+      description: "A task is waiting for a decision.",
+      kind: "approval",
+    });
+  }
+
+  if ((params.inputRequestsPending || 0) > 0) {
+    alerts.push({
+      id: `${params.device.id}:input`,
+      level: "warning",
+      title: `${params.inputRequestsPending} input request${params.inputRequestsPending === 1 ? "" : "s"} pending`,
+      description: "A task is waiting for user input.",
+      kind: "input_request",
+    });
+  }
+
+  const failingChannels = (params.channels || []).filter(
+    (channel) => channel?.enabled && channel?.status === "error",
+  );
+  if (failingChannels.length > 0) {
+    alerts.push({
+      id: `${params.device.id}:channels`,
+      level: "warning",
+      title: `${failingChannels.length} app connection${failingChannels.length === 1 ? "" : "s"} need attention`,
+      description: "One or more enabled channels are in an error state.",
+      kind: "channel",
+    });
+  }
+
+  if (
+    params.freeBytes !== undefined &&
+    Number.isFinite(params.freeBytes) &&
+    params.freeBytes < 5 * 1024 * 1024 * 1024
+  ) {
+    alerts.push({
+      id: `${params.device.id}:storage`,
+      level: "warning",
+      title: "Low disk space",
+      description: "Less than 5 GB is available for tasks and artifacts.",
+      kind: "storage",
+    });
+  }
+
+  for (const task of params.recentTasks) {
+    if (!isTaskAttention(task)) continue;
+    alerts.push({
+      id: `${params.device.id}:task:${task.id}`,
+      level: "warning",
+      title: task.title || task.prompt || "Task needs attention",
+      description:
+        task.terminalStatus === "awaiting_approval"
+          ? "Awaiting approval"
+          : task.terminalStatus === "needs_user_action"
+            ? "Awaiting user input"
+            : "Task is blocked",
+      kind: "status",
+    });
+  }
+
+  return alerts.slice(0, 10);
+}
+
+function attentionFromAlerts(alerts: ManagedDeviceAlert[]): ManagedDeviceAttentionState {
+  return alerts.reduce<ManagedDeviceAttentionState>(
+    (current, alert) => maxAttentionLevel(current, alert.level),
+    "none",
+  );
+}
+
+async function buildLocalManagedDeviceSummary(): Promise<ManagedDeviceSummary> {
+  const device = buildLocalManagedDevice();
+  const configSnapshot = await getLocalConfigSnapshot();
+  if (!controlPlaneDeps?.dbManager) {
+    return {
+      device,
+      runtime: configSnapshot.runtime,
+      tasks: { total: 0, active: 0, attention: 0, recent: [] },
+      apps: {
+        channelsTotal: 0,
+        channelsEnabled: 0,
+        workspacesTotal: 0,
+        approvalsPending: 0,
+        inputRequestsPending: 0,
+        channels: [],
+        workspaces: [],
+        accounts: [],
+      },
+      storage: { workspaceCount: 0, artifactCount: 0, workspaceRoots: [] },
+      alerts: [],
+      observer: [],
+    };
+  }
+
+  const db = controlPlaneDeps.dbManager.getDatabase();
+  const taskRepo = new TaskRepository(db);
+  const inputRequestRepo = new InputRequestRepository(db);
+  const recentTasks = listLocalDeviceTasks(taskRepo, 12);
+  const approvalsPendingRow = db
+    .prepare("SELECT COUNT(1) AS count FROM approvals WHERE status = 'pending'")
+    .get() as Any;
+  const approvalsPending = Number(approvalsPendingRow?.count || 0);
+  const inputRequestsPending = inputRequestRepo.list({
+    limit: 100,
+    offset: 0,
+    status: "pending",
+  }).length;
+  const accounts = ManagedAccountManager.list().map((account) =>
+    ManagedAccountManager.toPublicView(account, false),
+  );
+  const storageRes = await getLocalStorageSummary(db);
+  const alerts = buildAlertsFromSummaryParts({
+    device,
+    recentTasks,
+    channels: configSnapshot.channels.channels,
+    approvalsPending,
+    inputRequestsPending,
+    freeBytes: storageRes.storage.freeBytes,
+  });
+  const active = Object.entries(configSnapshot.tasks.byStatus || {}).reduce((count, [status, value]) => {
+    return count + (isActiveTaskStatus(status) ? Number(value || 0) : 0);
+  }, 0);
+
+  const hydratedDevice: ManagedDevice = {
+    ...device,
+    activeRunCount: active,
+    appsSummary: {
+      channelsTotal: Number(configSnapshot.channels.count || 0),
+      channelsEnabled: Number(configSnapshot.channels.enabled || 0),
+      workspacesTotal: Number(configSnapshot.workspaces.count || 0),
+      approvalsPending,
+      inputRequestsPending,
+    },
+    storageSummary: {
+      workspaceCount: storageRes.storage.workspaceCount,
+      artifactCount: storageRes.storage.artifactCount,
+      ...(storageRes.storage.totalBytes !== undefined
+        ? { totalBytes: storageRes.storage.totalBytes }
+        : {}),
+      ...(storageRes.storage.freeBytes !== undefined
+        ? { freeBytes: storageRes.storage.freeBytes }
+        : {}),
+      ...(storageRes.storage.usedBytes !== undefined
+        ? { usedBytes: storageRes.storage.usedBytes }
+        : {}),
+    },
+    attentionState: attentionFromAlerts(alerts),
+  };
+
+  return {
+    device: hydratedDevice,
+    runtime: configSnapshot.runtime,
+    tasks: {
+      total: Number(configSnapshot.tasks.total || 0),
+      active,
+      attention: recentTasks.filter((task) => isTaskAttention(task)).length,
+      recent: recentTasks,
+    },
+    apps: {
+      channelsTotal: hydratedDevice.appsSummary?.channelsTotal || 0,
+      channelsEnabled: hydratedDevice.appsSummary?.channelsEnabled || 0,
+      workspacesTotal: hydratedDevice.appsSummary?.workspacesTotal || 0,
+      approvalsPending,
+      inputRequestsPending,
+      channels: configSnapshot.channels.channels || [],
+      workspaces: configSnapshot.workspaces.workspaces || [],
+      accounts,
+    },
+    storage: storageRes.storage,
+    alerts,
+    observer: alerts.map((alert) => ({
+      id: alert.id,
+      timestamp: Date.now(),
+      title: alert.title,
+      detail: alert.description,
+      level: alert.level,
+    })),
+  };
+}
+
+async function buildRemoteManagedDeviceSummary(device: ManagedDevice): Promise<ManagedDeviceSummary> {
+  const fleetManager = getFleetConnectionManager();
+  const client = fleetManager?.getClient(device.id);
+  const status = fleetManager?.getStatus(device.id) || { state: "disconnected" as const };
+  const connected = status.state === "connected";
+  const db = controlPlaneDeps?.dbManager?.getDatabase() || null;
+  const taskRepo = db ? new TaskRepository(db) : null;
+  const aliases = await getManagedRemoteNodeAliases(device, device.taskNodeId || device.id);
+  const fallbackTasks = taskRepo ? taskRepo.findByTargetNodeIds(aliases, 12) : [];
+
+  let configSnapshot: Any = null;
+  let taskSnapshot: Task[] = fallbackTasks;
+  let channels: Any[] = [];
+  let workspaces: Any[] = [];
+  let approvals: Any[] = [];
+  let inputRequests: Any[] = [];
+  let accounts: Any[] = [];
+
+  if (connected && client) {
+    const [
+      configResult,
+      taskResult,
+      channelResult,
+      workspaceResult,
+      approvalResult,
+      inputResult,
+      accountResult,
+    ] = await Promise.allSettled([
+      client.request(Methods.CONFIG_GET, undefined, 5000),
+      client.request(Methods.TASK_LIST, { limit: 12, offset: 0 }, 5000),
+      client.request(Methods.CHANNEL_LIST, undefined, 5000),
+      client.request(Methods.WORKSPACE_LIST, undefined, 5000),
+      client.request(Methods.APPROVAL_LIST, { limit: 20, offset: 0 }, 5000),
+      client.request(Methods.INPUT_REQUEST_LIST, { limit: 20, offset: 0, status: "pending" }, 5000),
+      client.request(Methods.ACCOUNT_LIST, { includeSecrets: false }, 5000),
+    ]);
+
+    if (configResult.status === "fulfilled") configSnapshot = configResult.value;
+    if (taskResult.status === "fulfilled" && Array.isArray((taskResult.value as Any)?.tasks)) {
+      taskSnapshot = (taskResult.value as Any).tasks as Task[];
+    }
+    if (channelResult.status === "fulfilled") {
+      channels = Array.isArray((channelResult.value as Any)?.channels)
+        ? (channelResult.value as Any).channels
+        : [];
+    }
+    if (workspaceResult.status === "fulfilled") {
+      workspaces = Array.isArray((workspaceResult.value as Any)?.workspaces)
+        ? (workspaceResult.value as Any).workspaces
+        : [];
+    }
+    if (approvalResult.status === "fulfilled") {
+      approvals = Array.isArray((approvalResult.value as Any)?.approvals)
+        ? (approvalResult.value as Any).approvals
+        : [];
+    }
+    if (inputResult.status === "fulfilled") {
+      inputRequests = Array.isArray((inputResult.value as Any)?.inputRequests)
+        ? (inputResult.value as Any).inputRequests
+        : [];
+    }
+    if (accountResult.status === "fulfilled") {
+      accounts = Array.isArray((accountResult.value as Any)?.accounts)
+        ? (accountResult.value as Any).accounts
+        : [];
+    }
+
+    if (db) {
+      const fallbackWorkspaceId = getDefaultLocalWorkspaceId(db);
+      const targetNodeId = device.taskNodeId || `remote-gateway:${device.id}`;
+      for (const task of taskSnapshot) {
+        const workspaceId = resolveLocalWorkspaceIdForRemoteTask(
+          db,
+          workspaces,
+          task,
+          fallbackWorkspaceId,
+        );
+        if (workspaceId) {
+          upsertRemoteShadowTask(db, workspaceId, targetNodeId, task);
+        }
+      }
+    }
+  }
+
+  const total =
+    Number(configSnapshot?.tasks?.total || 0) ||
+    (taskRepo ? taskRepo.findByTargetNodeIds(aliases, 200).length : taskSnapshot.length);
+  const active =
+    configSnapshot?.tasks?.byStatus
+      ? Object.entries(configSnapshot.tasks.byStatus).reduce((count, [state, value]) => {
+          return count + (isActiveTaskStatus(state) ? Number(value || 0) : 0);
+        }, 0)
+      : taskSnapshot.filter((task) => isActiveTaskStatus(task.status)).length;
+  const storage = {
+    workspaceCount: workspaces.length || device.storageSummary?.workspaceCount || 0,
+    artifactCount: device.storageSummary?.artifactCount || 0,
+    workspaceRoots: workspaces
+      .filter((workspace) => typeof workspace?.path === "string" && workspace.path.trim())
+      .map((workspace) => ({
+        id: String(workspace.id || ""),
+        name: String(workspace.name || workspace.path || "Workspace"),
+        path: String(workspace.path || ""),
+      })),
+  };
+  const alerts = buildAlertsFromSummaryParts({
+    device: { ...device, status: status.state, lastSeenAt: status.lastActivityAt || device.lastSeenAt },
+    recentTasks: taskSnapshot,
+    channels,
+    approvalsPending: approvals.length,
+    inputRequestsPending: inputRequests.length,
+  });
+
+  const hydratedDevice: ManagedDevice = {
+    ...device,
+    status: status.state,
+    clientId: status.clientId || device.clientId,
+    connectedAt: status.connectedAt || device.connectedAt,
+    lastSeenAt: status.lastActivityAt || status.connectedAt || device.lastSeenAt,
+    version:
+      typeof configSnapshot?.runtime?.coworkVersion === "string"
+        ? configSnapshot.runtime.coworkVersion
+        : device.version,
+    platform: toNodePlatform(configSnapshot?.runtime?.platform || device.platform),
+    activeRunCount: active,
+    attentionState: attentionFromAlerts(alerts),
+    appsSummary: {
+      channelsTotal: Number(configSnapshot?.channels?.count || channels.length || 0),
+      channelsEnabled: Number(configSnapshot?.channels?.enabled || channels.filter((channel) => channel?.enabled).length || 0),
+      workspacesTotal: Number(configSnapshot?.workspaces?.count || workspaces.length || 0),
+      approvalsPending: approvals.length,
+      inputRequestsPending: inputRequests.length,
+    },
+    storageSummary: {
+      workspaceCount: storage.workspaceCount,
+      artifactCount: storage.artifactCount,
+    },
+  };
+
+  return {
+    device: hydratedDevice,
+    runtime: configSnapshot?.runtime,
+    tasks: {
+      total,
+      active,
+      attention: taskSnapshot.filter((task) => isTaskAttention(task)).length,
+      recent: taskSnapshot,
+    },
+    apps: {
+      channelsTotal: hydratedDevice.appsSummary?.channelsTotal || 0,
+      channelsEnabled: hydratedDevice.appsSummary?.channelsEnabled || 0,
+      workspacesTotal: hydratedDevice.appsSummary?.workspacesTotal || 0,
+      approvalsPending: approvals.length,
+      inputRequestsPending: inputRequests.length,
+      channels,
+      workspaces,
+      accounts,
+    },
+    storage,
+    alerts,
+    observer: fleetManager?.getObserver(device.id) || [],
+  };
+}
+
+async function buildManagedDeviceSummary(deviceId: string): Promise<ManagedDeviceSummary> {
+  if (isLocalManagedDeviceIdentifier(deviceId)) {
+    return buildLocalManagedDeviceSummary();
+  }
+  const device = findManagedDeviceById(deviceId);
+  if (!device || device.role !== "remote") {
+    throw new Error(`Managed device not found: ${deviceId}`);
+  }
+  return buildRemoteManagedDeviceSummary(device);
+}
+
+async function listManagedDevicesForRenderer(): Promise<ManagedDevice[]> {
+  let local = buildLocalManagedDevice();
+  try {
+    local = (await buildLocalManagedDeviceSummary()).device;
+  } catch {
+    // Best effort only.
+  }
+
+  const fleetManager = ensureFleetManager();
+  const remotes = listStoredManagedDevices()
+    .map((device) => {
+      const status = fleetManager.getStatus(device.id);
+      return {
+        ...device,
+        status: status.state,
+        clientId: status.clientId || device.clientId,
+        connectedAt: status.connectedAt || device.connectedAt,
+        lastSeenAt: status.lastActivityAt || status.connectedAt || device.lastSeenAt,
+      };
+    })
+    .sort((a, b) => {
+      if (a.status === "connected" && b.status !== "connected") return -1;
+      if (b.status === "connected" && a.status !== "connected") return 1;
+      return (a.name || "").localeCompare(b.name || "");
+    });
+  return [local, ...remotes];
+}
+
+function forwardRemoteTaskEvent(deviceId: string, payload: unknown): void {
+  if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
+  const taskEvent = payload as Any;
+  const taskId = taskEvent?.taskId;
+  if (!taskId) return;
+
+  mainWindowRef.webContents.send(IPC_CHANNELS.TASK_EVENT, {
+    ...taskEvent,
+    deviceId,
+  });
+
+  if (!controlPlaneDeps?.dbManager) return;
+  const status = taskEvent?.status || taskEvent?.payload?.status;
+  if (!status) return;
+  try {
+    const db = controlPlaneDeps.dbManager.getDatabase();
+    const repo = new TaskRepository(db);
+    const existing = repo.findById(taskId);
+    if (!existing) return;
+    const remoteNodeId = listStoredManagedDevices().find((d) => d.id === deviceId)?.taskNodeId;
+    const isRemoteShadow =
+      remoteNodeId &&
+      (existing.targetNodeId === remoteNodeId ||
+        existing.targetNodeId === `remote-gateway:${deviceId}`);
+    if (!isRemoteShadow) return;
+    repo.update(taskId, { status });
+  } catch (error) {
+    console.error(`[RemoteGateway] Failed to update local task ${taskId}:`, error);
+  }
+}
+
+function ensureFleetManager() {
+  return initFleetConnectionManager({
+    onStateChange: ({ deviceId, state, error, status }) => {
+      if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+        mainWindowRef.webContents.send(IPC_CHANNELS.REMOTE_GATEWAY_EVENT, {
+          type: "stateChange",
+          deviceId,
+          state,
+          error,
+          status,
+        });
+      }
+    },
+    onEvent: ({ deviceId, event, payload, status }) => {
+      if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+        mainWindowRef.webContents.send(IPC_CHANNELS.REMOTE_GATEWAY_EVENT, {
+          type: "event",
+          deviceId,
+          event,
+          payload,
+          status,
+        });
+      }
+      if (event === Events.TASK_EVENT) {
+        forwardRemoteTaskEvent(deviceId, payload);
+      }
+    },
+    onTunnelStateChange: ({ deviceId, status, error }) => {
+      if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+        mainWindowRef.webContents.send(IPC_CHANNELS.REMOTE_GATEWAY_EVENT, {
+          type: "sshTunnelStateChange",
+          deviceId,
+          state: status.state,
+          error: error || status.error,
+          payload: { status },
+        });
+      }
+    },
+  });
+}
+
+function getLegacyActiveRemoteDeviceId(): string | null {
+  const settings = ControlPlaneSettingsManager.loadSettings();
+  if (
+    settings.activeManagedDeviceId &&
+    settings.activeManagedDeviceId !== LOCAL_MANAGED_DEVICE_ID
+  ) {
+    return settings.activeManagedDeviceId;
+  }
+  if (settings.activeRemoteDeviceId) {
+    return settings.activeRemoteDeviceId;
+  }
+  return listStoredManagedDevices()[0]?.id || null;
+}
+
+async function connectManagedRemoteDevice(deviceId: string): Promise<RemoteGatewayStatus> {
+  const device = findManagedDeviceById(deviceId);
+  if (!device || device.role !== "remote") {
+    throw new Error(`Managed device not found: ${deviceId}`);
+  }
+  const fleetManager = ensureFleetManager();
+  const status = await fleetManager.connectDevice(device);
+  ControlPlaneSettingsManager.updateSettings({
+    activeManagedDeviceId: device.id,
+    activeRemoteDeviceId: device.id,
+    remote: device.config,
+  });
+  return status;
+}
+
+function disconnectManagedRemoteDevice(deviceId: string): RemoteGatewayStatus {
+  const fleetManager = ensureFleetManager();
+  fleetManager.disconnectDevice(deviceId);
+  return fleetManager.getStatus(deviceId);
+}
+
+async function routeLocalDeviceProxyRequest(method: string, params?: unknown): Promise<Any> {
+  if (!controlPlaneDeps?.dbManager) {
+    throw new Error("No database");
+  }
+  const db = controlPlaneDeps.dbManager.getDatabase();
+  const taskRepo = new TaskRepository(db);
+  const eventRepo = new TaskEventRepository(db);
+  const workspaceRepo = new WorkspaceRepository(db);
+  const channelRepo = new ChannelRepository(db);
+  const inputRequestRepo = new InputRequestRepository(db);
+  const approvalRepo = new ApprovalRepository(db);
+  const channelGateway = controlPlaneDeps.channelGateway;
+
+  switch (method) {
+    case Methods.CONFIG_GET:
+      return getLocalConfigSnapshot();
+    case Methods.WORKSPACE_LIST: {
+      const workspaces = workspaceRepo
+        .findAll()
+        .filter((workspace) => !workspace.isTemp && !isTempWorkspaceId(workspace.id));
+      return { workspaces };
+    }
+    case Methods.TASK_LIST: {
+      const { limit, offset, workspaceId } = sanitizeTaskListParams(params);
+      const tasks = listLocalDeviceTasks(taskRepo, limit + offset).slice(offset);
+      return {
+        tasks: workspaceId ? tasks.filter((task) => task.workspaceId === workspaceId) : tasks,
+      };
+    }
+    case Methods.TASK_GET: {
+      const { taskId } = sanitizeTaskIdParams(params);
+      return { task: taskRepo.findById(taskId) || null };
+    }
+    case Methods.TASK_EVENTS: {
+      const { taskId, limit } = sanitizeTaskEventsParams(params);
+      const allEvents = eventRepo.findByTaskId(taskId);
+      const events = allEvents.slice(Math.max(allEvents.length - limit, 0));
+      return { events };
+    }
+    case Methods.TASK_CANCEL: {
+      const { taskId } = sanitizeTaskIdParams(params);
+      await controlPlaneDeps.agentDaemon.cancelTask(taskId);
+      return { ok: true };
+    }
+    case Methods.TASK_SEND_MESSAGE: {
+      const { taskId, message, images } = sanitizeTaskMessageParams(params);
+      await controlPlaneDeps.agentDaemon.sendMessage(taskId, message, images);
+      return { ok: true };
+    }
+    case Methods.APPROVAL_LIST: {
+      const { limit, offset, taskId } = sanitizeApprovalListParams(params);
+      const approvals = taskId
+        ? approvalRepo.findPendingByTaskId(taskId).slice(offset, offset + limit)
+        : (() => {
+            const stmt = db.prepare(`
+              SELECT * FROM approvals
+              WHERE status = 'pending'
+              ORDER BY requested_at ASC
+              LIMIT ? OFFSET ?
+            `);
+            return stmt.all(limit, offset) as Any[];
+          })();
+      return { approvals };
+    }
+    case Methods.APPROVAL_RESPOND: {
+      const { approvalId, approved } = sanitizeApprovalRespondParams(params);
+      const status = await controlPlaneDeps.agentDaemon.respondToApproval(approvalId, approved);
+      return { status };
+    }
+    case Methods.INPUT_REQUEST_LIST: {
+      const p = (params ?? {}) as Any;
+      return {
+        inputRequests: inputRequestRepo.list({
+          limit:
+            typeof p.limit === "number" && Number.isFinite(p.limit) ? Math.max(1, p.limit) : 50,
+          offset:
+            typeof p.offset === "number" && Number.isFinite(p.offset) ? Math.max(0, p.offset) : 0,
+          ...(typeof p.taskId === "string" && p.taskId.trim() ? { taskId: p.taskId.trim() } : {}),
+          ...(typeof p.status === "string" && p.status.trim() ? { status: p.status.trim() } : {}),
+        }),
+      };
+    }
+    case Methods.INPUT_REQUEST_RESPOND:
+      return controlPlaneDeps.agentDaemon.respondToInputRequest(params as Any);
+    case Methods.CHANNEL_LIST:
+      return { channels: channelRepo.findAll() };
+    case Methods.CHANNEL_GET: {
+      const { channelId } = sanitizeChannelIdParams(params);
+      return { channel: channelRepo.findById(channelId) || null };
+    }
+    case Methods.CHANNEL_CREATE: {
+      const validated = sanitizeChannelCreateParams(params);
+      const existing = channelRepo.findByType(validated.type);
+      if (existing?.id) {
+        throw new Error(`Channel type "${validated.type}" already exists`);
+      }
+      const id = randomUUID();
+      db.prepare(`
+        INSERT INTO channels (id, type, name, enabled, config, security_config, status, bot_username, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        validated.type,
+        validated.name,
+        validated.enabled ? 1 : 0,
+        JSON.stringify(validated.config || {}),
+        JSON.stringify(validated.securityConfig || { mode: "pairing" }),
+        "disconnected",
+        null,
+        Date.now(),
+        Date.now(),
+      );
+      if (validated.enabled && channelGateway) {
+        await channelGateway.enableChannel(id);
+      }
+      return { channelId: id };
+    }
+    case Methods.CHANNEL_UPDATE: {
+      const { channelId, updates } = sanitizeChannelUpdateParams(params);
+      if (channelGateway) {
+        channelGateway.updateChannel(channelId, updates as Any);
+        return { ok: true };
+      }
+      // Gateway not initialized: persist to DB; gateway will pick up on restart
+      channelRepo.update(channelId, updates as Any);
+      return { ok: true, restartRequired: true };
+    }
+    case Methods.CHANNEL_ENABLE: {
+      const { channelId } = sanitizeChannelIdParams(params);
+      if (!channelGateway) {
+        channelRepo.update(channelId, { enabled: true });
+        return { ok: true, restartRequired: true };
+      }
+      await channelGateway.enableChannel(channelId);
+      return { ok: true };
+    }
+    case Methods.CHANNEL_DISABLE: {
+      const { channelId } = sanitizeChannelIdParams(params);
+      if (!channelGateway) {
+        channelRepo.update(channelId, { enabled: false, status: "disconnected" as Any });
+        return { ok: true, restartRequired: true };
+      }
+      await channelGateway.disableChannel(channelId);
+      return { ok: true };
+    }
+    case Methods.CHANNEL_TEST: {
+      const { channelId } = sanitizeChannelIdParams(params);
+      if (!channelGateway) {
+        return { success: false, error: "Channel gateway not available (restart required)" };
+      }
+      return channelGateway.testChannel(channelId);
+    }
+    case Methods.CHANNEL_REMOVE: {
+      const { channelId } = sanitizeChannelIdParams(params);
+      if (!channelGateway) {
+        channelRepo.delete(channelId);
+        return { ok: true, restartRequired: true };
+      }
+      await channelGateway.removeChannel(channelId);
+      return { ok: true };
+    }
+    case Methods.ACCOUNT_LIST: {
+      const payload = params && typeof params === "object" ? (params as Any) : {};
+      const accounts = ManagedAccountManager.list({
+        provider: typeof payload.provider === "string" ? payload.provider : undefined,
+        status: typeof payload.status === "string" ? payload.status : undefined,
+      });
+      return {
+        accounts: accounts.map((account) =>
+          ManagedAccountManager.toPublicView(account, payload.includeSecrets === true),
+        ),
+      };
+    }
+    case Methods.ACCOUNT_GET: {
+      const payload = params && typeof params === "object" ? (params as Any) : {};
+      const accountId = typeof payload.accountId === "string" ? payload.accountId.trim() : "";
+      if (!accountId) throw new Error("accountId is required");
+      const account = ManagedAccountManager.getById(accountId);
+      return {
+        account: account
+          ? ManagedAccountManager.toPublicView(account, payload.includeSecrets === true)
+          : null,
+      };
+    }
+    case Methods.ACCOUNT_UPSERT: {
+      const account = ManagedAccountManager.upsert((params ?? {}) as Any);
+      return { account: ManagedAccountManager.toPublicView(account, false) };
+    }
+    case Methods.ACCOUNT_REMOVE: {
+      const payload = params && typeof params === "object" ? (params as Any) : {};
+      const accountId = typeof payload.accountId === "string" ? payload.accountId.trim() : "";
+      if (!accountId) throw new Error("accountId is required");
+      return { removed: ManagedAccountManager.remove(accountId) };
+    }
+    default:
+      throw new Error(`Unsupported local proxy method: ${method}`);
+  }
 }
 
 function sanitizeTaskCreateParams(params: unknown): {
@@ -259,6 +1447,7 @@ function sanitizeTaskCreateParams(params: unknown): {
   agentConfig?: AgentConfig;
   budgetTokens?: number;
   budgetCost?: number;
+  shellAccess?: boolean;
 } {
   const p = (params ?? {}) as any;
   const title = typeof p.title === "string" ? p.title.trim() : "";
@@ -275,6 +1464,7 @@ function sanitizeTaskCreateParams(params: unknown): {
     typeof p.budgetCost === "number" && Number.isFinite(p.budgetCost)
       ? Math.max(0, p.budgetCost)
       : undefined;
+  const shellAccess = p.shellAccess === true;
 
   const agentConfig: AgentConfig | undefined = (() => {
     if (!p.agentConfig || typeof p.agentConfig !== "object") return undefined;
@@ -293,6 +1483,7 @@ function sanitizeTaskCreateParams(params: unknown): {
     ...(agentConfig ? { agentConfig } : {}),
     ...(budgetTokens !== undefined ? { budgetTokens } : {}),
     ...(budgetCost !== undefined ? { budgetCost } : {}),
+    ...(shellAccess ? { shellAccess } : {}),
   };
 }
 
@@ -301,15 +1492,6 @@ function sanitizeTaskIdParams(params: unknown): { taskId: string } {
   const taskId = typeof p.taskId === "string" ? p.taskId.trim() : "";
   if (!taskId) throw { code: ErrorCodes.INVALID_PARAMS, message: "taskId is required" };
   return { taskId };
-}
-
-function sanitizeTaskMessageParams(params: unknown): { taskId: string; message: string } {
-  const p = (params ?? {}) as any;
-  const taskId = typeof p.taskId === "string" ? p.taskId.trim() : "";
-  const message = typeof p.message === "string" ? p.message.trim() : "";
-  if (!taskId) throw { code: ErrorCodes.INVALID_PARAMS, message: "taskId is required" };
-  if (!message) throw { code: ErrorCodes.INVALID_PARAMS, message: "message is required" };
-  return { taskId, message };
 }
 
 function sanitizeApprovalRespondParams(params: unknown): { approvalId: string; approved: boolean } {
@@ -682,86 +1864,37 @@ export async function startControlPlaneFromSettings(
       ? ControlPlaneSettingsManager.enable()
       : ControlPlaneSettingsManager.loadSettings();
 
-    if (!settings.enabled && settings.connectionMode !== "remote") {
+    const autoConnectDeviceIds = new Set(
+      listStoredManagedDevices()
+        .filter((device) => device.autoConnect)
+        .map((device) => device.id),
+    );
+    if (settings.connectionMode === "remote") {
+      const activeLegacyRemoteId = getLegacyActiveRemoteDeviceId();
+      if (activeLegacyRemoteId) {
+        autoConnectDeviceIds.add(activeLegacyRemoteId);
+      }
+    }
+
+    if (!settings.enabled && autoConnectDeviceIds.size === 0) {
       return { ok: true, skipped: true };
     }
 
-    if (settings.connectionMode === "remote") {
-      const remoteConfig = settings.remote;
-      if (!remoteConfig?.url || !remoteConfig?.token) {
-        return {
-          ok: false,
-          error: "Remote gateway URL and token are required (connectionMode=remote)",
-        };
-      }
-
-      // Stop local server if running
-      if (controlPlaneServer?.isRunning) {
-        if (detachAgentDaemonBridge) {
-          detachAgentDaemonBridge();
-          detachAgentDaemonBridge = null;
-        }
-        await controlPlaneServer.stop();
-        controlPlaneServer = null;
-      }
-
-      const client = initRemoteGatewayClient({
-        ...remoteConfig,
-        onStateChange: (state, error) => {
-          if (mainWindowRef && !mainWindowRef.isDestroyed()) {
-            mainWindowRef.webContents.send(IPC_CHANNELS.REMOTE_GATEWAY_EVENT, {
-              type: "stateChange",
-              state,
-              error,
-            });
-          }
-        },
-        onEvent: (event, payload) => {
-          if (mainWindowRef && !mainWindowRef.isDestroyed()) {
-            // Forward gateway events
-            mainWindowRef.webContents.send(IPC_CHANNELS.REMOTE_GATEWAY_EVENT, {
-              type: "event",
-              event,
-              payload,
-            });
-
-            // If it's a task event, also proxy it to the local task system
-            if (event === Events.TASK_EVENT) {
-              const taskEvent = payload as any;
-              const taskId = taskEvent?.taskId;
-              if (taskId) {
-                // 1. Forward to renderer via the standard task event channel
-                mainWindowRef.webContents.send(IPC_CHANNELS.TASK_EVENT, taskEvent);
-
-                // 2. Update local database for status changes
-                if (controlPlaneDeps?.dbManager) {
-                  const status = taskEvent?.status || taskEvent?.payload?.status;
-                  if (status) {
-                    try {
-                      const db = controlPlaneDeps.dbManager.getDatabase();
-                      const { TaskRepository } = require("../database/repositories");
-                      const repo = new TaskRepository(db);
-                      repo.update(taskId, { status });
-                    } catch (e) {
-                      console.error(`[RemoteGateway] Failed to update local task ${taskId}:`, e);
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-      });
-
-      await client.connect();
-      return { ok: true };
-    }
-
-    if (!settings.token) {
+    if (settings.enabled && !settings.token) {
       return { ok: false, error: "No authentication token configured" };
     }
 
-    if (controlPlaneServer?.isRunning) {
+    if (settings.enabled && controlPlaneServer?.isRunning) {
+      for (const deviceId of autoConnectDeviceIds) {
+        try {
+          const status = ensureFleetManager().getStatus(deviceId);
+          if (status.state !== "connected") {
+            await connectManagedRemoteDevice(deviceId);
+          }
+        } catch (error) {
+          console.warn(`[ControlPlane] Failed to auto-connect ${deviceId}:`, error);
+        }
+      }
       const addr = controlPlaneServer.getAddress();
       const tailscale = getExposureStatus();
       return {
@@ -782,59 +1915,84 @@ export async function startControlPlaneFromSettings(
       controlPlaneServer = null;
     }
 
-    const server = new ControlPlaneServer({
-      port: settings.port,
-      host: settings.host,
-      token: settings.token,
-      handshakeTimeoutMs: settings.handshakeTimeoutMs,
-      heartbeatIntervalMs: settings.heartbeatIntervalMs,
-      maxPayloadBytes: settings.maxPayloadBytes,
-      onEvent: (event) => {
-        options.onEvent?.(event);
-        if (mainWindowRef && !mainWindowRef.isDestroyed()) {
-          mainWindowRef.webContents.send(IPC_CHANNELS.CONTROL_PLANE_EVENT, event);
+    let tailscaleResult:
+      | {
+          success?: boolean;
+          httpsUrl?: string;
+          wssUrl?: string;
         }
-      },
-    });
+      | null
+      | undefined;
 
-    controlPlaneServer = server;
+    if (settings.enabled) {
+      const server = new ControlPlaneServer({
+        port: settings.port,
+        host: settings.host,
+        token: settings.token,
+        handshakeTimeoutMs: settings.handshakeTimeoutMs,
+        heartbeatIntervalMs: settings.heartbeatIntervalMs,
+        maxPayloadBytes: settings.maxPayloadBytes,
+        onEvent: (event) => {
+          options.onEvent?.(event);
+          if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+            mainWindowRef.webContents.send(IPC_CHANNELS.CONTROL_PLANE_EVENT, event);
+          }
+        },
+      });
 
-    try {
-      if (controlPlaneDeps) {
-        registerTaskAndWorkspaceMethods(server, controlPlaneDeps);
-        registerCompanyOpsMethods(server, controlPlaneDeps);
-        registerACPMethodsOnServer(server, controlPlaneDeps);
-        detachAgentDaemonBridge = attachAgentDaemonTaskBridge(server, controlPlaneDeps.agentDaemon);
-      } else {
-        console.warn("[ControlPlane] No deps provided; task/workspace methods are disabled");
-      }
-      registerCanvasMethods(server);
+      controlPlaneServer = server;
 
-      const tailscaleResult = await server.startWithTailscale();
-      const address = server.getAddress();
-
-      return {
-        ok: true,
-        address: address || undefined,
-        tailscale: tailscaleResult?.success
-          ? { httpsUrl: tailscaleResult.httpsUrl, wssUrl: tailscaleResult.wssUrl }
-          : undefined,
-      };
-    } catch (error) {
-      if (detachAgentDaemonBridge) {
-        detachAgentDaemonBridge();
-        detachAgentDaemonBridge = null;
-      }
       try {
-        await server.stop();
-      } catch (stopError) {
-        console.error("[ControlPlane] Failed to cleanup server after start error:", stopError);
+        if (controlPlaneDeps) {
+          registerTaskAndWorkspaceMethods(server, controlPlaneDeps);
+          registerCompanyOpsMethods(server, controlPlaneDeps);
+          registerACPMethodsOnServer(server, controlPlaneDeps);
+          detachAgentDaemonBridge = attachAgentDaemonTaskBridge(
+            server,
+            controlPlaneDeps.agentDaemon,
+          );
+        } else {
+          console.warn("[ControlPlane] No deps provided; task/workspace methods are disabled");
+        }
+        registerCanvasMethods(server);
+
+        tailscaleResult = await server.startWithTailscale();
+      } catch (error) {
+        if (detachAgentDaemonBridge) {
+          detachAgentDaemonBridge();
+          detachAgentDaemonBridge = null;
+        }
+        try {
+          await server.stop();
+        } catch (stopError) {
+          console.error("[ControlPlane] Failed to cleanup server after start error:", stopError);
+        }
+        if (controlPlaneServer === server) {
+          controlPlaneServer = null;
+        }
+        throw error;
       }
-      if (controlPlaneServer === server) {
-        controlPlaneServer = null;
-      }
-      throw error;
     }
+
+    for (const deviceId of autoConnectDeviceIds) {
+      try {
+        const status = ensureFleetManager().getStatus(deviceId);
+        if (status.state !== "connected") {
+          await connectManagedRemoteDevice(deviceId);
+        }
+      } catch (error) {
+        console.warn(`[ControlPlane] Failed to auto-connect ${deviceId}:`, error);
+      }
+    }
+
+    const address = controlPlaneServer?.getAddress();
+    return {
+      ok: true,
+      address: address || undefined,
+      tailscale: tailscaleResult?.success
+        ? { httpsUrl: tailscaleResult.httpsUrl, wssUrl: tailscaleResult.wssUrl }
+        : undefined,
+    };
   } catch (error: any) {
     console.error("[ControlPlane] Auto-start error:", error);
     return { ok: false, error: error?.message || String(error) };
@@ -1182,6 +2340,51 @@ function registerTaskAndWorkspaceMethods(
     return { workspace };
   });
 
+  // File operations (for remote file selection)
+  server.registerMethod(Methods.FILE_LIST_DIRECTORY, async (client, params) => {
+    requireScope(client, "read");
+    const p = (params ?? {}) as any;
+    const workspaceId = typeof p.workspaceId === "string" ? p.workspaceId.trim() : "";
+    const relativePath = typeof p.path === "string" ? p.path.trim() || "." : ".";
+    if (!workspaceId) throw { code: ErrorCodes.INVALID_PARAMS, message: "workspaceId is required" };
+
+    const workspace = workspaceRepo.findById(workspaceId);
+    if (!workspace) {
+      throw { code: ErrorCodes.INVALID_PARAMS, message: `Workspace not found: ${workspaceId}` };
+    }
+
+    const fullPath = path.join(workspace.path, relativePath);
+    const resolved = path.resolve(fullPath);
+    if (!resolved.startsWith(path.resolve(workspace.path))) {
+      throw { code: ErrorCodes.INVALID_PARAMS, message: "Path escapes workspace" };
+    }
+
+    try {
+      const entries = await fs.readdir(resolved, { withFileTypes: true });
+      const files = await Promise.all(
+        entries.slice(0, 200).map(async (entry) => {
+          try {
+            const entryPath = path.join(resolved, entry.name);
+            const stat = await fs.stat(entryPath);
+            return {
+              name: entry.name,
+              type: stat.isDirectory() ? ("directory" as const) : ("file" as const),
+              size: stat.isFile() ? stat.size : 0,
+            };
+          } catch {
+            return { name: entry.name, type: "file" as const, size: 0 };
+          }
+        }),
+      );
+      return { files };
+    } catch (error: any) {
+      throw {
+        code: ErrorCodes.METHOD_FAILED,
+        message: error?.message || `Failed to list directory: ${relativePath}`,
+      };
+    }
+  });
+
   // Tasks
   server.registerMethod(Methods.TASK_CREATE, async (client, params) => {
     requireScope(client, "admin");
@@ -1193,6 +2396,13 @@ function registerTaskAndWorkspaceMethods(
         code: ErrorCodes.INVALID_PARAMS,
         message: `Workspace not found: ${validated.workspaceId}`,
       };
+    }
+
+    if (validated.shellAccess && !workspace.permissions?.shell) {
+      workspaceRepo.updatePermissions(validated.workspaceId, {
+        ...workspace.permissions,
+        shell: true,
+      });
     }
 
     // Create task record
@@ -1305,8 +2515,8 @@ function registerTaskAndWorkspaceMethods(
 
   server.registerMethod(Methods.TASK_SEND_MESSAGE, async (client, params) => {
     requireScope(client, "admin");
-    const { taskId, message } = sanitizeTaskMessageParams(params);
-    await agentDaemon.sendMessage(taskId, message);
+    const { taskId, message, images } = sanitizeTaskMessageParams(params);
+    await agentDaemon.sendMessage(taskId, message, images);
     return { ok: true };
   });
 
@@ -1742,6 +2952,7 @@ export function setupControlPlaneHandlers(
   // Initialize settings managers
   ControlPlaneSettingsManager.initialize();
   TailscaleSettingsManager.initialize();
+  ensureFleetManager();
 
   // Get settings (with masked token)
   ipcMain.handle(
@@ -2134,80 +3345,65 @@ export function setupControlPlaneHandlers(
     IPC_CHANNELS.REMOTE_GATEWAY_CONNECT,
     async (_, config?: RemoteGatewayConfig): Promise<{ ok: boolean; error?: string }> => {
       try {
-        // Get config from settings if not provided
         const settings = ControlPlaneSettingsManager.loadSettings();
-        const remoteConfig = config || settings.remote;
+        let targetDeviceId = getLegacyActiveRemoteDeviceId();
+        let remoteConfig = config || settings.remote;
 
         if (!remoteConfig?.url || !remoteConfig?.token) {
           return { ok: false, error: "Remote gateway URL and token are required" };
         }
 
-        // Stop local server if running
-        if (controlPlaneServer?.isRunning) {
-          if (detachAgentDaemonBridge) {
-            detachAgentDaemonBridge();
-            detachAgentDaemonBridge = null;
-          }
-          await controlPlaneServer.stop();
-          controlPlaneServer = null;
+        if (config) {
+          const managedDevices = listStoredManagedDevices();
+          const existing =
+            (targetDeviceId ? managedDevices.find((device) => device.id === targetDeviceId) : null) ||
+            managedDevices.find(
+              (device) =>
+                normalizeGatewayUrl(device.config?.url) === normalizeGatewayUrl(remoteConfig?.url),
+            );
+          targetDeviceId = existing?.id || targetDeviceId || `remote-device:${Date.now()}`;
+          const nextDevice = normalizeManagedRemoteDevice({
+            ...(existing || {
+              id: targetDeviceId,
+              role: "remote",
+              purpose: "general",
+              platform: "linux",
+              status: "disconnected",
+            }),
+            id: targetDeviceId,
+            name: existing?.name || remoteConfig.deviceName || "CoWork Remote Client",
+            transport: inferManagedTransport(remoteConfig),
+            taskNodeId: `remote-gateway:${targetDeviceId}`,
+            config: remoteConfig,
+          } as ManagedDevice);
+          const nextManagedDevices = [
+            ...managedDevices.filter((device) => device.id !== targetDeviceId),
+            nextDevice,
+          ];
+          const nextSavedDevices = [
+            ...(settings.savedRemoteDevices || []).filter((device) => device.id !== targetDeviceId),
+            {
+              id: targetDeviceId,
+              name: nextDevice.name,
+              config: remoteConfig,
+              autoConnect: nextDevice.autoConnect === true,
+            },
+          ];
+          ControlPlaneSettingsManager.updateSettings({
+            connectionMode: "remote",
+            remote: remoteConfig,
+            activeManagedDeviceId: targetDeviceId,
+            activeRemoteDeviceId: targetDeviceId,
+            managedDevices: nextManagedDevices,
+            savedRemoteDevices: nextSavedDevices,
+          });
         }
 
-        // Initialize and connect remote client
-        const client = initRemoteGatewayClient({
-          ...remoteConfig,
-          onStateChange: (state, error) => {
-            if (mainWindowRef && !mainWindowRef.isDestroyed()) {
-              mainWindowRef.webContents.send(IPC_CHANNELS.REMOTE_GATEWAY_EVENT, {
-                type: "stateChange",
-                state,
-                error,
-              });
-            }
-          },
-          onEvent: (event, payload) => {
-            if (mainWindowRef && !mainWindowRef.isDestroyed()) {
-              // Forward gateway events
-              mainWindowRef.webContents.send(IPC_CHANNELS.REMOTE_GATEWAY_EVENT, {
-                type: "event",
-                event,
-                payload,
-              });
+        if (!targetDeviceId) {
+          return { ok: false, error: "No managed remote device is selected" };
+        }
 
-              // If it's a task event, also proxy it to the local task system
-              if (event === Events.TASK_EVENT) {
-                const taskEvent = payload as any;
-                const taskId = taskEvent?.taskId;
-                if (taskId) {
-                  // 1. Forward to renderer via the standard task event channel
-                  mainWindowRef.webContents.send(IPC_CHANNELS.TASK_EVENT, taskEvent);
-
-                  // 2. Update local database for status changes
-                  if (controlPlaneDeps?.dbManager) {
-                    const status = taskEvent?.status || taskEvent?.payload?.status;
-                    if (status) {
-                      try {
-                        const db = controlPlaneDeps.dbManager.getDatabase();
-                        const { TaskRepository } = require("../database/repositories");
-                        const repo = new TaskRepository(db);
-                        repo.update(taskId, { status });
-                      } catch (e) {
-                        console.error(`[RemoteGateway] Failed to update local task ${taskId}:`, e);
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-        });
-
-        await client.connect();
-
-        // Update settings with connection mode
-        ControlPlaneSettingsManager.updateSettings({
-          connectionMode: "remote",
-          remote: remoteConfig,
-        });
+        await connectManagedRemoteDevice(targetDeviceId);
 
         return { ok: true };
       } catch (error: any) {
@@ -2221,7 +3417,10 @@ export function setupControlPlaneHandlers(
     IPC_CHANNELS.REMOTE_GATEWAY_DISCONNECT,
     async (): Promise<{ ok: boolean; error?: string }> => {
       try {
-        shutdownRemoteGatewayClient();
+        const activeRemoteId = getLegacyActiveRemoteDeviceId();
+        if (activeRemoteId) {
+          disconnectManagedRemoteDevice(activeRemoteId);
+        }
         ControlPlaneSettingsManager.updateSettings({
           connectionMode: "local",
         });
@@ -2234,21 +3433,14 @@ export function setupControlPlaneHandlers(
 
   // Get remote gateway status
   ipcMain.handle(IPC_CHANNELS.REMOTE_GATEWAY_GET_STATUS, async (): Promise<RemoteGatewayStatus> => {
-    const client = getRemoteGatewayClient();
-    const tunnel = getSSHTunnelManager();
-
-    if (!client) {
+    const activeRemoteId = getLegacyActiveRemoteDeviceId();
+    if (!activeRemoteId) {
       return {
         state: "disconnected",
-        sshTunnel: tunnel?.getStatus(),
+        sshTunnel: getSSHTunnelManager()?.getStatus(),
       };
     }
-
-    const status = client.getStatus();
-    return {
-      ...status,
-      sshTunnel: tunnel?.getStatus(),
-    };
+    return ensureFleetManager().getStatus(activeRemoteId);
   });
 
   // Save remote gateway config
@@ -2256,8 +3448,65 @@ export function setupControlPlaneHandlers(
     IPC_CHANNELS.REMOTE_GATEWAY_SAVE_CONFIG,
     async (_, config: RemoteGatewayConfig): Promise<{ ok: boolean; error?: string }> => {
       try {
+        const settings = ControlPlaneSettingsManager.loadSettings();
+        const managedDevices = listStoredManagedDevices();
+        const activeManagedDeviceId =
+          settings.activeManagedDeviceId &&
+          settings.activeManagedDeviceId !== LOCAL_MANAGED_DEVICE_ID
+            ? settings.activeManagedDeviceId
+            : undefined;
+        const targetDevice =
+          (activeManagedDeviceId
+            ? managedDevices.find((device) => device.id === activeManagedDeviceId)
+            : null) ||
+          (settings.activeRemoteDeviceId
+            ? managedDevices.find((device) => device.id === settings.activeRemoteDeviceId)
+            : null) ||
+          managedDevices.find(
+            (device) => normalizeGatewayUrl(device.config?.url) === normalizeGatewayUrl(config.url),
+          );
+        const targetDeviceId =
+          targetDevice?.id ||
+          activeManagedDeviceId ||
+          settings.activeRemoteDeviceId ||
+          `remote:${config.url}`;
+        const updatedDevice = normalizeManagedRemoteDevice({
+          ...(targetDevice || {
+            id: targetDeviceId,
+            role: "remote",
+            purpose: "general",
+            platform: "linux",
+            status: "disconnected",
+          }),
+          id: targetDeviceId,
+          name: config.deviceName || targetDevice?.name || "CoWork Remote Client",
+          transport: inferManagedTransport(config),
+          taskNodeId: `remote-gateway:${targetDeviceId}`,
+          config,
+        } as ManagedDevice);
+        const nextManagedDevices = [
+          ...managedDevices.filter((device) => device.id !== targetDeviceId),
+          updatedDevice,
+        ];
+        const nextSavedRemoteDevices = [
+          ...(settings.savedRemoteDevices || []).filter((device) => device.id !== targetDeviceId),
+          {
+            id: targetDeviceId,
+            name: updatedDevice.name,
+            config,
+            clientId: targetDevice?.clientId,
+            connectedAt: targetDevice?.connectedAt,
+            lastActivityAt: targetDevice?.lastSeenAt,
+            autoConnect: updatedDevice.autoConnect === true,
+          },
+        ];
+
         ControlPlaneSettingsManager.updateSettings({
           remote: config,
+          managedDevices: nextManagedDevices,
+          savedRemoteDevices: nextSavedRemoteDevices,
+          activeManagedDeviceId: targetDeviceId,
+          activeRemoteDeviceId: targetDeviceId,
         });
         return { ok: true };
       } catch (error: any) {
@@ -2449,13 +3698,11 @@ export function setupControlPlaneHandlers(
       error?: string;
     }> => {
       try {
-        if (controlPlaneServer?.isRunning) {
-          const nodes = (controlPlaneServer as any).clients.getNodeInfoList();
-          return { ok: true, nodes };
-        }
-
-        const remoteNode = await getRemoteGatewayNodeInfo();
-        return { ok: true, nodes: remoteNode ? [remoteNode] : [] };
+        const localNodes = controlPlaneServer?.isRunning
+          ? ((controlPlaneServer as any).clients.getNodeInfoList() as NodeInfo[])
+          : [];
+        const remoteNodes = await listManagedRemoteNodes();
+        return { ok: true, nodes: [...localNodes, ...remoteNodes] };
       } catch (error: any) {
         return { ok: false, error: error.message || String(error) };
       }
@@ -2476,20 +3723,19 @@ export function setupControlPlaneHandlers(
       try {
         if (controlPlaneServer?.isRunning) {
           const client = (controlPlaneServer as any).clients.getNodeByIdOrName(nodeId);
-          if (!client) {
-            return { ok: false, error: `Node not found: ${nodeId}` };
+          if (client) {
+            return { ok: true, node: client.getNodeInfo() };
           }
-          return { ok: true, node: client.getNodeInfo() };
         }
 
-        const remoteNode = await getRemoteGatewayNodeInfo();
-        if (!remoteNode) {
-          return { ok: false, error: "Control Plane is not running" };
+        const remoteNodes = await listManagedRemoteNodes();
+        const remoteNode = remoteNodes.find(
+          (candidate) => candidate.id === nodeId || candidate.displayName === nodeId,
+        );
+        if (remoteNode) {
+          return { ok: true, node: remoteNode };
         }
-        if (remoteNode.id !== nodeId && remoteNode.displayName !== nodeId) {
-          return { ok: false, error: `Node not found: ${nodeId}` };
-        }
-        return { ok: true, node: remoteNode };
+        return { ok: false, error: `Node not found: ${nodeId}` };
       } catch (error: any) {
         return { ok: false, error: error.message || String(error) };
       }
@@ -2562,23 +3808,95 @@ export function setupControlPlaneHandlers(
 
   ipcMain.handle(IPC_CHANNELS.DEVICE_LIST_TASKS, async (_, nodeId: string) => {
     try {
-      if (!controlPlaneDeps?.dbManager) return { ok: false, error: "No database" };
-      await syncRemoteShadowTasksForNode(nodeId);
-      const db = controlPlaneDeps.dbManager.getDatabase();
-      const { TaskRepository } = require("../database/repositories");
-      const repo = new TaskRepository(db);
-      const aliases = await getRemoteGatewayNodeAliases(nodeId);
-      return { ok: true, tasks: repo.findByTargetNodeIds(aliases, 50) };
+      return { ok: true, tasks: await listTasksForNode(nodeId) };
     } catch (error: any) {
       return { ok: false, error: error.message || String(error) };
     }
   });
 
   ipcMain.handle(
+    IPC_CHANNELS.DEVICE_LIST_FILES,
+    async (
+      _,
+      params: { nodeId: string; workspaceId: string; path?: string },
+    ): Promise<{ ok: boolean; files?: Array<{ name: string; type: "file" | "directory"; size: number }>; error?: string }> => {
+      try {
+        if (isLocalManagedDeviceIdentifier(params.nodeId)) {
+          return { ok: false, error: "Use local file selection for this device" };
+        }
+        const remoteDevice = await findManagedRemoteDeviceByNodeId(params.nodeId);
+        if (!remoteDevice) {
+          return { ok: false, error: `Remote device not found for node ${params.nodeId}` };
+        }
+        const fleetManager = ensureFleetManager();
+        const remoteClient = fleetManager.getClient(remoteDevice.id);
+        const remoteStatus = fleetManager.getStatus(remoteDevice.id);
+        if (!remoteClient || remoteStatus.state !== "connected") {
+          return { ok: false, error: "Remote device is not connected" };
+        }
+        const res = (await remoteClient.request(
+          Methods.FILE_LIST_DIRECTORY,
+          { workspaceId: params.workspaceId, path: params.path || "." },
+          10000,
+        )) as { files?: Array<{ name: string; type: "file" | "directory"; size: number }> };
+        return { ok: true, files: res?.files || [] };
+      } catch (error: any) {
+        return { ok: false, error: error.message || String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.DEVICE_LIST_REMOTE_WORKSPACES,
+    async (
+      _,
+      nodeId: string,
+    ): Promise<{ ok: boolean; workspaces?: Array<{ id: string; name: string }>; error?: string }> => {
+      try {
+        if (isLocalManagedDeviceIdentifier(nodeId)) {
+          return { ok: false, error: "Use local workspace for this device" };
+        }
+        const remoteDevice = await findManagedRemoteDeviceByNodeId(nodeId);
+        if (!remoteDevice) {
+          return { ok: false, error: `Remote device not found for node ${nodeId}` };
+        }
+        const fleetManager = ensureFleetManager();
+        const remoteClient = fleetManager.getClient(remoteDevice.id);
+        const remoteStatus = fleetManager.getStatus(remoteDevice.id);
+        if (!remoteClient || remoteStatus.state !== "connected") {
+          return { ok: false, error: "Remote device is not connected" };
+        }
+        const res = (await remoteClient.request(Methods.WORKSPACE_LIST, undefined, 5000)) as {
+          workspaces?: Array<{ id: string; name: string }>;
+        };
+        const workspaces = (res?.workspaces || []).map((w) => ({
+          id: w.id,
+          name: w.name || w.id,
+        }));
+        return { ok: true, workspaces };
+      } catch (error: any) {
+        return { ok: false, error: error.message || String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.DEVICE_ASSIGN_TASK,
-    async (_, params: { nodeId: string; prompt: string; workspaceId?: string }) => {
+    async (
+      _,
+      params: {
+        nodeId: string;
+        prompt: string;
+        workspaceId?: string;
+        agentConfig?: Any;
+        shellAccess?: boolean;
+      },
+    ) => {
       try {
         if (!controlPlaneDeps?.dbManager) return { ok: false, error: "No database" };
+        if (isLocalManagedDeviceIdentifier(params.nodeId)) {
+          return { ok: false, error: "Use the local task creation flow for this device" };
+        }
         const db = controlPlaneDeps.dbManager.getDatabase();
         const workspaceRepo = new WorkspaceRepository(db);
         const requestedLocalWorkspace = params.workspaceId
@@ -2589,86 +3907,133 @@ export function setupControlPlaneHandlers(
         if (!localWorkspaceId) {
           return { ok: false, error: "No local workspace available for remote task shadow record" };
         }
-        
-        // Forward to remote gateway if active
-        const remoteClient = getRemoteGatewayClient();
-        let remoteTaskRes: any;
-        
-        if (remoteClient && remoteClient.getStatus().state === "connected") {
-          console.log(`[ControlPlane] Forwarding task creation to remote device: ${params.nodeId}`);
-          try {
-            // Fetch available remote workspaces to prevent "Workspace not found" errors
-            const workspacesRes = await remoteClient.request("workspace.list") as any;
-            const remoteWorkspaces = workspacesRes?.workspaces || [];
-            
-            let targetWorkspaceId = params.workspaceId;
-            const remoteHasWorkspace = remoteWorkspaces.some((w: any) => w.id === targetWorkspaceId);
-            
-            if (!remoteHasWorkspace) {
-              if (remoteWorkspaces.length > 0) {
-                targetWorkspaceId = remoteWorkspaces[0].id;
-                console.log(`[ControlPlane] Workspace ${params.workspaceId} not found on remote, falling back to: ${targetWorkspaceId}`);
-              } else {
-                throw new Error("No workspaces available on the remote device");
-              }
-            }
-
-            remoteTaskRes = await remoteClient.request("task.create", {
-              title: params.prompt.slice(0, 50) + (params.prompt.length > 50 ? "..." : ""),
-              prompt: params.prompt,
-              workspaceId: targetWorkspaceId, 
-            });
-          } catch (e: any) {
-             console.error(`[ControlPlane] Remote task execution failed:`, e);
-             return { ok: false, error: e?.message || "Remote execution failed" };
-          }
+        const remoteDevice = await findManagedRemoteDeviceByNodeId(params.nodeId);
+        if (!remoteDevice) {
+          return { ok: false, error: `Remote device not found for node ${params.nodeId}` };
         }
-        
+        const fleetManager = ensureFleetManager();
+        const remoteClient = fleetManager.getClient(remoteDevice.id);
+        const remoteStatus = fleetManager.getStatus(remoteDevice.id);
+        if (!remoteClient || remoteStatus.state !== "connected") {
+          return { ok: false, error: "Remote device is not connected" };
+        }
+
+        let remoteTaskRes: Any;
+        try {
+          const workspacesRes = (await remoteClient.request(Methods.WORKSPACE_LIST, undefined, 5000)) as Any;
+          const remoteWorkspaces = Array.isArray(workspacesRes?.workspaces)
+            ? workspacesRes.workspaces
+            : [];
+
+          let targetWorkspaceId = params.workspaceId;
+          const remoteHasWorkspace = remoteWorkspaces.some((workspace: Any) => workspace.id === targetWorkspaceId);
+          if (!remoteHasWorkspace) {
+            if (remoteWorkspaces.length === 0) {
+              throw new Error("No workspaces available on the remote device");
+            }
+            targetWorkspaceId = remoteWorkspaces[0].id;
+          }
+
+          const taskCreateParams: Any = {
+            title: params.prompt.slice(0, 50) + (params.prompt.length > 50 ? "..." : ""),
+            prompt: params.prompt,
+            workspaceId: targetWorkspaceId,
+          };
+          if (params.agentConfig && Object.keys(params.agentConfig).length > 0) {
+            taskCreateParams.agentConfig = params.agentConfig;
+          }
+          if (params.shellAccess === true) {
+            taskCreateParams.shellAccess = true;
+          }
+          remoteTaskRes = await remoteClient.request(Methods.TASK_CREATE, taskCreateParams, 15000);
+        } catch (error: Any) {
+          console.error("[ControlPlane] Remote task execution failed:", error);
+          return { ok: false, error: error?.message || "Remote execution failed" };
+        }
+
         const remoteTask = remoteTaskRes?.task;
-        const id = remoteTaskRes?.taskId || remoteTask?.id || crypto.randomUUID();
-        const now = Date.now();
-        const initialUpdatedAt =
-          typeof remoteTask?.updatedAt === "number" && Number.isFinite(remoteTask.updatedAt)
-            ? remoteTask.updatedAt
-            : now;
-        db.prepare(
-          `INSERT INTO tasks (id, title, prompt, status, workspace_id, target_node_id, terminal_status, error, completed_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(
-          id,
-          remoteTask?.title || params.prompt.slice(0, 80),
-          params.prompt,
-          remoteTask?.status || "pending",
+        const id = remoteTaskRes?.taskId || remoteTask?.id || randomUUID();
+        upsertRemoteShadowTask(
+          db,
           localWorkspaceId,
-          params.nodeId,
-          remoteTask?.terminalStatus || null,
-          remoteTask?.error || null,
-          remoteTask?.completedAt || null,
-          now,
-          initialUpdatedAt,
+          remoteDevice.taskNodeId || `remote-gateway:${remoteDevice.id}`,
+          {
+            ...remoteTask,
+            id,
+            prompt: params.prompt,
+            title: remoteTask?.title || params.prompt.slice(0, 80),
+          },
         );
-        
-        db.prepare(
-          `UPDATE tasks
-           SET title = ?, status = ?, workspace_id = ?, terminal_status = ?, error = ?, completed_at = ?, updated_at = ?
-           WHERE id = ?`
-        ).run(
-          remoteTask?.title || params.prompt.slice(0, 80),
-          remoteTask?.status || "pending",
-          localWorkspaceId,
-          remoteTask?.terminalStatus || null,
-          remoteTask?.error || null,
-          remoteTask?.completedAt || null,
-          initialUpdatedAt,
-          id,
-        );
-        
+
         return { ok: true, taskId: id };
       } catch (error: any) {
         return { ok: false, error: error.message || String(error) };
       }
     },
   );
+
+  ipcMain.handle(IPC_CHANNELS.DEVICE_LIST_MANAGED, async () => {
+    try {
+      return { ok: true, devices: await listManagedDevicesForRenderer() };
+    } catch (error: any) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DEVICE_GET_SUMMARY, async (_, deviceId: string) => {
+    try {
+      return { ok: true, summary: await buildManagedDeviceSummary(deviceId) };
+    } catch (error: any) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DEVICE_CONNECT, async (_, deviceId: string) => {
+    try {
+      const status = await connectManagedRemoteDevice(deviceId);
+      return { ok: true, status };
+    } catch (error: any) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DEVICE_DISCONNECT, async (_, deviceId: string) => {
+    try {
+      const status = disconnectManagedRemoteDevice(deviceId);
+      return { ok: true, status };
+    } catch (error: any) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DEVICE_PROXY_REQUEST, async (_, request: DeviceProxyRequest) => {
+    try {
+      if (!request?.deviceId || !request?.method) {
+        return { ok: false, error: "deviceId and method are required" };
+      }
+      if (isLocalManagedDeviceIdentifier(request.deviceId)) {
+        return { ok: true, payload: await routeLocalDeviceProxyRequest(request.method, request.params) };
+      }
+      const device = findManagedDeviceById(request.deviceId);
+      if (!device || device.role !== "remote") {
+        return { ok: false, error: `Managed device not found: ${request.deviceId}` };
+      }
+      const fleetManager = ensureFleetManager();
+      const client = fleetManager.getClient(device.id);
+      const status = fleetManager.getStatus(device.id);
+      if (!client || status.state !== "connected") {
+        return { ok: false, error: "Remote device is not connected" };
+      }
+      const params =
+        request.method === Methods.TASK_SEND_MESSAGE
+          ? await normalizeImagesForRemote(request.params)
+          : request.params;
+      const payload = await client.request(request.method, params, 15000);
+      return { ok: true, payload };
+    } catch (error: any) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  });
 
   ipcMain.handle(IPC_CHANNELS.DEVICE_GET_PROFILES, async () => {
     try {
@@ -2707,8 +4072,8 @@ export async function shutdownControlPlane(): Promise<void> {
   // Shutdown SSH tunnel
   shutdownSSHTunnelManager();
 
-  // Shutdown remote client
-  shutdownRemoteGatewayClient();
+  // Shutdown fleet-managed remote clients
+  shutdownFleetConnectionManager();
 
   // Shutdown ACP registry
   shutdownACP();
