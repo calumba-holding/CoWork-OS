@@ -3374,6 +3374,7 @@ export const IPC_CHANNELS = {
   // Appearance
   APPEARANCE_GET_SETTINGS: "appearance:getSettings",
   APPEARANCE_SAVE_SETTINGS: "appearance:saveSettings",
+  APPEARANCE_GET_RUNTIME_INFO: "appearance:getRuntimeInfo",
 
   // Agent Personality
   PERSONALITY_GET_SETTINGS: "personality:getSettings",

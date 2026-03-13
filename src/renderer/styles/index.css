@@ -28072,6 +28072,52 @@ html.platform-win32 .title-bar-drag-handle {
   --title-bar-drag-width: 60px;
 }
 
+/* ============================================
+   macOS Reduced Transparency Fallback
+   Keep the visual structure, but use opaque surfaces when vibrancy is unavailable.
+   ============================================ */
+html.platform-darwin.opaque-vibrancy {
+  --color-bg: #16161a;
+  --color-bg-primary: #1e1e23;
+  --color-bg-darker: #121217;
+  --color-bg-sidebar: #18181d;
+  --color-bg-elevated: #2a2a31;
+  --color-bg-secondary: #34343c;
+  --color-bg-tertiary: #3f3f48;
+  --color-bg-input: #101014;
+  --color-bg-glass: #24242a;
+  --color-bg-glass-hover: #2f2f36;
+}
+
+html.platform-darwin.opaque-vibrancy.theme-light {
+  --color-bg: #f0f0f2;
+  --color-bg-primary: #fafafc;
+  --color-bg-darker: #f5f5f7;
+  --color-bg-sidebar: #f7f7f9;
+  --color-bg-elevated: #ffffff;
+  --color-bg-secondary: #ebebee;
+  --color-bg-tertiary: #e1e1e5;
+  --color-bg-input: #ececef;
+  --color-bg-glass: #f4f4f6;
+  --color-bg-glass-hover: #ededf0;
+}
+
+html.platform-darwin.opaque-vibrancy body,
+html.platform-darwin.opaque-vibrancy #root,
+html.platform-darwin.opaque-vibrancy .app,
+html.platform-darwin.opaque-vibrancy .app-layout {
+  background: var(--color-bg) !important;
+}
+
+html.platform-darwin.opaque-vibrancy .sidebar,
+html.platform-darwin.opaque-vibrancy .main-content,
+html.platform-darwin.opaque-vibrancy .right-panel,
+html.platform-darwin.opaque-vibrancy .task-item-menu,
+html.platform-darwin.opaque-vibrancy .remote-file-picker {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 /* Windows title bar control buttons (minimize, maximize, close) */
 .win-controls {
   -webkit-app-region: no-drag;

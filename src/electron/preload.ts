@@ -367,6 +367,7 @@ const IPC_CHANNELS = {
   // Appearance
   APPEARANCE_GET_SETTINGS: "appearance:getSettings",
   APPEARANCE_SAVE_SETTINGS: "appearance:saveSettings",
+  APPEARANCE_GET_RUNTIME_INFO: "appearance:getRuntimeInfo",
   // Agent Personality
   PERSONALITY_GET_SETTINGS: "personality:getSettings",
   PERSONALITY_SAVE_SETTINGS: "personality:saveSettings",
@@ -2553,6 +2554,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getAppearanceSettings: () => ipcRenderer.invoke(IPC_CHANNELS.APPEARANCE_GET_SETTINGS),
   saveAppearanceSettings: (settings: Any) =>
     ipcRenderer.invoke(IPC_CHANNELS.APPEARANCE_SAVE_SETTINGS, settings),
+  getAppearanceRuntimeInfo: () => ipcRenderer.invoke(IPC_CHANNELS.APPEARANCE_GET_RUNTIME_INFO),
 
   // Personality Settings APIs
   getPersonalitySettings: () => ipcRenderer.invoke(IPC_CHANNELS.PERSONALITY_GET_SETTINGS),
@@ -4179,6 +4181,9 @@ export interface ElectronAPI {
     onboardingCompleted?: boolean;
     onboardingCompletedAt?: string;
     assistantName?: string;
+  }>;
+  getAppearanceRuntimeInfo: () => Promise<{
+    prefersReducedTransparency: boolean;
   }>;
   saveAppearanceSettings: (settings: {
     themeMode?: "light" | "dark" | "system";

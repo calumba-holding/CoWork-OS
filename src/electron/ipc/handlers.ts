@@ -1,4 +1,4 @@
-import { ipcMain, shell, BrowserWindow, app as _app } from "electron";
+import { ipcMain, shell, BrowserWindow, app as _app, nativeTheme } from "electron";
 import * as path from "path";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
@@ -3341,6 +3341,12 @@ export async function setupIpcHandlers(
   // Appearance Settings handlers
   ipcMain.handle(IPC_CHANNELS.APPEARANCE_GET_SETTINGS, async () => {
     return AppearanceManager.loadSettings();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APPEARANCE_GET_RUNTIME_INFO, async () => {
+    return {
+      prefersReducedTransparency: nativeTheme.prefersReducedTransparency,
+    };
   });
 
   ipcMain.handle(IPC_CHANNELS.APPEARANCE_SAVE_SETTINGS, async (_, settings) => {

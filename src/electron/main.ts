@@ -242,16 +242,17 @@ if (!gotTheLock) {
 
   function createWindow() {
     const isMac = process.platform === "darwin";
+    const useMacVibrancy = isMac && !nativeTheme.prefersReducedTransparency;
 
-    // Determine initial background color for Windows based on saved theme
-    let winBgColor = "#1a1a1c";
-    if (!isMac) {
+    // Determine initial background color when the window should be opaque.
+    let windowBgColor = "#1a1a1c";
+    if (!useMacVibrancy) {
       try {
         const saved = AppearanceManager.loadSettings();
         const mode = saved.themeMode || "dark";
         const isLight =
           mode === "light" || (mode === "system" && nativeTheme.shouldUseDarkColors === false);
-        if (isLight) winBgColor = "#f0f0f2";
+        if (isLight) windowBgColor = "#f0f0f2";
       } catch {
         // Fallback to dark if settings aren't available yet
       }
@@ -264,7 +265,7 @@ if (!gotTheLock) {
       minHeight: 800,
       center: true,
       titleBarStyle: isMac ? "hiddenInset" : "hidden",
-      ...(isMac
+      ...(useMacVibrancy
         ? {
             vibrancy: "under-window" as const,
             visualEffectState: "active" as const,
@@ -273,7 +274,7 @@ if (!gotTheLock) {
           }
         : {
             transparent: false,
-            backgroundColor: winBgColor,
+            backgroundColor: windowBgColor,
           }),
       webPreferences: {
         nodeIntegration: false,

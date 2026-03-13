@@ -251,10 +251,39 @@ export function App() {
   // Platform detection for Windows-specific UI (custom window controls, opaque backgrounds)
   const isWindows = hasElectronAPI && window.electronAPI.getPlatform() === "win32";
   useEffect(() => {
+    document.documentElement.classList.toggle("platform-darwin", hasElectronAPI && window.electronAPI.getPlatform() === "darwin");
     if (isWindows) {
       document.documentElement.classList.add("platform-win32");
+      return;
     }
+    document.documentElement.classList.remove("platform-win32");
   }, [isWindows]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    let cancelled = false;
+
+    if (!hasElectronAPI || window.electronAPI.getPlatform() !== "darwin") {
+      root.classList.remove("opaque-vibrancy");
+      return;
+    }
+
+    void window.electronAPI
+      .getAppearanceRuntimeInfo?.()
+      .then((runtimeInfo) => {
+        if (cancelled) return;
+        root.classList.toggle("opaque-vibrancy", runtimeInfo?.prefersReducedTransparency === true);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          root.classList.remove("opaque-vibrancy");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasElectronAPI]);
 
   const handleDisclaimerAccept = (dontShowAgain: boolean) => {
     // Save to main process for persistence
