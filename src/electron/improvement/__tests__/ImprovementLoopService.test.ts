@@ -10,6 +10,10 @@ import type {
 } from "../../../shared/types";
 import { ImprovementLoopService } from "../ImprovementLoopService";
 
+type Any = any;
+
+const mockImprovementEligibility = vi.hoisted(() => vi.fn());
+
 const workspaces = new Map<string, Workspace>();
 const tasks = new Map<string, Task>();
 const candidates = new Map<string, ImprovementCandidate>();
@@ -41,8 +45,14 @@ let mockSettings = {
 vi.mock("../ImprovementSettingsManager", () => ({
   ImprovementSettingsManager: {
     loadSettings: () => mockSettings,
-    saveSettings: vi.fn(),
+    saveSettings: (next: typeof mockSettings) => {
+      mockSettings = { ...next };
+    },
   },
+}));
+
+vi.mock("../ImprovementEligibilityService", () => ({
+  getImprovementEligibility: mockImprovementEligibility,
 }));
 
 vi.mock("../../database/repositories", () => ({
@@ -230,6 +240,18 @@ describe("ImprovementLoopService", () => {
     campaigns.clear();
     variants.clear();
     verdicts.clear();
+    mockImprovementEligibility.mockReturnValue({
+      eligible: true,
+      reason: "Owner-only self-improvement is enabled.",
+      enrolled: true,
+      repoPath: process.cwd(),
+      checks: {
+        unpackagedApp: true,
+        canonicalRepo: true,
+        ownerEnrollment: true,
+        ownerProofPresent: true,
+      },
+    });
   });
 
   afterEach(() => {
@@ -263,12 +285,34 @@ describe("ImprovementLoopService", () => {
     };
   }
 
-  function makeWorkspace(): Workspace {
-    return {
+  function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
+    const base: Workspace = {
       id: "workspace-1",
       name: "Workspace",
       path: process.cwd(),
       createdAt: Date.now(),
+      permissions: {
+        read: true,
+        write: true,
+        delete: false,
+        network: true,
+        shell: true,
+      },
+    };
+    return {
+      ...base,
+      ...overrides,
+      permissions: overrides.permissions || base.permissions,
+    };
+  }
+
+  function makeTempWorkspace(): Workspace {
+    return {
+      id: "__temp_workspace__:ui-session-test",
+      name: "Temporary Workspace",
+      path: "/tmp/cowork-os-temp/ui-session-test",
+      createdAt: Date.now(),
+      isTemp: true,
       permissions: {
         read: true,
         write: true,
@@ -528,5 +572,244 @@ describe("ImprovementLoopService", () => {
       expect(campaigns.get(campaign!.id)?.promotionStatus).toBe("promotion_failed");
     });
     expect(candidateService.recordCampaignFailure).toHaveBeenCalled();
+  });
+
+  it("reroutes temporary-workspace candidates to the strongest promotable code workspace", async () => {
+    const tempWorkspace = makeTempWorkspace();
+    const realWorkspace = makeWorkspace({
+      id: "workspace-real",
+      name: "cowork",
+      path: process.cwd(),
+    });
+    const candidate = makeCandidate();
+    candidate.workspaceId = tempWorkspace.id;
+
+    workspaces.set(tempWorkspace.id, tempWorkspace);
+    workspaces.set(realWorkspace.id, realWorkspace);
+    candidates.set(candidate.id, candidate);
+
+    const candidateService = {
+      refresh: vi.fn().mockResolvedValue({ candidateCount: 1 }),
+      dismissCandidate: vi.fn(),
+      markCandidateRunning: vi.fn(),
+      markCandidateReview: vi.fn(),
+      markCandidateResolved: vi.fn(),
+      markCandidateParked: vi.fn(),
+      recordCampaignFailure: vi.fn(),
+      reopenCandidate: vi.fn(),
+      getTopCandidateForWorkspace: vi.fn().mockImplementation((workspaceId: string) => {
+        return workspaceId === tempWorkspace.id ? candidate : undefined;
+      }),
+    } as Any;
+
+    const daemon = new EventEmitter() as Any;
+    daemon.createChildTask = vi.fn().mockImplementation(async (params: Any) => {
+      const taskId = `task-${tasks.size + 1}`;
+      const task: Task = {
+        id: taskId,
+        title: params.title,
+        prompt: params.prompt,
+        status: "executing",
+        workspaceId: params.workspaceId,
+        agentConfig: params.agentConfig,
+        source: params.source,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      tasks.set(task.id, task);
+      return task;
+    });
+    daemon.getWorktreeManager = vi.fn(() => ({
+      shouldUseWorktree: vi.fn().mockResolvedValue(true),
+      openPullRequest: vi.fn(),
+      mergeToBase: vi.fn(),
+    }));
+
+    const service = new ImprovementLoopService({} as Any, candidateService);
+    await service.start(daemon);
+    const campaign = await service.runNextExperiment();
+
+    expect(campaign).toBeTruthy();
+    expect(campaign?.executionWorkspaceId).toBe(realWorkspace.id);
+    expect(tasks.get(campaign!.rootTaskId!)?.workspaceId).toBe(tempWorkspace.id);
+    expect(tasks.get(campaign!.variants[0].taskId!)?.workspaceId).toBe(realWorkspace.id);
+    expect(campaign?.status).toBe("reproducing");
+  });
+
+  it("always executes self-improvement inside the canonical CoWork repo while preserving the observed workspace", async () => {
+    const observedWorkspace = makeWorkspace({
+      id: "workspace-observed",
+      name: "new",
+      path: "/Users/mesut/Desktop/new",
+    });
+    const coworkWorkspace = makeWorkspace({
+      id: "workspace-cowork",
+      name: "cowork",
+      path: process.cwd(),
+    });
+    const candidate = makeCandidate();
+    candidate.workspaceId = observedWorkspace.id;
+    candidate.title = "Fix repeated contract error failures";
+    candidate.summary = "Failures are observed in the app, but the fix belongs in CoWork OS code.";
+
+    workspaces.set(observedWorkspace.id, observedWorkspace);
+    workspaces.set(coworkWorkspace.id, coworkWorkspace);
+    candidates.set(candidate.id, candidate);
+
+    const candidateService = {
+      refresh: vi.fn().mockResolvedValue({ candidateCount: 1 }),
+      dismissCandidate: vi.fn(),
+      markCandidateRunning: vi.fn(),
+      markCandidateReview: vi.fn(),
+      markCandidateResolved: vi.fn(),
+      markCandidateParked: vi.fn(),
+      recordCampaignFailure: vi.fn(),
+      reopenCandidate: vi.fn(),
+      getTopCandidateForWorkspace: vi.fn().mockImplementation((workspaceId: string) => {
+        return workspaceId === observedWorkspace.id ? candidate : undefined;
+      }),
+    } as Any;
+
+    const daemon = new EventEmitter() as Any;
+    daemon.createChildTask = vi.fn().mockImplementation(async (params: Any) => {
+      const taskId = `task-${tasks.size + 1}`;
+      const task: Task = {
+        id: taskId,
+        title: params.title,
+        prompt: params.prompt,
+        status: "executing",
+        workspaceId: params.workspaceId,
+        agentConfig: params.agentConfig,
+        source: params.source,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      tasks.set(task.id, task);
+      return task;
+    });
+    daemon.getWorktreeManager = vi.fn(() => ({
+      shouldUseWorktree: vi.fn().mockResolvedValue(true),
+      openPullRequest: vi.fn(),
+      mergeToBase: vi.fn(),
+    }));
+
+    const service = new ImprovementLoopService({} as Any, candidateService);
+    await service.start(daemon);
+    const campaign = await service.runNextExperiment();
+
+    expect(campaign).toBeTruthy();
+    expect(campaign?.workspaceId).toBe(observedWorkspace.id);
+    expect(campaign?.executionWorkspaceId).toBe(coworkWorkspace.id);
+    expect(tasks.get(campaign!.rootTaskId!)?.workspaceId).toBe(observedWorkspace.id);
+
+    const scoutTask = tasks.get(campaign!.variants[0].taskId!);
+    expect(scoutTask?.workspaceId).toBe(coworkWorkspace.id);
+    expect(scoutTask?.prompt).toContain(`Observed workspace: ${observedWorkspace.name} (${observedWorkspace.path})`);
+    expect(scoutTask?.prompt).toContain(`Execution workspace: ${coworkWorkspace.name} (${coworkWorkspace.path})`);
+    expect(scoutTask?.prompt).toContain(
+      "Use the observed workspace for failure context and evidence, but inspect and modify code only in the execution workspace git repository.",
+    );
+  });
+
+  it("fails temporary-workspace campaigns with a promotability message before git preflight", async () => {
+    const tempWorkspace = makeTempWorkspace();
+    const candidate = makeCandidate();
+    candidate.workspaceId = tempWorkspace.id;
+
+    workspaces.set(tempWorkspace.id, tempWorkspace);
+    candidates.set(candidate.id, candidate);
+
+    const candidateService = {
+      refresh: vi.fn().mockResolvedValue({ candidateCount: 1 }),
+      dismissCandidate: vi.fn(),
+      markCandidateRunning: vi.fn(),
+      markCandidateReview: vi.fn(),
+      markCandidateResolved: vi.fn(),
+      markCandidateParked: vi.fn(),
+      recordCampaignFailure: vi.fn(),
+      reopenCandidate: vi.fn(),
+      getTopCandidateForWorkspace: vi.fn().mockReturnValue(candidate),
+    } as Any;
+
+    const daemon = new EventEmitter() as Any;
+    daemon.createChildTask = vi.fn();
+    daemon.getWorktreeManager = vi.fn(() => ({
+      shouldUseWorktree: vi.fn().mockResolvedValue(false),
+      openPullRequest: vi.fn(),
+      mergeToBase: vi.fn(),
+    }));
+
+    const service = new ImprovementLoopService({} as Any, candidateService);
+    await service.start(daemon);
+    const campaign = await service.runNextExperiment();
+
+    expect(campaign?.status).toBe("failed");
+    expect(campaign?.promotionStatus).toBe("promotion_failed");
+    expect(campaign?.promotionError).toBe(
+      "Temporary execution workspace is not eligible for PR-based self-improvement.",
+    );
+  });
+
+  it("blocks campaign execution when owner-only eligibility is not satisfied", async () => {
+    mockImprovementEligibility.mockReturnValue({
+      eligible: false,
+      reason:
+        "Maintainer-signed owner enrollment is missing. Paste a valid signature into Settings → Self-Improvement, or set COWORK_SELF_IMPROVEMENT_OWNER_SIGNATURE.",
+      enrolled: false,
+      repoPath: process.cwd(),
+      checks: {
+        unpackagedApp: true,
+        canonicalRepo: true,
+        ownerEnrollment: false,
+        ownerProofPresent: false,
+      },
+    });
+
+    const workspace = makeWorkspace();
+    const candidate = makeCandidate();
+    workspaces.set(workspace.id, workspace);
+    candidates.set(candidate.id, candidate);
+
+    const candidateService = {
+      refresh: vi.fn().mockResolvedValue({ candidateCount: 1 }),
+      getTopCandidateForWorkspace: vi.fn().mockReturnValue(candidate),
+    } as Any;
+
+    const service = new ImprovementLoopService({} as Any, candidateService);
+
+    await expect(service.runNextExperiment()).rejects.toThrow(
+      "Maintainer-signed owner enrollment is missing. Paste a valid signature into Settings → Self-Improvement, or set COWORK_SELF_IMPROVEMENT_OWNER_SIGNATURE.",
+    );
+  });
+
+  it("forces loop settings disabled when eligibility is not satisfied", () => {
+    mockImprovementEligibility.mockReturnValue({
+      eligible: false,
+      reason: "Self-improvement is disabled in packaged end-user builds.",
+      enrolled: false,
+      repoPath: process.cwd(),
+      checks: {
+        unpackagedApp: false,
+        canonicalRepo: true,
+        ownerEnrollment: false,
+        ownerProofPresent: false,
+      },
+    });
+
+    const candidateService = {
+      refresh: vi.fn().mockResolvedValue({ candidateCount: 0 }),
+    } as Any;
+
+    const service = new ImprovementLoopService({} as Any, candidateService);
+    const saved = service.saveSettings({
+      ...mockSettings,
+      enabled: true,
+      autoRun: true,
+    });
+
+    expect(saved.enabled).toBe(false);
+    expect(saved.autoRun).toBe(false);
+    expect(service.getSettings().enabled).toBe(false);
+    expect(service.getSettings().autoRun).toBe(false);
   });
 });
