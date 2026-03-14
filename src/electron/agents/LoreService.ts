@@ -3,6 +3,9 @@ import path from "path";
 import type Database from "better-sqlite3";
 import type { AgentDaemon } from "../agent/daemon";
 import { TaskRepository, WorkspaceRepository } from "../database/repositories";
+import { writeKitFileWithSnapshot } from "../context/kit-revisions";
+
+type Any = any;
 
 type LoreEntry = {
   display: string;
@@ -256,9 +259,7 @@ export class LoreService {
 
       const next = upsertMarkedSection(current, merged.length > 0 ? merged : ["- (none)"]);
       if (next !== current) {
-        const tmpPath = absPath + ".tmp";
-        fs.writeFileSync(tmpPath, next, "utf8");
-        fs.renameSync(tmpPath, absPath);
+        writeKitFileWithSnapshot(absPath, next, "agent", "service:lore_flush");
       }
 
       // Clear flushed entries.
