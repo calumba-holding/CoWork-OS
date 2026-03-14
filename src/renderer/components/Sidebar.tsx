@@ -61,6 +61,7 @@ export function isAutomatedSession(task: Task): boolean {
   if (task.source === "manual") return false;
   if (task.source === "cron" || task.source === "improvement") return true;
   if (task.source === "hook") return false;
+  if (/^heartbeat:/i.test(String(task.title || "").trim())) return true;
   if (task.source === "api") {
     return Boolean(
       task.companyId || task.goalId || task.projectId || task.issueId || task.heartbeatRunId,
