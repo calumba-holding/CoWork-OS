@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 
-// Test the isTransientProviderError logic directly
+// Test the isTransientProviderError logic directly (must match executor implementation)
 function isTransientProviderError(error: Any): boolean {
   if (!error) return false;
   if (error.retryable === true) return true;
@@ -21,6 +21,8 @@ function isTransientProviderError(error: Any): boolean {
     "ECONNABORTED",
   ]);
   if (code && retryableCodes.has(code)) return true;
+  // 429 / rate limit are transient — retry after delay
+  if (/429|rate limit|too many requests|free-models-per-min/.test(message)) return true;
   return (
     message.includes("fetch failed") ||
     message.includes("network") ||
@@ -125,10 +127,10 @@ describe("isTransientProviderError", () => {
       expect(isTransientProviderError(error)).toBe(false);
     });
 
-    it("should return false for rate limit messages without code", () => {
-      // Rate limits are handled elsewhere, not by this function
-      const error = { message: "Rate limit exceeded" };
-      expect(isTransientProviderError(error)).toBe(false);
+    it("should return true for rate limit / 429 (transient, retry after delay)", () => {
+      expect(isTransientProviderError({ message: "Rate limit exceeded" })).toBe(true);
+      expect(isTransientProviderError({ message: "429 Too Many Requests" })).toBe(true);
+      expect(isTransientProviderError({ message: "free-models-per-min" })).toBe(true);
     });
 
     it("should return false for permission errors", () => {
