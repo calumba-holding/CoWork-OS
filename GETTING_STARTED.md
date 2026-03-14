@@ -53,7 +53,13 @@ This will:
 2. **Initialize the Workspace Kit (Optional, Recommended)**
    - Open **Settings** > **Memory Hub**
    - Under **Workspace Kit**, click **Initialize**
-   - This creates a `.cowork/` directory in your workspace for durable context and project scaffolding
+   - This creates a `.cowork/` directory in your workspace for durable context, prompt injection, and project scaffolding
+   - The root kit can include shared workspace files such as `AGENTS.md`, `USER.md`, `MEMORY.md`, `TOOLS.md`, `IDENTITY.md`, `RULES.md`, `SOUL.md`, `VIBES.md`, and `LORE.md`
+   - `BOOTSTRAP.md` is a one-time onboarding checklist; once you complete onboarding, removing it marks onboarding complete and CoWork OS tracks that state in `.cowork/workspace-state.json`
+   - `HEARTBEAT.md` is reserved for recurring heartbeat-only checks rather than general task context
+   - Project-specific context lives under `.cowork/projects/<projectId>/`, where `CONTEXT.md` captures project notes and `ACCESS.md` captures project access boundaries
+   - Changes to tracked kit files keep revision snapshots under `.cowork/**/.history/`
+   - You can validate kit health, freshness, and secret/missing-file warnings locally with `npm run kit:lint`
 
 3. **Create a Task**
    - Click "+ New Task"
