@@ -48,7 +48,7 @@
 - **Image Generation**: Multi-provider support (Gemini, OpenAI gpt-image-1/1.5/DALL-E, Azure OpenAI)
 - **Visual Annotation**: Iterative image refinement with the Visual Annotator
 - **Context Summarization**: Automatic context compression surfaced in the task timeline
-- **Structured Input Requests**: In propose-mode flows, the agent can pause with 1-3 short multiple-choice questions instead of asking ambiguous free-text follow-ups
+- **Structured Input Requests**: In plan-mode flows, the agent can pause with 1-3 short multiple-choice questions instead of asking ambiguous free-text follow-ups
 - **Parallel Tool Timeline**: Concurrent read-only tool bursts are grouped into lane-based timeline cards instead of flooding the event feed
 - **Adaptive Runtime Recovery**: Execute tasks use adaptive turn budgets, bounded follow-up recovery, and safety-stop escalation instead of hard window failure by default
 - **Path Drift Repair**: `/workspace/...` aliases and drifted relative paths can be normalized back into the active workspace or pinned task root, with strict-fail policies when hard enforcement is preferred
@@ -152,7 +152,7 @@ These modes are mutually exclusive — only one can be active per task. All four
 
 > **Note:** Autonomous mode shows a confirmation dialog before enabling, since it bypasses all approval prompts.
 
-When the agent is operating in propose-mode execution, it can also use `request_user_input` to pause for structured multiple-choice decisions. Responses are persisted locally and can be submitted from either the desktop UI or the Control Plane web dashboard.
+When the agent is operating in plan-mode execution, it can also use `request_user_input` to pause for structured multiple-choice decisions. Responses are persisted locally and can be submitted from either the desktop UI or the Control Plane web dashboard.
 
 ### Guided Decisions & Runtime Recovery
 
@@ -160,7 +160,7 @@ The runtime now includes a set of decision and recovery contracts aimed at keepi
 
 | Capability | Behavior |
 |------------|----------|
-| **Structured input requests** | `request_user_input` asks 1-3 concise multiple-choice questions, pauses the task, and resumes after submit/dismiss. Only available in propose mode. |
+| **Structured input requests** | `request_user_input` asks 1-3 concise multiple-choice questions, pauses the task, and resumes after submit/dismiss. Only available in plan mode. |
 | **Adaptive turn-window recovery** | Execute-oriented tasks default to `adaptive_unbounded`, soft-log exhausted windows, reserve space for finalization, and allow a bounded follow-up recovery attempt before triggering a safety stop. |
 | **Context overflow retry** | Context-capacity errors trigger compaction plus retry instead of immediate hard failure when the model context window is exceeded. |
 | **Workspace alias repair** | Absolute alias paths such as `/workspace/...` can be remapped into the active workspace for file and directory tools, or blocked via `strict_fail`. |
@@ -349,15 +349,71 @@ See [Knowledge Graph](knowledge-graph.md) for the full architecture guide.
 
 ## Workspace Kit (.cowork)
 
-Initialize and maintain a `.cowork/` directory inside each workspace for durable context, project scaffolding, and prompt injection.
+Initialize and maintain a `.cowork/` directory inside each workspace for durable, human-edited context, scoped prompt injection, project scaffolding, and workspace health checks.
 
-- Kit initialization with standard `.cowork/` structure and templates
-- First-run bootstrap lifecycle with `.cowork/BOOTSTRAP.md`, `.cowork/VIBES.md`, and `.cowork/LORE.md`
-- Lifecycle state tracking in `.cowork/workspace-state.json` (`bootstrapSeededAt`, `onboardingCompletedAt`)
-- Project contexts with `ACCESS.md`, `CONTEXT.md`, and `research/`
-- Markdown indexing for durable human-edited context — searchable via `search_memories`
-- Context injection into agent prompts automatically
-- Global and per-workspace memory settings
+The workspace kit is contract-driven: every tracked markdown file has a declared title, scope, parser, prompt budget, freshness window, mutability model, and optional special handling.
+
+### Root workspace files
+
+| File | Title | Scope | Parser | Typical use |
+|---|---|---|---|---|
+| `AGENTS.md` | Workspace Rules | `task`, `main-session` | `sectioned` | workspace-wide operating guidance and coordination rules |
+| `MEMORY.md` | Long-Term Memory | `task`, `main-session` | `decision-log` | durable learnings and long-lived constraints |
+| `USER.md` | User Profile | `task`, `main-session` | `kv-lines` | preferences, timezone, communication defaults |
+| `TOOLS.md` | Local Setup Notes | `task`, `main-session` | `sectioned` | environment notes, common commands, local conventions |
+| `IDENTITY.md` | Workspace Identity | `task`, `main-session`, `role` | `kv-lines` | who the agent is and what it owns |
+| `RULES.md` | Operational Rules | `task`, `main-session`, `role`, `company-ops` | `checklist` | must/must-not behavior and approval defaults |
+| `SOUL.md` | Workspace Persona | `task`, `main-session`, `role` | `sectioned` | tone, collaboration style, execution philosophy |
+| `VIBES.md` | Current Operating Mode | `task`, `role` | `sectioned` | what to optimize for right now |
+| `MISTAKES.md` | Recurring Mistakes | `task`, `main-session`, `role` | `decision-log` | recurring failure patterns and corrections |
+| `LORE.md` | Durable Context | `task`, `main-session` | `decision-log` | important historical decisions and background context |
+| `CROSS_SIGNALS.md` | Cross-Agent Signals | `task`, `main-session`, `company-ops` | `decision-log` | contradictions, risks, amplified opportunities |
+| `PRIORITIES.md` | Current Priorities | `company-ops`, `task` | `checklist` | current priorities, owners, review dates |
+| `COMPANY.md` | Company Context | `company-ops` | `sectioned` | mission, offer, customer, constraints |
+| `OPERATIONS.md` | Operating Model | `company-ops` | `sectioned` | auto-allowed actions, approvals, escalation paths |
+| `KPIS.md` | Business Metrics | `company-ops` | `sectioned` | metrics, targets, and guardrails |
+| `BOOTSTRAP.md` | Bootstrap Instructions | `bootstrap` | `checklist` | one-time onboarding checklist |
+| `HEARTBEAT.md` | Heartbeat Checklist | `heartbeat` | `checklist` | recurring heartbeat-only checks |
+
+### Project and role subdirectories
+
+- Project-specific context lives under `.cowork/projects/<projectId>/`
+- `CONTEXT.md` is the project-scoped task brief, decisions, and notes file
+- `ACCESS.md` is the project-scoped access and boundary file for task and role usage
+- Per-role persona files live under `.cowork/agents/<roleId>/`
+- The health model also tracks supporting directories such as `.cowork/memory/`, `.cowork/memory/hourly/`, `.cowork/memory/weekly/`, `.cowork/projects/`, and `.cowork/agents/`
+
+### Frontmatter, parsing, and injection
+
+Tracked files can begin with simple frontmatter:
+
+```md
+---
+updated: 2026-03-14
+---
+```
+
+- `updated` is expected on files with freshness windows so the app can mark stale context correctly
+- Bodies are sanitized and redacted before prompt injection
+- Oversized files are truncated to each file's prompt budget and reported with a truncation warning
+- Parsers are file-specific: `sectioned` for heading-based notes, `kv-lines` for filled key/value fields, `checklist` for rules and recurring lists, and `decision-log` for durable bullet-style history
+
+### Special handling
+
+- `BOOTSTRAP.md` is onboarding-only context, not a durable memory file
+- When `BOOTSTRAP.md` is first present, CoWork OS records `bootstrapSeededAt` in `.cowork/workspace-state.json`
+- When `BOOTSTRAP.md` is later removed, CoWork OS records `onboardingCompletedAt` and does not recreate it during missing-only init flows
+- `HEARTBEAT.md` is reserved for recurring heartbeat work and is intentionally separate from general task/session context
+
+### Health, linting, and revisions
+
+- The app surfaces workspace-kit health with missing tracked entries, stale files, warning/error counts, revision counts, and onboarding metadata
+- `ACCESS.md` and `TOOLS.md` receive additional secret detection to catch likely credentials or copied tokens
+- Tracked writes keep snapshots under `.cowork/**/.history/<file>/` together with revision metadata
+- `search_memories` indexes `.cowork/` markdown alongside the main memory system
+- `npm run kit:lint` validates the current workspace kit from the command line
+- `npm run kit:lint -- --json` emits raw status JSON
+- `npm run kit:lint -- --strict` exits non-zero on warnings or missing tracked entries
 
 Configure in **Settings** > **Memory Hub**.
 
@@ -365,13 +421,14 @@ Configure in **Settings** > **Memory Hub**.
 
 ## Role Profile Files
 
-Define per-role personality and operating guidelines in `.cowork/agents/<role-id>/`:
+Define per-role personality and operating guidelines in `.cowork/agents/<role-id>/`. These files reuse the same contracts, parser rules, and titles as the root workspace kit, and role/task prompts can combine role files with root workspace files when scopes match.
 
-| File | Purpose |
-|---|---|
-| `SOUL.md` | Role personality, behavior style, execution philosophy |
-| `IDENTITY.md` | Role-specific identity and constraints |
-| `RULES.md` | Operational rules, safety boundaries, communication defaults |
+| File | Title | Purpose |
+|---|---|---|
+| `IDENTITY.md` | Workspace Identity | role identity, ownership boundaries, confirmation rules |
+| `RULES.md` | Operational Rules | role-specific must/must-not behavior and safety defaults |
+| `SOUL.md` | Workspace Persona | collaboration style, tone, execution philosophy |
+| `VIBES.md` | Current Operating Mode | current emphasis, urgency, and optimization target |
 
 ---
 
@@ -762,12 +819,14 @@ Tier 3: scrape_* tools               (Scrapling — anti-bot bypass)
 
 The agent auto-selects the appropriate tier: `web_search` for discovering information, `web_fetch` for reading known URLs, `browser_*` when interaction or JS rendering is needed, and `scrape_*` for anti-bot-protected sites.
 
-### Browser Tools (17 tools — native Playwright)
+### Browser Tools (19 tools — native Playwright)
 
 Native Playwright API integration — no CLI subprocess, no process spawning overhead.
 
 | Tool | Description |
 |------|-------------|
+| `browser_attach` | Attach to existing Chrome via Chrome DevTools Protocol (signed-in sessions). See [Chrome DevTools attach](#chrome-devtools-attach-mode) below. |
+| `browser_act_batch` | Execute batched actions (click, fill, type, press, wait, scroll) in sequence with optional delays |
 | `browser_navigate` | Navigate to URL with configurable wait states (load, networkidle, domcontentloaded) |
 | `browser_screenshot` | Capture viewport or full-page screenshots |
 | `browser_get_content` | Extract text, links, and form data from current page |
@@ -795,11 +854,29 @@ Lightweight HTTP without browser overhead — preferred for reading known URLs.
 | `web_fetch` | Fetch URL → HTML-to-Markdown conversion with optional CSS selector filtering |
 | `http_request` | Raw HTTP requests (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS) with custom headers/body |
 
+### Chrome DevTools Attach Mode
+
+Attach to an existing Chrome instance to control a signed-in browser session (e.g. Gmail, social media). Uses the Chrome DevTools Protocol.
+
+**Setup:**
+
+1. Launch Chrome with remote debugging: `chrome --remote-debugging-port=9222` (or add `--remote-debugging-port=9222` to your Chrome shortcut).
+2. Visit [chrome://inspect/#devices](chrome://inspect/#devices) to verify the endpoint.
+3. The agent uses `browser_attach` with `debugger_url: "http://localhost:9222"` (or the WebSocket URL from the version endpoint).
+4. After attach, `browser_navigate` and other browser tools operate on the attached session.
+
+See [Chrome Remote Debugging](https://developer.chrome.com/docs/devtools/remote-debugging/) for full setup guides.
+
+**Profile presets vs attach mode:** Use `browser_attach` with `debugger_url` when you want to control an **already running** signed-in Chrome session. Use `profile="user"` when you want to **launch a new** Chrome instance with your system profile — but Chrome must not already be running with that profile (profile lock). For existing sessions, attach mode is the correct choice.
+
+**Note:** If you close the Chrome window while attached, subsequent browser actions will fail with "Target closed". Re-attach with `browser_attach` after relaunching Chrome.
+
 ### Browser Features
 
 | Feature | Description |
 |---------|-------------|
 | **Multi-Browser** | Chromium (bundled), Chrome (system), Brave (auto-discovered) |
+| **Profile Presets** | `user` (launch new Chrome with system profile — fails if Chrome is already running), `chrome-relay` (extension relay), `workspace` (workspace default). For existing signed-in sessions, use `browser_attach` instead. |
 | **Persistent Profiles** | Cookies and storage persist across tasks in `.cowork/browser-profiles/` |
 | **Consent Auto-Dismiss** | 40+ pattern detectors for cookie/GDPR consent popups |
 | **Retry Logic** | 2-attempt retry with per-attempt timeout calculation |
