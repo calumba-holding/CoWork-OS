@@ -73,10 +73,10 @@ describe("TaskStrategyService applyToAgentConfig", () => {
   it("downshifts stale execute mode for advice intent", () => {
     const route = makeRoute({ intent: "advice" });
     const strategy = TaskStrategyService.derive(route, { executionMode: "execute" });
-    expect(strategy.executionMode).toBe("propose");
+    expect(strategy.executionMode).toBe("plan");
 
     const config = TaskStrategyService.applyToAgentConfig({ executionMode: "execute" }, strategy);
-    expect(config.executionMode).toBe("propose");
+    expect(config.executionMode).toBe("plan");
   });
 
   it("downshifts stale execute mode for chat intent", () => {
@@ -90,21 +90,21 @@ describe("TaskStrategyService applyToAgentConfig", () => {
 
   it("preserves explicit non-execute override for execution intent", () => {
     const route = makeRoute({ intent: "execution" });
-    const strategy = TaskStrategyService.derive(route, { executionMode: "propose" });
-    expect(strategy.executionMode).toBe("propose");
+    const strategy = TaskStrategyService.derive(route, { executionMode: "plan" });
+    expect(strategy.executionMode).toBe("plan");
 
-    const config = TaskStrategyService.applyToAgentConfig({ executionMode: "propose" }, strategy);
-    expect(config.executionMode).toBe("propose");
+    const config = TaskStrategyService.applyToAgentConfig({ executionMode: "plan" }, strategy);
+    expect(config.executionMode).toBe("plan");
     expect(config.executionModeSource).toBe("user");
   });
 
-  it("keeps mixed intent in propose mode without hard execution signals", () => {
+  it("keeps mixed intent in plan mode without hard execution signals", () => {
     const route = makeRoute({
       intent: "mixed",
       signals: ["strategy-language", "planning-language", "action-verb"],
     });
     const strategy = TaskStrategyService.derive(route);
-    expect(strategy.executionMode).toBe("propose");
+    expect(strategy.executionMode).toBe("plan");
   });
 
   it("allows mixed intent to execute with hard execution signals", () => {
