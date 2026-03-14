@@ -46,7 +46,7 @@ describe("TaskExecutor tool allow-list semantics", () => {
 
   it("does not recurse through getAvailableTools when resolving via tool hints", () => {
     const executor = Object.create(TaskExecutor.prototype) as Any;
-    executor.getEffectiveExecutionMode = vi.fn().mockReturnValue("propose");
+    executor.getEffectiveExecutionMode = vi.fn().mockReturnValue("plan");
     executor.normalizeToolName = vi.fn((name: string) => ({ name }));
     executor.toolRegistry = {
       getTools: vi.fn().mockReturnValue([{ name: "custom_picker" }]),
