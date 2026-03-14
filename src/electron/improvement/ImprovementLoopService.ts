@@ -7,6 +7,7 @@ import type {
   ImprovementCampaign,
   ImprovementCandidate,
   ImprovementFailureClass,
+  ImprovementHistoryResetResult,
   ImprovementLoopSettings,
   ImprovementReviewStatus,
   ImprovementVariantLane,
@@ -26,8 +27,11 @@ import {
   ImprovementCampaignRepository,
   ImprovementCandidateRepository,
   ImprovementJudgeVerdictRepository,
+  ImprovementRunRepository,
   ImprovementVariantRunRepository,
+  clearImprovementHistoryData,
 } from "./ImprovementRepositories";
+import { saveImprovementResetBaselineAt } from "./ImprovementHistoryState";
 import { ImprovementSettingsManager } from "./ImprovementSettingsManager";
 
 type Any = any;
@@ -50,6 +54,7 @@ export class ImprovementLoopService {
   private readonly workspaceRepo: WorkspaceRepository;
   private readonly taskRepo: TaskRepository;
   private readonly candidateRepo: ImprovementCandidateRepository;
+  private readonly runRepo: ImprovementRunRepository;
   private readonly campaignRepo: ImprovementCampaignRepository;
   private readonly variantRepo: ImprovementVariantRunRepository;
   private readonly judgeVerdictRepo: ImprovementJudgeVerdictRepository;
@@ -69,6 +74,7 @@ export class ImprovementLoopService {
     this.workspaceRepo = new WorkspaceRepository(db);
     this.taskRepo = new TaskRepository(db);
     this.candidateRepo = new ImprovementCandidateRepository(db);
+    this.runRepo = new ImprovementRunRepository(db);
     this.campaignRepo = new ImprovementCampaignRepository(db);
     this.variantRepo = new ImprovementVariantRunRepository(db);
     this.judgeVerdictRepo = new ImprovementJudgeVerdictRepository(db);
@@ -175,6 +181,18 @@ export class ImprovementLoopService {
 
   dismissCandidate(candidateId: string): ImprovementCandidate | undefined {
     return this.candidateService.dismissCandidate(candidateId);
+  }
+
+  async resetHistory(): Promise<ImprovementHistoryResetResult> {
+    const cancelledTaskIds = await this.cancelImprovementTasksForReset();
+    const deleted = clearImprovementHistoryData(this.db);
+    const resetAt = Date.now();
+    saveImprovementResetBaselineAt(resetAt);
+    return {
+      resetAt,
+      deleted,
+      cancelledTaskIds,
+    };
   }
 
   async reviewCampaign(
@@ -1188,5 +1206,37 @@ export class ImprovementLoopService {
     } catch (error) {
       console.error("[ImprovementLoopService] Failed to emit notification:", error);
     }
+  }
+
+  private async cancelImprovementTasksForReset(): Promise<string[]> {
+    const taskIds = new Set<string>();
+
+    for (const run of this.runRepo.list()) {
+      if (run.taskId) taskIds.add(run.taskId);
+    }
+
+    for (const campaign of this.campaignRepo.list()) {
+      if (campaign.rootTaskId) taskIds.add(campaign.rootTaskId);
+      if (campaign.promotedTaskId) taskIds.add(campaign.promotedTaskId);
+      for (const variant of this.variantRepo.listByCampaignId(campaign.id)) {
+        if (variant.taskId) taskIds.add(variant.taskId);
+      }
+    }
+
+    const cancelledTaskIds: string[] = [];
+    if (!this.agentDaemon) {
+      return cancelledTaskIds;
+    }
+
+    for (const taskId of taskIds) {
+      try {
+        await this.agentDaemon.cancelTask(taskId);
+        cancelledTaskIds.push(taskId);
+      } catch (error) {
+        console.warn(`[ImprovementLoopService] Failed to cancel improvement task ${taskId} during reset:`, error);
+      }
+    }
+
+    return cancelledTaskIds;
   }
 }
