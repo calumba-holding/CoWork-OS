@@ -27,6 +27,7 @@ import { PlaybookService } from "./PlaybookService";
 import { RelationshipMemoryService } from "./RelationshipMemoryService";
 import { UserProfileService } from "./UserProfileService";
 import { buildWorkspaceKitContext } from "./WorkspaceKitContext";
+import { DailyLogSummarizer } from "./DailyLogSummarizer";
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -36,7 +37,8 @@ export type MemorySourceKind =
   | "playbook"
   | "memory"
   | "knowledge_graph"
-  | "workspace_kit";
+  | "workspace_kit"
+  | "daily_summary";
 
 export interface MemoryFragment {
   /** Unique key used for dedup (normalised text fingerprint). */
@@ -300,6 +302,19 @@ export class MemorySynthesizer {
       allFragments.push(...extractKnowledgeGraphFragments(workspaceId, taskPrompt));
     }
 
+    // Daily summaries: ranked below user_profile/relationship but above raw logs.
+    // Raw daily log files (.cowork/memory/daily/*.md) are never injected.
+    try {
+      const summaryFragments = DailyLogSummarizer.getRecentSummaryFragments(
+        workspacePath,
+        taskPrompt,
+        7,
+      ).map((f) => ({ ...f, source: "daily_summary" as const }));
+      allFragments.push(...summaryFragments);
+    } catch {
+      // optional enhancement — never blocks synthesis
+    }
+
     // ── 2. Deduplicate ─────────────────────────────────────────────
     // When two fragments share a fingerprint, keep the one with higher
     // confidence, breaking ties by recency.
@@ -363,6 +378,7 @@ export class MemorySynthesizer {
       memory: 0,
       knowledge_graph: 0,
       workspace_kit: 0,
+      daily_summary: 0,
     };
     for (const f of selected) {
       sourceAttribution[f.source]++;
@@ -400,6 +416,13 @@ export class MemorySynthesizer {
       parts.push("\n## Known Entities");
       for (const f of grouped.knowledge_graph) {
         parts.push(`- ${sanitize(f.text)}`);
+      }
+    }
+
+    if (grouped.daily_summary.length) {
+      parts.push("\n## Daily Summaries");
+      for (const f of grouped.daily_summary) {
+        parts.push(sanitize(f.text));
       }
     }
 
@@ -458,9 +481,12 @@ function groupBySource(fragments: MemoryFragment[]): Record<MemorySourceKind, Me
     memory: [],
     knowledge_graph: [],
     workspace_kit: [],
+    daily_summary: [],
   };
   for (const f of fragments) {
-    groups[f.source].push(f);
+    if (f.source in groups) {
+      groups[f.source].push(f);
+    }
   }
   return groups;
 }
