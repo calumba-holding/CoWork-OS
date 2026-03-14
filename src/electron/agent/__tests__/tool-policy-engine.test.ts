@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { evaluateToolPolicy } from "../tool-policy-engine";
 
 describe("tool-policy-engine request_user_input gating", () => {
-  it("allows request_user_input in propose mode", () => {
+  it("allows request_user_input in plan mode", () => {
     const decision = evaluateToolPolicy("request_user_input", {
-      executionMode: "propose",
+      executionMode: "plan",
       taskDomain: "auto",
     });
     expect(decision.decision).toBe("allow");
@@ -16,7 +16,7 @@ describe("tool-policy-engine request_user_input gating", () => {
       taskDomain: "auto",
     });
     expect(decision.decision).toBe("deny");
-    expect(decision.reason).toContain("only available in propose mode");
+    expect(decision.reason).toContain("only available in plan mode");
   });
 
   it("denies request_user_input in analyze mode", () => {
@@ -25,6 +25,25 @@ describe("tool-policy-engine request_user_input gating", () => {
       taskDomain: "auto",
     });
     expect(decision.decision).toBe("deny");
-    expect(decision.reason).toContain("only available in propose mode");
+    expect(decision.reason).toContain("only available in plan mode");
+  });
+
+  it("allows run_command in general domain when shell is enabled", () => {
+    const decision = evaluateToolPolicy("run_command", {
+      executionMode: "execute",
+      taskDomain: "general",
+      shellEnabled: true,
+    });
+    expect(decision.decision).toBe("allow");
+  });
+
+  it("still denies run_command in general domain when shell is disabled", () => {
+    const decision = evaluateToolPolicy("run_command", {
+      executionMode: "execute",
+      taskDomain: "general",
+      shellEnabled: false,
+    });
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain('blocked for the "general" domain');
   });
 });
