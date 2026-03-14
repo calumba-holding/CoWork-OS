@@ -20,6 +20,7 @@ import type {
   ImprovementCampaign,
   ImprovementCandidate,
   ImprovementEligibility,
+  ImprovementHistoryResetResult,
   ImprovementLoopSettings,
   WalletInfo,
   CreateAgentTeamItemRequest,
@@ -39,6 +40,7 @@ import type {
   InputRequest,
   InputRequestResponse,
   Workspace,
+  GuardrailSettings,
 } from "../shared/types";
 
 const ALLOWED_MESSAGE_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
@@ -616,11 +618,15 @@ const IPC_CHANNELS = {
   IMPROVEMENT_RETRY_RUN: "improvement:retryRun",
   IMPROVEMENT_DISMISS_CANDIDATE: "improvement:dismissCandidate",
   IMPROVEMENT_REVIEW_RUN: "improvement:reviewRun",
+  IMPROVEMENT_RESET_HISTORY: "improvement:resetHistory",
 
   // Workspace Kit (.cowork)
   KIT_GET_STATUS: "kit:getStatus",
   KIT_INIT: "kit:init",
   KIT_PROJECT_CREATE: "kit:projectCreate",
+  KIT_OPEN_FILE: "kit:openFile",
+  KIT_RESET_ADAPTIVE_STYLE: "kit:resetAdaptiveStyle",
+  KIT_SUBMIT_MESSAGE_FEEDBACK: "kit:submitMessageFeedback",
 
   // Migration Status (for showing one-time notifications after app rename)
   MIGRATION_GET_STATUS: "migration:getStatus",
@@ -3059,6 +3065,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.IMPROVEMENT_REFRESH) as Promise<{ candidateCount: number }>,
   runNextImprovementExperiment: () =>
     ipcRenderer.invoke(IPC_CHANNELS.IMPROVEMENT_RUN_NEXT) as Promise<ImprovementCampaign | null>,
+  resetImprovementHistory: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.IMPROVEMENT_RESET_HISTORY) as Promise<ImprovementHistoryResetResult>,
   retryImprovementCampaign: (campaignId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.IMPROVEMENT_RETRY_RUN, campaignId) as Promise<ImprovementCampaign | null>,
   dismissImprovementCandidate: (candidateId: string) =>
@@ -3080,6 +3088,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
       success: boolean;
       projectId: string;
     }>,
+  openWorkspaceKitFile: (args: { workspaceId: string; relPath: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.KIT_OPEN_FILE, args) as Promise<boolean>,
+  resetAdaptiveStyle: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.KIT_RESET_ADAPTIVE_STYLE) as Promise<void>,
+  submitMessageFeedback: (payload: {
+    taskId: string;
+    messageId: string;
+    decision: "accepted" | "rejected";
+    reason?: string;
+    note?: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.KIT_SUBMIT_MESSAGE_FEEDBACK, payload) as Promise<void>,
 
   // ChatGPT Import APIs
   importChatGPT: (options: ChatGPTImportOptions) =>
@@ -4105,73 +4124,9 @@ export interface ElectronAPI {
   ) => () => void;
   onUpdateError: (callback: (error: { error: string }) => void) => () => void;
   // Guardrail Settings
-  getGuardrailSettings: () => Promise<{
-    maxTokensPerTask: number;
-    tokenBudgetEnabled: boolean;
-    maxCostPerTask: number;
-    costBudgetEnabled: boolean;
-    blockDangerousCommands: boolean;
-    customBlockedPatterns: string[];
-    autoApproveTrustedCommands: boolean;
-    trustedCommandPatterns: string[];
-    maxFileSizeMB: number;
-    fileSizeLimitEnabled: boolean;
-    enforceAllowedDomains: boolean;
-    allowedDomains: string[];
-    webSearchMode: "disabled" | "cached" | "live";
-    webSearchMaxUsesPerTask: number;
-    webSearchMaxUsesPerStep: number;
-    webSearchAllowedDomains: string[];
-    webSearchBlockedDomains: string[];
-    maxIterationsPerTask: number;
-    iterationLimitEnabled: boolean;
-    autoContinuationEnabled: boolean;
-    defaultMaxAutoContinuations: number;
-    defaultMinProgressScore: number;
-    lifetimeTurnCapEnabled: boolean;
-    defaultLifetimeTurnCap: number;
-    compactOnContinuation: boolean;
-    compactionThresholdRatio: number;
-    loopWarningThreshold: number;
-    loopCriticalThreshold: number;
-    globalNoProgressCircuitBreaker: number;
-    sideChannelDuringExecution: "paused" | "limited" | "enabled";
-    sideChannelMaxCallsPerWindow: number;
-  }>;
+  getGuardrailSettings: () => Promise<GuardrailSettings>;
   saveGuardrailSettings: (settings: Any) => Promise<{ success: boolean }>;
-  getGuardrailDefaults: () => Promise<{
-    maxTokensPerTask: number;
-    tokenBudgetEnabled: boolean;
-    maxCostPerTask: number;
-    costBudgetEnabled: boolean;
-    blockDangerousCommands: boolean;
-    customBlockedPatterns: string[];
-    autoApproveTrustedCommands: boolean;
-    trustedCommandPatterns: string[];
-    maxFileSizeMB: number;
-    fileSizeLimitEnabled: boolean;
-    enforceAllowedDomains: boolean;
-    allowedDomains: string[];
-    webSearchMode: "disabled" | "cached" | "live";
-    webSearchMaxUsesPerTask: number;
-    webSearchMaxUsesPerStep: number;
-    webSearchAllowedDomains: string[];
-    webSearchBlockedDomains: string[];
-    maxIterationsPerTask: number;
-    iterationLimitEnabled: boolean;
-    autoContinuationEnabled: boolean;
-    defaultMaxAutoContinuations: number;
-    defaultMinProgressScore: number;
-    lifetimeTurnCapEnabled: boolean;
-    defaultLifetimeTurnCap: number;
-    compactOnContinuation: boolean;
-    compactionThresholdRatio: number;
-    loopWarningThreshold: number;
-    loopCriticalThreshold: number;
-    globalNoProgressCircuitBreaker: number;
-    sideChannelDuringExecution: "paused" | "limited" | "enabled";
-    sideChannelMaxCallsPerWindow: number;
-  }>;
+  getGuardrailDefaults: () => Promise<GuardrailSettings>;
   // Appearance Settings
   getAppearanceSettings: () => Promise<{
     themeMode: "light" | "dark" | "system";
@@ -4815,6 +4770,7 @@ export interface ElectronAPI {
   listImprovementCampaigns: (workspaceId?: string) => Promise<ImprovementCampaign[]>;
   refreshImprovementCandidates: () => Promise<{ candidateCount: number }>;
   runNextImprovementExperiment: () => Promise<ImprovementCampaign | null>;
+  resetImprovementHistory: () => Promise<ImprovementHistoryResetResult>;
   retryImprovementCampaign: (campaignId: string) => Promise<ImprovementCampaign | null>;
   dismissImprovementCandidate: (candidateId: string) => Promise<ImprovementCandidate | undefined>;
   reviewImprovementCampaign: (
@@ -4828,6 +4784,15 @@ export interface ElectronAPI {
   createWorkspaceKitProject: (
     request: WorkspaceKitProjectCreateRequest,
   ) => Promise<{ success: boolean; projectId: string }>;
+  openWorkspaceKitFile: (args: { workspaceId: string; relPath: string }) => Promise<boolean>;
+  resetAdaptiveStyle: () => Promise<void>;
+  submitMessageFeedback: (payload: {
+    taskId: string;
+    messageId: string;
+    decision: "accepted" | "rejected";
+    reason?: string;
+    note?: string;
+  }) => Promise<void>;
 
   // ChatGPT Import
   importChatGPT: (options: ChatGPTImportOptions) => Promise<ChatGPTImportResult>;
