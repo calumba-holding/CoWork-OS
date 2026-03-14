@@ -1,6 +1,15 @@
 import { ipcMain } from "electron";
-import { IPC_CHANNELS, type ImprovementLoopSettings } from "../../shared/types";
+import {
+  IPC_CHANNELS,
+  type ImprovementEligibility,
+  type ImprovementLoopSettings,
+} from "../../shared/types";
 import { ImprovementLoopService } from "../improvement/ImprovementLoopService";
+import {
+  clearOwnerEnrollment,
+  getImprovementEligibility,
+  saveOwnerEnrollmentSignature,
+} from "../improvement/ImprovementEligibilityService";
 
 export function setupImprovementHandlers(service: ImprovementLoopService): void {
   ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_GET_SETTINGS, async (): Promise<ImprovementLoopSettings> => {
@@ -8,10 +17,25 @@ export function setupImprovementHandlers(service: ImprovementLoopService): void 
   });
 
   ipcMain.handle(
+    IPC_CHANNELS.IMPROVEMENT_GET_ELIGIBILITY,
+    async (): Promise<ImprovementEligibility> => getImprovementEligibility(),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.IMPROVEMENT_SAVE_OWNER_ENROLLMENT,
+    async (_event, signature: string): Promise<ImprovementEligibility> =>
+      saveOwnerEnrollmentSignature(signature),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.IMPROVEMENT_CLEAR_OWNER_ENROLLMENT,
+    async (): Promise<ImprovementEligibility> => clearOwnerEnrollment(),
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.IMPROVEMENT_SAVE_SETTINGS,
-    async (_event, settings: ImprovementLoopSettings): Promise<{ success: boolean }> => {
-      service.saveSettings(settings);
-      return { success: true };
+    async (_event, settings: ImprovementLoopSettings): Promise<ImprovementLoopSettings> => {
+      return service.saveSettings(settings);
     },
   );
 
