@@ -28,6 +28,7 @@ import {
   WebSearchMode,
 } from "../../shared/types";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
+import { formatProviderErrorForDisplay } from "../../shared/provider-error-format";
 import {
   parseInlineSkillSlashChain,
   parseLeadingSkillSlashCommand,
@@ -111,7 +112,7 @@ import {
   COMPACTION_TOOL_USE_CLAMP,
   COMPACTION_TOOL_RESULT_CLAMP,
   isContextCapacityError,
-  isNonRetryableError,
+  isNonRetryableLLMError,
   isInputDependentError as _isInputDependentError,
   isRecoverablePathDriftError as _isRecoverablePathDriftError,
   getCurrentDateString as _getCurrentDateString,
@@ -4254,8 +4255,8 @@ ${transcript}
         const errorMessage = error?.message || "Unknown error";
         const isCancellation = errorMessage === "Request cancelled" || error.name === "AbortError";
 
-        // Don't retry on cancellation or non-retryable errors
-        if (isCancellation || error.name === "AbortError" || isNonRetryableError(error.message)) {
+        // Don't retry on cancellation or non-retryable LLM errors (429/rate limit are retryable)
+        if (isCancellation || error.name === "AbortError" || isNonRetryableLLMError(error.message)) {
           console.log(
             `${this.logTag}[LLM ${llmCallId}] terminal failure: ${operation} ` +
               `(attempt ${attemptNumber}/${maxRetries + 1}, ${elapsedMs}ms, cancellation=${isCancellation}) -> ${errorMessage}`,
@@ -14189,6 +14190,8 @@ You are continuing a previous conversation. The context from the previous conver
       "ECONNABORTED",
     ]);
     if (code && retryableCodes.has(code)) return true;
+    // 429 / rate limit are transient — retry after delay
+    if (/429|rate limit|too many requests|free-models-per-min/.test(message)) return true;
     return (
       message.includes("fetch failed") ||
       message.includes("network") ||
@@ -15923,9 +15926,15 @@ You are continuing a previous conversation. The context from the previous conver
                     : "socket_hang_up",
           });
         }
+        const reason = error.message || "Transient LLM error";
+        const isRateLimit = /429|rate limit|too many requests|free-models-per-min/i.test(
+          String(reason).toLowerCase(),
+        );
+        const delayMs = isRateLimit ? 60 * 1000 : undefined; // 60s for rate limit, else default
         const scheduled = this.daemon.handleTransientTaskFailure(
           this.task.id,
-          error.message || "Transient LLM error",
+          reason,
+          delayMs,
         );
         if (scheduled) {
           return;
@@ -15937,15 +15946,16 @@ You are continuing a previous conversation. The context from the previous conver
       this.saveConversationSnapshot();
       this.capturePlaybookOutcome("failure", error?.message || String(error));
       const failureClass = this.classifyFailure(error);
+      const rawError = error?.message || String(error);
       this.persistBestKnownOutcome(
         this.buildResultSummary() || this.getContentFallback() || "",
         "failed",
         failureClass,
-        error?.message || String(error),
+        rawError,
       );
       this.daemon.updateTask(this.task.id, {
         status: "failed",
-        error: error?.message || String(error),
+        error: formatProviderErrorForDisplay(rawError, { task: this.task }),
         completedAt: Date.now(),
         terminalStatus: "failed",
         failureClass,
