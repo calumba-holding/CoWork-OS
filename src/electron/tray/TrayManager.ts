@@ -1125,7 +1125,6 @@ export class TrayManager {
   showNotification(title: string, body: string, taskId?: string): void {
     if (!this.settings.showNotifications) return;
 
-    // Use custom overlay notification banner
     const { NotificationOverlayManager } = require("../notifications/NotificationOverlayWindow");
     NotificationOverlayManager.getInstance().show({
       id: `tray-${Date.now()}`,
