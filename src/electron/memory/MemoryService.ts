@@ -28,6 +28,7 @@ import {
   tokenizeForLocalEmbedding,
 } from "./local-embedding";
 import { MarkdownMemoryIndexService } from "./MarkdownMemoryIndexService";
+import { MemoryTierService } from "./MemoryTierService";
 
 // Privacy patterns to exclude - matches common sensitive data patterns
 const SENSITIVE_PATTERNS = [
@@ -98,6 +99,7 @@ export class MemoryService {
   private static sideChannelCallsRemaining: number | null = null;
   private static sideChannelPolicyPaused = false;
   private static cleanupIntervalHandle?: ReturnType<typeof setInterval>;
+  private static db?: import("better-sqlite3").Database;
 
   /**
    * Initialize the memory service
@@ -106,6 +108,7 @@ export class MemoryService {
     if (this.initialized) return;
 
     const db = dbManager.getDatabase();
+    this.db = db;
     this.memoryRepo = new MemoryRepository(db);
     this.embeddingRepo = new MemoryEmbeddingRepository(db);
     this.summaryRepo = new MemorySummaryRepository(db);
@@ -261,6 +264,18 @@ export class MemoryService {
    * Returns IDs + brief snippets (~50 tokens each)
    */
   static search(workspaceId: string, query: string, limit = 20): MemorySearchResult[] {
+    this.ensureInitialized();
+    const results = this.searchInternal(workspaceId, query, limit);
+    // Record references for tier promotion
+    if (this.db && results.length > 0) {
+      for (const r of results) {
+        MemoryTierService.recordReference(this.db, r.id);
+      }
+    }
+    return results;
+  }
+
+  private static searchInternal(workspaceId: string, query: string, limit = 20): MemorySearchResult[] {
     this.ensureInitialized();
     // Include private memories — private means not shared externally, not hidden from the owner
     const lexicalLimit = Math.min(Math.max(limit, 5), 50);
@@ -1190,6 +1205,11 @@ Summary:`,
         }
 
         this.enforceStorageLimit(workspaceId, settings.maxStorageMb);
+      }
+
+      // Tier promotion pass: promote short→medium→long, evict stale short-tier memories
+      if (this.db) {
+        MemoryTierService.runPromotionPass(this.db);
       }
     } catch (error) {
       console.error("[MemoryService] Cleanup failed:", error);
