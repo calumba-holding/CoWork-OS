@@ -622,6 +622,7 @@ export class TaskExecutor {
   private lastUserMessage: string;
   private recoveryRequestActive: boolean = false;
   private capabilityUpgradeRequested: boolean = false;
+  private redirectRequested: boolean = false;
   private toolResultMemory: Array<{ tool: string; summary: string; timestamp: number }> = [];
   private webEvidenceMemory: WebEvidenceEntry[] = [];
   private toolUsageCounts: Map<string, number> = new Map();
@@ -10102,6 +10103,51 @@ You are continuing a previous conversation. The context from the previous conver
       browserChannelChange ||
       (hasCapabilityActionVerb && browserPreferenceShift)
     );
+  }
+
+  /**
+   * Returns true when the user is pivoting away from a prior task's scope to a
+   * new direction — e.g. "ignore the X fixes and focus on new features" or
+   * "forget that, pivot to building Y instead".
+   */
+  private isRedirectIntent(text: string): boolean {
+    return IntentRouter.isRedirectIntent(text);
+  }
+
+  /**
+   * Replaces the full conversation history with a one-line context stub.
+   *
+   * When a user redirects a completed task ("ignore X, focus on Y"), the
+   * prior 20–30 step conversation is the primary cause of misinterpretation:
+   * the LLM anchors on the old work and tries to extend it instead of
+   * treating the follow-up as a fresh start. Compacting to a stub removes
+   * that anchor while still providing minimal context about what came before.
+   */
+  private compactHistoryForRedirect(): void {
+    const priorLabel = this.task.title ? `"${this.task.title}"` : "the previous session";
+    // Use a user→assistant stub pair so the conversation starts on a user turn,
+    // which is required by providers that enforce alternating-role message ordering
+    // (e.g. Bedrock, Gemini). The actual redirect message is appended after this.
+    this.conversationHistory = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `[Prior session ${priorLabel} completed. Starting new direction.]`,
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Understood. Ready to proceed with your new direction.",
+          },
+        ],
+      },
+    ];
   }
 
   private isInternalAppOrToolChangeIntent(text: string): boolean {
@@ -22503,6 +22549,7 @@ TASK / CONVERSATION HISTORY:
     this.lastUserMessage = message;
     this.recoveryRequestActive = this.isRecoveryIntent(message);
     this.capabilityUpgradeRequested = this.isCapabilityUpgradeIntent(message);
+    this.redirectRequested = this.isRedirectIntent(message);
 
     if (this.lastPauseReason?.startsWith("shell_permission_")) {
       const decision = this.classifyShellPermissionDecision(message);
@@ -22575,6 +22622,15 @@ TASK / CONVERSATION HISTORY:
     if (!shouldResumeAfterFollowup && this.resolveConversationMode(message) === "chat") {
       await this.respondInChatMode(message, previousStatus);
       return;
+    }
+
+    // When the user is redirecting a completed/failed/cancelled task to a new scope,
+    // compact the prior conversation history to a one-line stub and force a fresh
+    // system prompt rebuild. Without this the full prior session floods the context
+    // and causes the LLM to anchor on the old work instead of executing the new direction.
+    if (this.redirectRequested && shouldStartNewCanvasSession) {
+      this.compactHistoryForRedirect();
+      this.systemPrompt = ""; // force rebuild with redirect-aware instructions below
     }
 
     // Get enabled guidelines from custom skills
@@ -22727,7 +22783,12 @@ IMAGE SHARING (when user asks for images/photos/screenshots):
 - If asked for multiple images, take multiple screenshots from different sources/pages
 - Always describe what the screenshot shows in your text response
 
-FOLLOW-UP MESSAGE HANDLING (CRITICAL):
+${this.redirectRequested ? `TASK RE-SCOPE (CRITICAL):
+- The user is redirecting to a NEW scope. The prior session's work is NOT relevant here.
+- Treat this as a FRESH task. Execute the new instruction completely and independently.
+- Do NOT reference, extend, or build on the prior session unless explicitly asked.
+- Do NOT ask clarifying questions — proceed with the new direction immediately.
+- Do NOT say "Would you like me to..." or "Should I..." — just DO IT.` : `FOLLOW-UP MESSAGE HANDLING (CRITICAL):
 - This is a FOLLOW-UP message. The user is continuing an existing conversation.
 - FIRST: Review the conversation history above - you already have context and findings from previous messages.
 - USE EXISTING KNOWLEDGE: If you already found information in this conversation, USE IT. Do not start fresh research.
@@ -22743,7 +22804,7 @@ CRITICAL - FINAL ANSWER REQUIREMENT:
 - After using tools, IMMEDIATELY provide your findings as TEXT. Don't keep calling tools indefinitely.
 - For research tasks: summarize what you found and directly answer the user's question.
 - If you couldn't find the information, SAY SO explicitly (e.g., "I couldn't find lap times for today's testing").
-- After 2-3 tool calls, you MUST provide a text answer summarizing what you found or didn't find.
+- After 2-3 tool calls, you MUST provide a text answer summarizing what you found or didn't find.`}
 
 WEB ACCESS & CONTENT EXTRACTION (CRITICAL):
 - Treat browser_navigate + browser_get_content as ONE ATOMIC OPERATION. Never navigate without immediately extracting.
@@ -22759,7 +22820,7 @@ MULTI-PAGE RESEARCH PATTERN:
   2. browser_navigate to source 2 -> browser_get_content -> extract relevant info
   3. Compile findings from all sources into your response
 - Do NOT navigate to all sources first and then try to extract. Process each one fully.
-
+${this.redirectRequested ? "" : `
 ANTI-PATTERNS (NEVER DO THESE):
 - DO NOT: Contradict information you found earlier in this conversation
 - DO NOT: Claim "no information found" when you already found information in previous messages
@@ -22771,8 +22832,7 @@ ANTI-PATTERNS (NEVER DO THESE):
 - DO NOT: Ask "Would you like me to..." or "Should I..." - just do it
 - DO: Review conversation history FIRST before doing new research
 - DO: Use information you already gathered before claiming it doesn't exist
-- DO: Navigate -> browser_get_content -> process -> repeat for each source -> summarize all findings
-
+- DO: Navigate -> browser_get_content -> process -> repeat for each source -> summarize all findings`}
 EFFICIENCY RULES (CRITICAL):
 - DO NOT read the same file multiple times. If you've already read a file, use the content from memory.
 - DO NOT create multiple versions of the same file. Pick ONE target file and work with it.
