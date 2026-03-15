@@ -29,7 +29,9 @@ When enabled, `AdaptiveStyleEngine` observes user messages and feedback to nudge
 
 **Audit:** Every adaptation is recorded with dimension, from/to values, reason, and timestamp. Retrieve via `AdaptiveStyleEngine.getAdaptationHistory()`.
 
-**Reset:** The "Reset learned style" button in Guardrail Settings clears all accumulated state and adaptation history via `AdaptiveStyleEngine.reset()` (`kit:resetAdaptiveStyle` IPC).
+**Reset:** The "Reset learned style" button in Guardrail Settings clears all accumulated state and adaptation history via `AdaptiveStyleEngine.reset()` over the shared IPC channel `KIT_RESET_ADAPTIVE_STYLE` (`kit:resetAdaptiveStyle`).
+
+**Feedback ingress:** Thumbs-down assistant feedback reaches the adaptation pipeline over the shared IPC channel `KIT_SUBMIT_MESSAGE_FEEDBACK` (`kit:submitMessageFeedback`), so structured message feedback and style-reset behavior use the same typed channel registry.
 
 ---
 
@@ -71,4 +73,5 @@ These controls sit in Guardrail Settings because they govern agent behavior, but
 | `src/electron/agent/executor.ts` | Injects channel directive into system prompt |
 | `src/electron/agent/daemon.ts` | Calls `observe()` and `observeFeedback()` |
 | `src/renderer/components/GuardrailSettings.tsx` | Settings UI (Behavior Adaptation section) |
-| `src/electron/ipc/handlers.ts` | `kit:resetAdaptiveStyle` handler |
+| `src/electron/ipc/handlers.ts` | `kit:resetAdaptiveStyle` and `kit:submitMessageFeedback` handlers |
+| `src/shared/types.ts` | Shared IPC channel constants for behavior-adaptation and feedback wiring |
