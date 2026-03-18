@@ -34,6 +34,7 @@ import { AgentPerformanceReviewViewer } from "./AgentPerformanceReviewViewer";
 import { useAgentContext } from "../hooks/useAgentContext";
 import type { UiCopyKey } from "../utils/agentMessages";
 import { getEffectiveTaskEventType } from "../utils/task-event-compat";
+import { getEmojiIcon } from "../utils/emoji-icon-map";
 
 type AgentRole = AgentRoleData;
 type MissionColumn = {
@@ -1302,7 +1303,10 @@ export function MissionControlPanel({
                     tabIndex={0}
                   >
                     <div className="mc-agent-avatar" style={{ backgroundColor: agent.color }}>
-                      {agent.icon}
+                      {(() => {
+                        const Icon = getEmojiIcon(agent.icon || "🤖");
+                        return <Icon size={18} strokeWidth={2} />;
+                      })()}
                     </div>
                     <div className="mc-agent-info">
                       <div className="mc-agent-name-row">
@@ -1502,7 +1506,11 @@ export function MissionControlPanel({
                           setSelectedAgent(selectedAgent === agent.id ? null : agent.id)
                         }
                       >
-                        {agent.icon} {agent.displayName.split(" ")[0]}
+                        {(() => {
+                          const Icon = getEmojiIcon(agent.icon || "🤖");
+                          return <Icon size={14} strokeWidth={2} />;
+                        })()}{" "}
+                        {agent.displayName.split(" ")[0]}
                       </button>
                     ))}
                 </div>
@@ -1518,7 +1526,11 @@ export function MissionControlPanel({
                         <div className="mc-feed-item-header">
                           {agent && (
                             <span className="mc-feed-agent" style={{ color: agent.color }}>
-                              {agent.icon} {agent.displayName}
+                              {(() => {
+                                const Icon = getEmojiIcon(agent.icon || "🤖");
+                                return <Icon size={14} strokeWidth={2} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />;
+                              })()}
+                              {agent.displayName}
                             </span>
                           )}
                           {!agent && item.agentName && (
