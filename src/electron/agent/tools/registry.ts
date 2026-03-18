@@ -476,8 +476,91 @@ export class ToolRegistry {
     this.toolDescriptionsCache.clear();
   }
 
+  private buildToolCatalogVersion(): string {
+    const hash = createHash("sha1");
+    const builtinSettings = BuiltinToolsSettingsManager.loadSettings();
+    const mcpSettings = MCPSettingsManager.loadSettings();
+    const integrationState = {
+      x: XTools.isEnabled(),
+      notion: NotionTools.isEnabled(),
+      box: BoxTools.isEnabled(),
+      oneDrive: OneDriveTools.isEnabled(),
+      googleDrive: GoogleDriveTools.isEnabled(),
+      gmail: GmailTools.isEnabled(),
+      googleCalendar: GoogleCalendarTools.isEnabled(),
+      appleCalendar: AppleCalendarTools.isAvailable(),
+      appleReminders: AppleRemindersTools.isAvailable(),
+      dropbox: DropboxTools.isEnabled(),
+      sharePoint: SharePointTools.isEnabled(),
+      scraping: ScrapingTools.isEnabled(),
+      emailImap: Boolean(this.emailImapTools?.isAvailable?.()),
+      channelHistory: Boolean(this.channelTools),
+    };
+    let infraState: { enabled: boolean; enabledCategories?: Any } = { enabled: false };
+    try {
+      const infraSettings = InfraSettingsManager.loadSettings();
+      infraState = {
+        enabled: Boolean(infraSettings.enabled),
+        enabledCategories: infraSettings.enabledCategories || null,
+      };
+    } catch {
+      infraState = { enabled: false };
+    }
+    let mcpManagerVersion = 0;
+    let mcpToolNames: string[] = [];
+    try {
+      const mcpManager = MCPClientManager.getInstance();
+      mcpManagerVersion =
+        typeof (mcpManager as Any).getToolCatalogVersion === "function"
+          ? (mcpManager as Any).getToolCatalogVersion()
+          : 0;
+      mcpToolNames = mcpManager
+        .getAllTools()
+        .map((tool) => String(tool.name || ""))
+        .filter(Boolean)
+        .sort();
+    } catch {
+      mcpManagerVersion = 0;
+      mcpToolNames = [];
+    }
+    hash.update(
+      JSON.stringify({
+        workspacePath: this.workspace.path,
+        workspaceId: this.workspace.id,
+        shellEnabled: this.workspace.permissions.shell,
+        gatewayContext: this.gatewayContext || null,
+        deniedTools: Array.from(this.deniedTools.values()).sort(),
+        deniedGroups: Array.from(this.deniedGroups.values()).sort(),
+        denyAllTools: this.denyAllTools,
+        headless: isHeadlessMode(),
+        deepWorkMode: this._deepWorkMode,
+        builtinSettings,
+        integrationState,
+        infraState,
+        mcp: {
+          toolNamePrefix: mcpSettings.toolNamePrefix || "mcp_",
+          enabledServers: (mcpSettings.servers || [])
+            .map((server) => ({
+              id: server.id,
+              enabled: server.enabled,
+              transport: server.transport,
+            }))
+            .sort((a, b) => a.id.localeCompare(b.id)),
+          managerVersion: mcpManagerVersion,
+          toolNames: mcpToolNames,
+        },
+      }),
+    );
+    return hash.digest("hex");
+  }
+
+  getToolCatalogVersion(): string {
+    return this.buildToolCatalogVersion();
+  }
+
   private buildToolDefinitionsCacheKey(): string {
     return JSON.stringify({
+      catalogVersion: this.getToolCatalogVersion(),
       workspacePath: this.workspace.path,
       workspaceId: this.workspace.id,
       shellEnabled: this.workspace.permissions.shell,
@@ -627,25 +710,60 @@ export class ToolRegistry {
   private validateToolSemanticsInvariant(tools: LLMTool[]): void {
     if (this.semanticsInvariantLogged) return;
 
+    const duplicateToolNames = tools
+      .map((tool) => String(tool?.name || ""))
+      .filter(Boolean)
+      .filter((toolName, index, list) => list.indexOf(toolName) !== index)
+      .filter((toolName, index, list) => list.indexOf(toolName) === index);
+
     const artifactToolPattern = /^(?:create|generate)_(?:document|spreadsheet|presentation)$/;
     const missingSemantics = tools
       .map((tool) => String(tool?.name || ""))
       .filter((toolName) => artifactToolPattern.test(toolName))
       .filter((toolName) => !getToolSemanticsUtil(toolName));
+    const artifactSchemaMismatches = tools
+      .map((tool) => {
+        const toolName = String(tool?.name || "");
+        const semantics = getToolSemanticsUtil(toolName);
+        if (!semantics || !isArtifactGenerationToolNameUtil(toolName)) return null;
+        if (toolName !== semantics.canonicalName) return null;
+        const requiredInputSchemaKey = semantics.requiredInputSchemaKey;
+        if (!requiredInputSchemaKey) return null;
+        const properties = (tool as Any)?.input_schema?.properties;
+        if (properties && Object.prototype.hasOwnProperty.call(properties, requiredInputSchemaKey)) {
+          return null;
+        }
+        return `${toolName} missing required input schema key "${requiredInputSchemaKey}"`;
+      })
+      .filter((entry): entry is string => Boolean(entry));
 
-    if (missingSemantics.length > 0) {
-      console.warn(
-        `[ToolRegistry] Tool semantics invariant failed for artifact tools: ${missingSemantics.join(", ")}`,
-      );
-    } else {
-      const artifactToolNames = tools
-        .map((tool) => String(tool?.name || ""))
-        .filter((toolName) => isArtifactGenerationToolNameUtil(toolName));
-      if (artifactToolNames.length > 0) {
-        console.log(
-          `[ToolRegistry] Tool semantics invariant passed for: ${artifactToolNames.join(", ")}`,
-        );
+    const invariantViolations = [
+      ...(duplicateToolNames.length > 0
+        ? [`duplicate tool names detected: ${duplicateToolNames.join(", ")}`]
+        : []),
+      ...(missingSemantics.length > 0
+        ? [`missing semantics for artifact tools: ${missingSemantics.join(", ")}`]
+        : []),
+      ...artifactSchemaMismatches,
+    ];
+
+    if (invariantViolations.length > 0) {
+      const message = `[ToolRegistry] Tool semantics invariant failed: ${invariantViolations.join("; ")}`;
+      if (process.env.NODE_ENV === "test" || process.env.COWORK_STRICT_TOOL_INVARIANTS === "1") {
+        throw new Error(message);
       }
+      console.warn(message);
+      this.semanticsInvariantLogged = true;
+      return;
+    }
+
+    const artifactToolNames = tools
+      .map((tool) => String(tool?.name || ""))
+      .filter((toolName) => isArtifactGenerationToolNameUtil(toolName));
+    if (artifactToolNames.length > 0) {
+      console.log(
+        `[ToolRegistry] Tool semantics invariant passed for: ${artifactToolNames.join(", ")}`,
+      );
     }
 
     this.semanticsInvariantLogged = true;
@@ -1064,13 +1182,10 @@ export class ToolRegistry {
       return 0;
     });
 
+    this.validateToolSemanticsInvariant(sortedTools);
     this.cachedToolDefinitionsKey = cacheKey;
     this.cachedToolDefinitions = sortedTools.slice();
     return sortedTools.slice();
-
-    this.validateToolSemanticsInvariant(filteredTools);
-
-    return filteredTools;
   }
 
   /**
@@ -1741,7 +1856,7 @@ Channel Message Log (Local Gateway):
 		- request_user_input: Ask the user a structured multiple-choice question set (plan mode only) and wait for selection.
 		- task_history: Query recent task history/messages (use for "what did we talk about yesterday?")
 		- switch_workspace: Switch to a different workspace/working directory. Use when you need to work in a different folder.
-		- integration_setup: List/inspect/configure Tier-1 integrations from chat (resend/slack/gmail/google-calendar/google-drive/google-workspace/jira/linear/hubspot/salesforce/zendesk/servicenow/outreach/docusign), including plan_hash stale-plan safety and optional OAuth setup.
+		- integration_setup: List/inspect/configure Tier-1 integrations from chat (resend/google-workspace/jira/linear/hubspot/salesforce/zendesk/servicenow), including plan_hash stale-plan safety and optional OAuth setup.
 		- set_personality: Change the assistant's communication style (professional, friendly, concise, creative, technical, casual).
 	- set_persona: Change the assistant's character persona (jarvis, friday, hal, computer, alfred, intern, sensei, pirate, noir, companion, or none).
 	- set_response_style: Adjust response preferences (emoji_usage, response_length, code_comments, explanation_depth).
@@ -5870,11 +5985,7 @@ ${skillDescriptions}`;
         return { clientIdKey: "JIRA_CLIENT_ID", clientSecretKey: "JIRA_CLIENT_SECRET" };
       case "hubspot":
         return { clientIdKey: "HUBSPOT_CLIENT_ID", clientSecretKey: "HUBSPOT_CLIENT_SECRET" };
-      case "slack":
-        return { clientIdKey: "SLACK_CLIENT_ID", clientSecretKey: "SLACK_CLIENT_SECRET" };
-      case "gmail":
-      case "google-calendar":
-      case "google-drive":
+      case "google-workspace":
         return { clientIdKey: "GOOGLE_CLIENT_ID", clientSecretKey: "GOOGLE_CLIENT_SECRET" };
       default:
         return {};
@@ -5961,14 +6072,7 @@ ${skillDescriptions}`;
           if (oauthResult.refreshToken) nextEnv.HUBSPOT_REFRESH_TOKEN = oauthResult.refreshToken;
           break;
         }
-        case "slack": {
-          nextEnv.SLACK_ACCESS_TOKEN = oauthResult.accessToken;
-          if (oauthResult.refreshToken) nextEnv.SLACK_REFRESH_TOKEN = oauthResult.refreshToken;
-          break;
-        }
-        case "gmail":
-        case "google-calendar":
-        case "google-drive": {
+        case "google-workspace": {
           nextEnv.GOOGLE_ACCESS_TOKEN = oauthResult.accessToken;
           if (oauthResult.refreshToken) nextEnv.GOOGLE_REFRESH_TOKEN = oauthResult.refreshToken;
           break;
@@ -8016,7 +8120,7 @@ ${skillDescriptions}`;
         name: "integration_setup",
         description:
           "Inspect, list, or configure integrations directly from chat. " +
-          "Supports Tier-1 providers: resend, slack, gmail, google-calendar, google-drive, google-workspace, jira, linear, hubspot, salesforce, zendesk, servicenow, outreach, docusign. " +
+          "Supports Tier-1 providers: resend, google-workspace, jira, linear, hubspot, salesforce, zendesk, servicenow. " +
           "Use inspect to get plan_hash + missing inputs, and configure with expected_plan_hash for safe apply.",
         input_schema: {
           type: "object",
@@ -8031,10 +8135,6 @@ ${skillDescriptions}`;
               type: "string",
               enum: [
                 "resend",
-                "slack",
-                "gmail",
-                "google-calendar",
-                "google-drive",
                 "google-workspace",
                 "jira",
                 "linear",
@@ -8042,8 +8142,6 @@ ${skillDescriptions}`;
                 "salesforce",
                 "zendesk",
                 "servicenow",
-                "outreach",
-                "docusign",
               ],
               description: "Integration provider to inspect/configure",
             },
