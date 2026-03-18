@@ -60,12 +60,36 @@ describe("MCPRegistryManager install defaults", () => {
       .spyOn(MCPRegistryManager, "verifyNpmPackage")
       .mockResolvedValue({ exists: true, version: "2026.1.14" });
 
-    const config = await MCPRegistryManager.installServer("filesystem");
+    const config = await MCPRegistryManager.installServer("postgres");
 
     expect(config.enabled).toBe(true);
     expect(mockState.addServerMock).toHaveBeenCalledTimes(1);
     expect(mockState.addServerMock.mock.calls[0][0].enabled).toBe(true);
 
     verifySpy.mockRestore();
+  });
+
+  it("curates overlapping official MCP servers out of the built-in registry", async () => {
+    const registry = await MCPRegistryManager.fetchRegistry();
+    const ids = registry.servers.map((server) => server.id);
+
+    expect(ids).not.toContain("filesystem");
+    expect(ids).not.toContain("github");
+    expect(ids).not.toContain("puppeteer");
+    expect(ids).not.toContain("memory");
+    expect(ids).toContain("postgres");
+  });
+
+  it("only exposes shipped local connectors and the consolidated google-workspace connector", async () => {
+    const registry = await MCPRegistryManager.fetchRegistry();
+    const ids = registry.servers.map((server) => server.id);
+
+    expect(ids).toContain("google-workspace");
+    expect(ids).not.toContain("google-calendar");
+    expect(ids).not.toContain("google-drive");
+    expect(ids).not.toContain("gmail");
+    expect(ids).not.toContain("slack");
+    expect(ids).not.toContain("docusign");
+    expect(ids).not.toContain("outreach");
   });
 });
