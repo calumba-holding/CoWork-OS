@@ -3,6 +3,7 @@ import {
   normalizeInlineLists,
   normalizeInlineHeadings,
   normalizeMarkdownForCollab,
+  unwrapMarkdownCodeBlocks,
 } from "../markdown-inline-lists";
 
 describe("normalizeInlineLists", () => {
@@ -72,6 +73,68 @@ describe("normalizeInlineHeadings", () => {
   });
 });
 
+describe("unwrapMarkdownCodeBlocks", () => {
+  it("unwraps ```markdown blocks so inner content is parsed", () => {
+    const input = `Here is the deliverable:
+
+\`\`\`markdown
+# Final Marketing Strategy Synthesis
+## Executive summary
+**the local-first AI agent OS for real work**
+\`\`\``;
+    const output = unwrapMarkdownCodeBlocks(input);
+    expect(output).toContain("# Final Marketing Strategy Synthesis");
+    expect(output).not.toContain("```markdown");
+    expect(output).toContain("**the local-first AI agent OS for real work**");
+  });
+
+  it("unwraps ```md blocks", () => {
+    const input = "```md\n# Header\n**bold**\n```";
+    const output = unwrapMarkdownCodeBlocks(input);
+    expect(output).toBe("# Header\n**bold**");
+  });
+
+  it("leaves other code blocks unchanged", () => {
+    const input = "```js\nconsole.log(1)\n```";
+    const output = unwrapMarkdownCodeBlocks(input);
+    expect(output).toBe(input);
+  });
+
+  it("unwraps plain ``` blocks when content starts with #", () => {
+    const input = `Here is the deliverable:
+
+\`\`\`
+# Collab-1773823736382 - Final Marketing Strategy Synthesis
+## Executive summary
+CoWork OS should go to market as **the local-first AI agent OS for real work**.
+\`\`\``;
+    const output = unwrapMarkdownCodeBlocks(input);
+    expect(output).toContain("# Collab-1773823736382");
+    expect(output).not.toMatch(/^```\s*$/m);
+    expect(output).toContain("**the local-first AI agent OS for real work**");
+  });
+
+  it("unwraps plain ``` blocks when content has intro before #", () => {
+    const input = `Intro text
+
+\`\`\`
+Preamble line
+
+# Header
+## Sub
+\`\`\``;
+    const output = unwrapMarkdownCodeBlocks(input);
+    expect(output).toContain("# Header");
+    expect(output).toContain("Preamble line");
+  });
+
+  it("unwraps ```Markdown (case-insensitive)", () => {
+    const input = "```Markdown\n# Title\n**bold**\n```";
+    const output = unwrapMarkdownCodeBlocks(input);
+    expect(output).toBe("# Title\n**bold**");
+  });
+});
+
 describe("normalizeMarkdownForCollab", () => {
   it("applies both heading and list normalization", () => {
     const input =
@@ -80,5 +143,33 @@ describe("normalizeMarkdownForCollab", () => {
     expect(output).toContain("From X:\n### Architecture Overview");
     expect(output).toContain("\n1. first");
     expect(output).toContain("\n2. second");
+  });
+
+  it("strips trailing ** from glob code blocks (LLM bold attempt)", () => {
+    const input = "- `**/*team* **`\n- `**/*task* **`";
+    const output = normalizeMarkdownForCollab(input);
+    expect(output).toContain("`**/*team*`");
+    expect(output).toContain("`**/*task*`");
+    expect(output).not.toContain("`**/*team* **`");
+  });
+
+  it("wraps glob patterns in backticks so ** renders correctly", () => {
+    const input = "Checked - **/*team* - **/*task* - **/*agent*";
+    const output = normalizeMarkdownForCollab(input);
+    expect(output).toContain("`**/*team*`");
+    expect(output).toContain("`**/*task*`");
+    expect(output).toContain("`**/*agent*`");
+  });
+
+  it("fixes unclosed bold at end of line", () => {
+    const input = "**Electron desktop app";
+    const output = normalizeMarkdownForCollab(input);
+    expect(output).toBe("**Electron desktop app**");
+  });
+
+  it("does not add closing ** when bold is already closed", () => {
+    const input = "**CoWork OS** most likely fits";
+    const output = normalizeMarkdownForCollab(input);
+    expect(output).toBe(input);
   });
 });
