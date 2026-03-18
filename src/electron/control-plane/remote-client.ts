@@ -59,6 +59,7 @@ export class RemoteGatewayClient {
   private scopes: string[] = [];
   private connectedAt: number | null = null;
   private lastActivityAt: number | null = null;
+  private lastError: string | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
@@ -92,7 +93,7 @@ export class RemoteGatewayClient {
       connectedAt: this.connectedAt ?? undefined,
       clientId: this.clientId ?? undefined,
       scopes: this.scopes.length > 0 ? this.scopes : undefined,
-      error: this.state === "error" ? "Connection failed" : undefined,
+      error: this.state === "error" ? (this.lastError ?? "Connection failed") : undefined,
       reconnectAttempts: this.reconnectAttempts > 0 ? this.reconnectAttempts : undefined,
       lastActivityAt: this.lastActivityAt ?? undefined,
     };
@@ -112,6 +113,7 @@ export class RemoteGatewayClient {
     }
 
     this.setState("connecting");
+    this.lastError = null;
     this.reconnectAttempts = 0;
 
     return this.doConnect();
@@ -136,6 +138,7 @@ export class RemoteGatewayClient {
     this.clientId = null;
     this.scopes = [];
     this.connectedAt = null;
+    this.lastError = null;
     this.setState("disconnected");
     console.log("[RemoteGateway] Disconnected");
   }
@@ -268,6 +271,35 @@ export class RemoteGatewayClient {
 
   // ===== Private Methods =====
 
+  private normalizeErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message;
+    }
+    if (typeof error === "string") {
+      return error;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+
+  private isReachabilityError(error: unknown): boolean {
+    return /(ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|Connection timeout|Opening handshake has timed out|socket hang up)/i.test(
+      this.normalizeErrorMessage(error),
+    );
+  }
+
+  private logConnectionError(prefix: string, error: unknown): void {
+    const message = this.normalizeErrorMessage(error);
+    if (this.isReachabilityError(error)) {
+      console.warn(`${prefix}: ${message}`);
+      return;
+    }
+    console.error(prefix, error);
+  }
+
   private async doConnect(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
@@ -336,7 +368,7 @@ export class RemoteGatewayClient {
 
         this.ws.on("error", (error) => {
           clearTimeout(connectionTimeout);
-          console.error("[RemoteGateway] WebSocket error:", error);
+          this.logConnectionError("[RemoteGateway] WebSocket error", error);
           this.setState("error", error.message);
           reject(error);
         });
@@ -473,12 +505,13 @@ export class RemoteGatewayClient {
   }
 
   private scheduleReconnect(): void {
+    this.clearReconnectTimer();
     this.setState("reconnecting");
     this.reconnectAttempts++;
 
     const delay = Math.min(
-      (this.config.reconnectIntervalMs || 5000) * Math.pow(1.5, this.reconnectAttempts - 1),
-      30000, // Max 30 seconds
+      (this.config.reconnectIntervalMs || 5000) * Math.pow(2, this.reconnectAttempts - 1),
+      5 * 60 * 1000, // Max 5 minutes
     );
 
     console.log(
@@ -487,12 +520,15 @@ export class RemoteGatewayClient {
 
     this.reconnectTimer = setTimeout(() => {
       this.doConnect().catch((error) => {
-        console.error("[RemoteGateway] Reconnection failed:", error);
+        this.logConnectionError("[RemoteGateway] Reconnection failed", error);
         if (
           this.config.maxReconnectAttempts !== 0 &&
           this.reconnectAttempts >= (this.config.maxReconnectAttempts || 10)
         ) {
-          this.setState("error", "Max reconnection attempts reached");
+          this.setState(
+            "error",
+            `Unable to reach remote gateway at ${this.config.url}: ${this.normalizeErrorMessage(error)}`,
+          );
         }
       });
     }, delay);
@@ -515,11 +551,22 @@ export class RemoteGatewayClient {
   }
 
   private setState(state: RemoteGatewayConnectionState, error?: string): void {
-    if (this.state !== state) {
-      this.state = state;
-      console.log(`[RemoteGateway] State: ${state}${error ? ` (${error})` : ""}`);
-      this.config.onStateChange?.(state, error);
+    const stateChanged = this.state !== state;
+    const errorChanged = state === "error" && Boolean(error) && error !== this.lastError;
+
+    if (state === "error") {
+      this.lastError = error ?? this.lastError;
+    } else if (state !== "reconnecting") {
+      this.lastError = null;
     }
+
+    if (!stateChanged && !errorChanged) {
+      return;
+    }
+
+    this.state = state;
+    console.log(`[RemoteGateway] State: ${state}${error ? ` (${error})` : ""}`);
+    this.config.onStateChange?.(state, error);
   }
 
   private clearReconnectTimer(): void {
