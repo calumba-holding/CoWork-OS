@@ -58,7 +58,7 @@ import {
 } from "./utils/attachment-content";
 import { sanitizeToolCallTextFromAssistant } from "../../shared/tool-call-text-sanitizer";
 import { formatProviderErrorForDisplay } from "../../shared/provider-error-format";
-import { Check as CheckIcon } from "lucide-react";
+import { ArrowLeft, Check as CheckIcon } from "lucide-react";
 import { InlineVideoPreview } from "./InlineVideoPreview";
 
 const CODE_PREVIEWS_EXPANDED_KEY = "cowork:codePreviewsExpanded";
@@ -266,6 +266,7 @@ import { getStepCompletionPreviewPath } from "../utils/step-document-preview";
 import {
   normalizeInlineLists,
   normalizeInlineHeadings,
+  unwrapMarkdownCodeBlocks,
 } from "../utils/markdown-inline-lists";
 
 // Mermaid diagram component — theme-aware init for reliable text visibility
@@ -1294,7 +1295,9 @@ export function cleanAssistantMessageForDisplay(message: string): string {
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
     .replace(/<tool_result>[\s\S]*?<\/tool_result>/gi, "")
     .trim();
-  return normalizeMarkdownForDisplay(normalizeInlineLists(sanitized));
+  return normalizeMarkdownForDisplay(
+    normalizeInlineLists(unwrapMarkdownCodeBlocks(sanitized)),
+  );
 }
 
 const buildMarkdownComponents = (options: {
@@ -2528,6 +2531,7 @@ interface MainContentProps {
   childTasks?: Task[];
   childEvents?: TaskEvent[];
   onSelectChildTask?: (taskId: string) => void;
+  onSelectTask?: (taskId: string) => void;
   onSendMessage: (message: string, images?: ImageAttachment[]) => void;
   onCreateTask?: (
     title: string,
@@ -2575,6 +2579,7 @@ export function MainContent({
   childTasks = [],
   childEvents: rawChildEvents = [],
   onSelectChildTask,
+  onSelectTask,
   onSendMessage,
   onCreateTask,
   onChangeWorkspace,
@@ -6568,6 +6573,17 @@ export function MainContent({
     <div className="main-content">
       {/* Header */}
       <div className="main-header">
+        {task?.parentTaskId && onSelectTask && (
+          <button
+            type="button"
+            className="main-header-back-btn"
+            onClick={() => onSelectTask(task.parentTaskId!)}
+            title="Back to team"
+            aria-label="Back to team"
+          >
+            <ArrowLeft size={16} strokeWidth={2} />
+          </button>
+        )}
         <div className="main-header-title" title={headerTooltip}>
           {headerTitle}
         </div>
