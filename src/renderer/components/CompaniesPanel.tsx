@@ -12,7 +12,7 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import { getEmojiIcon } from "../utils/emoji-icon-map";
+import { resolveTwinIcon } from "../utils/twin-icons";
 import type { AgentRoleData } from "../../electron/preload";
 import type {
   Company,
@@ -1240,7 +1240,7 @@ export function CompaniesPanel({
                           {role.icon && (
                             <span className="co-operator-icon">
                               {(() => {
-                                const Icon = getEmojiIcon(role.icon);
+                                const Icon = resolveTwinIcon(role.icon);
                                 return <Icon size={16} strokeWidth={2} />;
                               })()}
                             </span>
