@@ -38,6 +38,11 @@ export interface LLMProviderConfig {
   azureDeployment?: string;
   azureApiVersion?: string;
   azureReasoningEffort?: AzureReasoningEffort;
+  // Azure Anthropic-specific
+  azureAnthropicApiKey?: string;
+  azureAnthropicEndpoint?: string;
+  azureAnthropicDeployment?: string;
+  azureAnthropicApiVersion?: string;
   // Groq-specific
   groqApiKey?: string;
   groqBaseUrl?: string;
