@@ -48,6 +48,7 @@ describe("TaskExecutor provider refresh", () => {
     executor.logTag = "[Executor:test]";
     executor.getCumulativeInputTokens = vi.fn(() => 0);
     executor.getCumulativeOutputTokens = vi.fn(() => 0);
+    executor.getEffectiveExecutionMode = vi.fn(() => "execute");
 
     await executor.createMessageWithTimeout(
       {
@@ -117,6 +118,7 @@ describe("TaskExecutor provider refresh", () => {
     executor.logTag = "[Executor:test]";
     executor.getCumulativeInputTokens = vi.fn(() => 0);
     executor.getCumulativeOutputTokens = vi.fn(() => 0);
+    executor.getEffectiveExecutionMode = vi.fn(() => "execute");
 
     await executor.createMessageWithTimeout(
       {
@@ -143,5 +145,147 @@ describe("TaskExecutor provider refresh", () => {
     );
     expect(executor.provider).toBe(newProvider);
     expect(executor.modelId).toBe("qwen3.5:latest");
+  });
+
+  it("switches from the strong planning profile to the cheap execution profile before an LLM call", async () => {
+    const oldProvider = {
+      type: "openai",
+      createMessage: vi.fn(async () => ({ content: [], usage: undefined })),
+    };
+    const newProvider = {
+      type: "openai",
+      createMessage: vi.fn(async () => ({ content: [], usage: undefined })),
+    };
+
+    vi.spyOn(LLMProviderFactory, "resolveTaskModelSelection").mockReturnValue({
+      providerType: "openai",
+      modelId: "gpt-5.4-mini",
+      modelKey: "gpt-5.4-mini",
+      llmProfileUsed: "cheap",
+      resolvedModelKey: "gpt-5.4-mini",
+      modelSource: "profile_model",
+      warnings: [],
+    } as Any);
+    vi.spyOn(LLMProviderFactory, "createProvider").mockReturnValue(newProvider as Any);
+
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      id: "task-3",
+      title: "Build a simple app",
+      agentConfig: {
+        llmProfileHint: "strong",
+      },
+    };
+    executor.provider = oldProvider;
+    executor.modelId = "gpt-5.4";
+    executor.modelKey = "gpt-5.4";
+    executor.llmProfileUsed = "cheap";
+    executor.resolvedModelKey = "gpt-5.4";
+    executor.contextManager = new ContextManager("gpt-5.4");
+    executor.abortController = new AbortController();
+    executor.cancelled = false;
+    executor.taskCompleted = false;
+    executor.emitEvent = vi.fn();
+    executor.logTag = "[Executor:test]";
+    executor.getCumulativeInputTokens = vi.fn(() => 0);
+    executor.getCumulativeOutputTokens = vi.fn(() => 0);
+    executor.getEffectiveExecutionMode = vi.fn(() => "execute");
+
+    await executor.createMessageWithTimeout(
+      {
+        model: "gpt-5.4",
+        maxTokens: 64,
+        system: "test",
+        messages: [],
+      },
+      1000,
+      "Test operation",
+    );
+
+    expect(LLMProviderFactory.resolveTaskModelSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        llmProfileHint: "strong",
+      }),
+      expect.objectContaining({
+        forceProfile: "cheap",
+      }),
+    );
+    expect(oldProvider.createMessage).not.toHaveBeenCalled();
+    expect(newProvider.createMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "gpt-5.4-mini",
+      }),
+    );
+    expect(executor.modelId).toBe("gpt-5.4-mini");
+    expect(executor.llmProfileUsed).toBe("cheap");
+  });
+
+  it("only passes stream callbacks for Azure chat mode", async () => {
+    const makeExecutor = (providerType: string, executionMode: string) => {
+      const provider = {
+        type: providerType,
+        createMessage: vi.fn(async () => ({ content: [], usage: undefined })),
+      };
+
+      const executor = Object.create(TaskExecutor.prototype) as Any;
+      executor.task = {
+        id: "task-stream",
+        title: "Stream test",
+        agentConfig: {},
+      };
+      executor.provider = provider;
+      executor.modelId = "gpt-4o";
+      executor.abortController = new AbortController();
+      executor.cancelled = false;
+      executor.taskCompleted = false;
+      executor.emitEvent = vi.fn();
+      executor.logTag = "[Executor:test]";
+      executor.getCumulativeInputTokens = vi.fn(() => 0);
+      executor.getCumulativeOutputTokens = vi.fn(() => 0);
+      executor.refreshProviderIfSettingsChanged = vi.fn();
+      executor.getEffectiveExecutionMode = vi.fn().mockReturnValue(executionMode);
+      return { executor, provider };
+    };
+
+    const azureChat = makeExecutor("azure", "chat");
+    await azureChat.executor.createMessageWithTimeout(
+      {
+        model: "gpt-4o",
+        maxTokens: 32,
+        system: "test",
+        messages: [],
+      },
+      1000,
+      "Test operation",
+    );
+    expect((azureChat.provider.createMessage as Any).mock.calls[0][0].onStreamProgress).toEqual(
+      expect.any(Function),
+    );
+
+    const azureExecute = makeExecutor("azure", "execute");
+    await azureExecute.executor.createMessageWithTimeout(
+      {
+        model: "gpt-4o",
+        maxTokens: 32,
+        system: "test",
+        messages: [],
+      },
+      1000,
+      "Test operation",
+    );
+    expect((azureExecute.provider.createMessage as Any).mock.calls[0][0].onStreamProgress).toBeUndefined();
+
+    const openaiChat = makeExecutor("openai", "chat");
+    await openaiChat.executor.createMessageWithTimeout(
+      {
+        model: "gpt-4o",
+        maxTokens: 32,
+        system: "test",
+        messages: [],
+      },
+      1000,
+      "Test operation",
+    );
+    expect((openaiChat.provider.createMessage as Any).mock.calls[0][0].onStreamProgress).toBeUndefined();
   });
 });
