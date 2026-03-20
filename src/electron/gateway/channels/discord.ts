@@ -852,6 +852,169 @@ export class DiscordAdapter implements ChannelAdapter {
   }
 
   /**
+   * Fetch recent messages from a Discord channel (live API, not local log).
+   * Returns up to 100 messages, oldest-first.
+   */
+  async fetchMessages(
+    chatId: string,
+    limit = 100,
+  ): Promise<
+    Array<{
+      id: string;
+      content: string;
+      author: { id: string; name: string };
+      timestamp: string;
+      attachments?: Array<{
+        url: string;
+        fileName?: string;
+        contentType?: string;
+        size?: number;
+      }>;
+    }>
+  > {
+    if (!this.client || this._status !== "connected") {
+      throw new Error("Discord bot is not connected");
+    }
+
+    const channel = await this.client.channels.fetch(chatId);
+    if (!channel || !this.isTextBasedChannel(channel)) {
+      throw new Error("Invalid channel");
+    }
+
+    const capped = Math.min(Math.max(limit, 1), 100);
+    const messages = await (
+      channel as TextChannel | DMChannel | ThreadChannel
+    ).messages.fetch({ limit: capped });
+
+    const out: Array<{
+      id: string;
+      content: string;
+      author: { id: string; name: string };
+      timestamp: string;
+      attachments?: Array<{
+        url: string;
+        fileName?: string;
+        contentType?: string;
+        size?: number;
+      }>;
+    }> = [];
+
+    for (const msg of messages.values()) {
+      const attachments =
+        msg.attachments.size > 0
+          ? Array.from(msg.attachments.values()).map((a) => ({
+              url: a.url,
+              fileName: a.name ?? undefined,
+              contentType: a.contentType ?? undefined,
+              size: a.size ?? undefined,
+            }))
+          : undefined;
+
+      out.push({
+        id: msg.id,
+        content: msg.content || "",
+        author: {
+          id: msg.author.id,
+          name: msg.author.displayName || msg.author.username,
+        },
+        timestamp: msg.createdAt.toISOString(),
+        attachments,
+      });
+    }
+
+    // Discord returns newest-first; return oldest-first for consistency
+    out.reverse();
+    return out;
+  }
+
+  /**
+   * Download all attachments from a Discord message to the inbox directory.
+   * Returns local file paths.
+   */
+  async downloadAttachment(
+    chatId: string,
+    messageId: string,
+    inboxDir: string,
+  ): Promise<
+    Array<{
+      path: string;
+      fileName: string;
+      contentType?: string;
+      size?: number;
+    }>
+  > {
+    if (!this.client || this._status !== "connected") {
+      throw new Error("Discord bot is not connected");
+    }
+
+    const channel = await this.client.channels.fetch(chatId);
+    if (!channel || !this.isTextBasedChannel(channel)) {
+      throw new Error("Invalid channel");
+    }
+
+    const message = await (
+      channel as TextChannel | DMChannel | ThreadChannel
+    ).messages.fetch(messageId);
+
+    if (!message.attachments || message.attachments.size === 0) {
+      return [];
+    }
+
+    const results: Array<{
+      path: string;
+      fileName: string;
+      contentType?: string;
+      size?: number;
+    }> = [];
+
+    await fs.promises.mkdir(inboxDir, { recursive: true });
+
+    const MAX_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+
+    for (const att of message.attachments.values()) {
+      if (att.size != null && att.size > MAX_ATTACHMENT_SIZE_BYTES) {
+        throw new Error(
+          `Attachment too large (${Math.round(att.size / 1024 / 1024)}MB). Max ${MAX_ATTACHMENT_SIZE_BYTES / 1024 / 1024}MB.`,
+        );
+      }
+      const url = att.url;
+      const fileName = att.name || `attachment-${att.id}`;
+      const safeName = fileName.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 200);
+      const localPath = path.join(inboxDir, `${messageId}-${att.id}-${safeName}`);
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to download attachment: ${response.status} ${response.statusText}`);
+      }
+      const contentLength = response.headers.get("content-length");
+      if (contentLength) {
+        const size = Number.parseInt(contentLength, 10);
+        if (!Number.isNaN(size) && size > MAX_ATTACHMENT_SIZE_BYTES) {
+          throw new Error(
+            `Attachment too large (${Math.round(size / 1024 / 1024)}MB). Max ${MAX_ATTACHMENT_SIZE_BYTES / 1024 / 1024}MB.`,
+          );
+        }
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length > MAX_ATTACHMENT_SIZE_BYTES) {
+        throw new Error(
+          `Attachment too large (${Math.round(buffer.length / 1024 / 1024)}MB). Max ${MAX_ATTACHMENT_SIZE_BYTES / 1024 / 1024}MB.`,
+        );
+      }
+      await fs.promises.writeFile(localPath, buffer);
+
+      results.push({
+        path: localPath,
+        fileName: safeName,
+        contentType: att.contentType ?? undefined,
+        size: att.size ?? undefined,
+      });
+    }
+
+    return results;
+  }
+
+  /**
    * Send a poll (Discord native polls)
    */
   async sendPoll(chatId: string, poll: Poll): Promise<string> {
