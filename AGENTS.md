@@ -21,6 +21,12 @@ When a user reports a failure, error, or unexpected behavior:
 
 - Use `npm run dev` for normal development startup; it routes through the log-aware wrapper.
 - Use `npm run dev:start` only when you explicitly need the raw underlying startup command.
+- `npm run dev:start` auto-selects an available localhost dev-server port (starting from `COWORK_DEV_SERVER_PORT`, default `5173`) and exports `COWORK_DEV_SERVER_URL` for Electron startup.
 - Use `npm run dev:log` to force timestamped capture to `logs/dev-*.log` and `logs/dev-latest.log`.
 - Use `npm run dev:electron` (or the wrappers that call it) when starting Electron manually; it clears `ELECTRON_RUN_AS_NODE` to avoid renderer env pollution.
 - Avoid using `npm run dev:react` alone for desktop debugging; it skips Electron preload APIs and can produce misleading behavior.
+
+## Build Workflow
+
+- `npm run build` now includes `npm run build:healthkit-bridge` before Electron/daemon/connectors builds.
+- Use `npm run build:healthkit-bridge` to isolate HealthKit bridge build failures.
