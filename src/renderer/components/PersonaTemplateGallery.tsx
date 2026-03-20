@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { PersonaTemplateCard } from "./PersonaTemplateCard";
+import { resolveTwinIcon } from "../utils/twin-icons";
 import type { PersonaTemplateData } from "./PersonaTemplateCard";
 import type { AgentRoleData } from "../../electron/preload";
 
@@ -259,9 +260,12 @@ export function PersonaTemplateGallery({
         {activationState && (
           <div className="pt-activation-overlay" onClick={() => setActivationState(null)}>
             <div className="pt-activation-dialog" onClick={(e) => e.stopPropagation()}>
-              <h3>
-                <span style={{ fontSize: "1.5em" }}>{activationState.customIcon}</span> Activate{" "}
-                {activationState.template.name}
+              <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {(() => {
+                  const Icon = resolveTwinIcon(activationState.customIcon);
+                  return <Icon size={24} strokeWidth={2} />;
+                })()}
+                Activate {activationState.template.name}
               </h3>
               {companyName ? (
                 <p className="pt-activation-subtitle">
