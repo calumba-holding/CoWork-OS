@@ -1,9 +1,12 @@
 export type WorkspaceNeed = "none" | "new_ok" | "ambiguous" | "needs_existing";
 
 type WorkspaceSignals = {
+  hasEntries: boolean;
   hasProjectMarkers: boolean;
   hasCodeFiles: boolean;
   hasAppDirs: boolean;
+  /** True when readdirSync threw (permission denied, not a directory, etc.) */
+  readFailed?: boolean;
 };
 
 type WorkspaceLike = {
@@ -69,6 +72,18 @@ export function preflightWorkspaceCheck<W extends WorkspaceLike>(opts: {
   }
 
   if (!isTemp && workspaceNeed === "needs_existing" && !looksLikeProject) {
+    if (!signals.hasEntries) {
+      if (signals.readFailed) {
+        opts.pauseForUserInput(
+          "I couldn't read the workspace directory (permission denied or invalid path). " +
+            "Please check the folder path and permissions, or select a different workspace.",
+          "workspace_read_failed",
+        );
+        return true;
+      }
+      return false;
+    }
+
     if (opts.tryAutoSwitchToPreferredWorkspaceForAmbiguousTask("workspace_mismatch_auto_switch")) {
       return false;
     }
@@ -104,6 +119,7 @@ export function tryAutoSwitchToPreferredWorkspaceForAmbiguousTask<W extends Work
     }
 
     const preferredSignals = opts.getWorkspaceSignalsForPath(preferred.path);
+    if (preferredSignals.readFailed) return false;
     const preferredLooksLikeProject =
       preferredSignals.hasProjectMarkers ||
       preferredSignals.hasCodeFiles ||
