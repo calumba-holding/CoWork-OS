@@ -194,6 +194,25 @@ describe("toOpenAICompatibleMessages", () => {
     expect(result[0].content).not.toContain("image_url");
   });
 
+  it("skips orphaned tool_result when preceding message has no tool_calls (compaction edge case)", () => {
+    // After compaction, a user message with tool_result can end up without its preceding
+    // assistant (tool_use). OpenAI/Azure reject "tool" messages that don't follow assistant
+    // with tool_calls. We must skip orphaned tool_result blocks.
+    const input = [
+      { role: "user" as const, content: "task context" },
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "call_1", content: "result" }],
+      },
+    ];
+
+    const result = toOpenAICompatibleMessages(input);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ role: "user", content: "task context" });
+    expect(result.some((m) => m.role === "tool")).toBe(false);
+  });
+
   it("omits image payload when provider does not support images", () => {
     const input = [
       {
