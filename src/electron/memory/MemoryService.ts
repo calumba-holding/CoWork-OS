@@ -67,6 +67,8 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 // Compression delay between items (avoid rate limits)
 const COMPRESSION_DELAY_MS = 200;
+const COMPRESSION_RETRY_BASE_DELAY_MS = 5_000;
+const MAX_COMPRESSION_RETRIES = 3;
 const MAX_TEXT_IMPORT_ENTRIES = 3000;
 const MAX_TEXT_IMPORT_ENTRY_CHARS = 12000;
 const PROMPT_RECALL_IGNORE_MARKER = "[cowork:prompt_recall=ignore]";
@@ -91,6 +93,7 @@ export class MemoryService {
   private static embeddingBackfillInProgress = new Set<string>();
   private static initialized = false;
   private static compressionQueue: string[] = [];
+  private static compressionRetryCounts = new Map<string, number>();
   private static compressionInProgress = false;
   private static compressionPauseCount = 0;
   private static sideChannelPolicyDepth = 0;
@@ -1099,6 +1102,7 @@ export class MemoryService {
           break;
         }
         await this.compressMemory(memoryId);
+        this.compressionRetryCounts.delete(memoryId);
         // Small delay to avoid overwhelming the LLM
         await new Promise((resolve) => setTimeout(resolve, COMPRESSION_DELAY_MS));
       }
@@ -1178,7 +1182,35 @@ Summary:`,
     } catch (error) {
       // Log but don't fail - compression is optional enhancement
       console.warn("[MemoryService] Compression failed for memory:", memoryId, error);
+      const retryable = (error as Any)?.retryable === true;
+      if (retryable) {
+        this.scheduleCompressionRetry(memoryId);
+      } else {
+        this.compressionRetryCounts.delete(memoryId);
+      }
     }
+  }
+
+  private static scheduleCompressionRetry(memoryId: string): void {
+    const attempts = (this.compressionRetryCounts.get(memoryId) || 0) + 1;
+    if (attempts > MAX_COMPRESSION_RETRIES) {
+      this.compressionRetryCounts.delete(memoryId);
+      console.warn(
+        `[MemoryService] Compression retry limit reached for memory ${memoryId}; giving up.`,
+      );
+      return;
+    }
+
+    this.compressionRetryCounts.set(memoryId, attempts);
+    const delayMs = COMPRESSION_RETRY_BASE_DELAY_MS * 2 ** (attempts - 1);
+    setTimeout(() => {
+      if (!this.compressionQueue.includes(memoryId)) {
+        this.compressionQueue.push(memoryId);
+      }
+      if (!this.isCompressionPaused()) {
+        void this.processCompressionQueue();
+      }
+    }, delayMs);
   }
 
   /**
