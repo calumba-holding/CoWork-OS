@@ -71,15 +71,24 @@ export class StdioTransport extends EventEmitter implements MCPTransport {
           ...env,
         };
 
+        // Substitute ${VAR} in args with env values (for connectors that require CLI args)
+        const resolvedArgs = args.map((arg) => {
+          if (typeof arg === "string" && /^\$\{[^}]+\}$/.test(arg)) {
+            const varName = arg.slice(2, -1);
+            return processEnv[varName] ?? arg;
+          }
+          return arg;
+        });
+
         // When launching via Electron's executable with --runAsNode, force pure
         // Node mode so macOS doesn't treat child connector processes as GUI apps.
-        if (command === process.execPath && args.includes("--runAsNode")) {
+        if (command === process.execPath && resolvedArgs.includes("--runAsNode")) {
           processEnv.ELECTRON_RUN_AS_NODE = "1";
         }
 
-        logger.debug(`Spawning: ${command} ${args.join(" ")}`);
+        logger.debug(`Spawning: ${command} ${resolvedArgs.join(" ")}`);
 
-        this.process = spawn(command, args, {
+        this.process = spawn(command, resolvedArgs, {
           cwd: cwd || process.cwd(),
           env: processEnv,
           stdio: ["pipe", "pipe", "pipe"],
