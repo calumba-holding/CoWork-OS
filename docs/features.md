@@ -6,7 +6,7 @@
 
 - **WhatsApp**: QR code pairing, self-chat mode, markdown support
 - **Telegram**: Bot commands, streaming responses, workspace selection
-- **Discord**: Slash commands, DM support, guild integration
+- **Discord**: Slash commands, DM support, guild integration, embeds/polls/select menus, live message fetch and attachment download
 - **Slack**: Socket Mode, channel mentions, file uploads
 - **Microsoft Teams**: Bot Framework SDK, DM/channel mentions, adaptive cards
 - **Google Chat**: Service account auth, spaces/DMs, threaded conversations
@@ -28,7 +28,8 @@
 - **Task-Based Workflow**: Multi-step execution with plan-execute-observe loops
 - **Live Terminal**: Shell commands run in a real-time terminal view — see output as it happens, stop execution, or provide interactive input (e.g. `y`/`n` prompts)
 - **Dynamic Re-Planning**: Agent can revise its plan mid-execution
-- **139 Built-in Skills**: GitHub, Slack, Notion, Spotify, Apple Notes, Unity, Unreal, Terraform, Kubernetes, financial analysis, and more
+- **139+ Built-in Skills**: GitHub, Slack, Notion, Spotify, Apple Notes, Unity, Unreal, Terraform, Kubernetes, financial analysis, and more. Optional CLI-based skills (e.g. [aurl](skills/aurl.md) for OpenAPI/GraphQL APIs) appear when the binary is installed.
+- **Chat Mode**: Direct LLM chat with no tools, no step timeline, same-session follow-ups, chat-only streaming for supported providers, and a fixed high output budget for explicit `executionMode: "chat"` sessions. See [Chat Mode](chat-mode.md).
 - **Document Creation**: Excel, Word, PDF, PowerPoint with professional formatting
 - **Persistent Memory**: Cross-session context with privacy-aware observation capture
 - **Knowledge Graph**: SQLite-backed entity/relationship memory with FTS5 search, graph traversal, and auto-extraction
@@ -142,20 +143,47 @@ Reliability is built as a continuous loop: capture failures -> replay determinis
 
 See [Reliability Flywheel](reliability-flywheel.md) for architecture, schema, scripts, IPC endpoints, CI workflows, and operational commands.
 
-### Per-Task Execution Modes
+### Mode Picker
 
-Each task can be launched with one of four modes:
+The UI exposes a small set of execution modes. Chat mode is separate from task execution and uses the direct conversation path.
 
-| Mode | Toggle | Behavior |
-|------|--------|----------|
-| **Autonomous** | Autonomous ON/OFF | Auto-approves all gated actions (shell commands, file deletions, etc.) so the agent runs without pauses. Disables user input prompts. |
-| **Collaborative** | Collab ON/OFF | Auto-creates an ephemeral team of agents that analyze the task from multiple perspectives, then a leader synthesizes the results. Phases: dispatch → think → synthesize → complete. |
-| **Multi-LLM** | Multi-LLM ON/OFF | Sends the same task to multiple LLM providers/models in parallel. A designated judge model synthesizes the best result. Requires 2+ providers configured. |
-| **Think With Me** | Think toggle | Socratic brainstorming mode — agent asks follow-up questions and explores trade-offs without executing tools. Read-only tools only. |
+| Mode | Behavior |
+|------|----------|
+| **Chat** | Direct assistant conversation, no tools, no step timeline, same-session follow-ups, and chat-only streaming for supported providers. |
+| **Execute** | Full task execution path with tools, planning, and artifacts. |
+| **Plan** | Structured planning path; can pause for `request_user_input` and is intended for non-mutating planning/coordination. |
+| **Analyze** | Read-only analysis path that stays evidence-focused and blocks mutating tools. |
+| **Verified** | Execute-like path that adds external verification checks after steps before completion. |
 
-These modes are mutually exclusive — only one can be active per task. All four are toggled in the task creation UI.
+These modes are mutually exclusive. Chat is the conversational path; the others are task execution modes.
+
+> **Note:** Verified mode is strongest when you want execution plus an explicit verification gate. Plan mode shows a confirmation dialog only for structured input requests, not because it bypasses approvals.
+
+### Task Toggles
+
+The task creation UI also includes higher-level toggles that change how tasks are orchestrated:
+
+| Toggle | Behavior |
+|--------|----------|
+| **Autonomous** | Auto-approves all gated actions (shell commands, file deletions, etc.) so the agent runs without pauses. Disables user input prompts. |
+| **Collaborative** | Auto-creates an ephemeral team of agents that analyze the task from multiple perspectives, then a leader synthesizes the results. Phases: dispatch → think → synthesize → complete. |
+| **Multi-LLM** | Sends the same task to multiple LLM providers/models in parallel. A designated judge model synthesizes the best result. Requires 2+ providers configured. |
+| **Think With Me** | Socratic brainstorming mode — agent asks follow-up questions and explores trade-offs without executing tools. Read-only tools only. |
 
 > **Note:** Autonomous mode shows a confirmation dialog before enabling, since it bypasses all approval prompts.
+
+### Chat Mode
+
+Chat mode is the direct assistant conversation surface. It is designed for normal Q&A, not task execution.
+
+- **No tools**: the assistant does not plan or call tools in chat mode
+- **No step timeline**: chat turns do not render execution steps
+- **Same-session follow-ups**: later questions stay in the current conversation thread
+- **Explicit only**: chat behavior is enabled only when `executionMode` is explicitly set to `chat`
+- **High output budget**: explicit chat sessions use a fixed 48K target output cap, clamped to the active provider budget
+- **History strategy**: long chat sessions use a summary-plus-recent-window prompt strategy with cached summary reuse
+
+See [Chat Mode](chat-mode.md) for the full behavior contract.
 
 When the agent is operating in plan-mode execution, it can also use `request_user_input` to pause for structured multiple-choice decisions. Responses are persisted locally and can be submitted from either the desktop UI or the Control Plane web dashboard.
 
@@ -206,7 +234,7 @@ Role-specific bundles that group skills, agent roles, connectors, and slash comm
 - **Plugin Store**: In-app marketplace for discovering, installing, and creating packs (from Git repos, URLs, or scaffold)
 - **Remote Pack Registry**: Community-contributed packs catalog with search and category filtering
 - **Extensible**: Create custom packs with JSON manifests in `~/.cowork/extensions/`
-- **Active Context sidebar**: Always-visible right-panel section showing connected MCP connectors with branded Lucide icons (36 known services mapped) and enabled skills, with scrollable sub-sections and 30-second auto-refresh
+- **Active Context sidebar**: Always-visible right-panel section showing connected MCP connectors with branded Lucide icons (44 connectors supported) and enabled skills, with scrollable sub-sections and 30-second auto-refresh
 - **Skill conflict detection**: Warns when multiple packs register the same skill ID, preventing silent overwrites
 - **Admin Policies**: Organization-level controls for allowed/blocked/required packs, installation permissions, and agent limits
 
@@ -1027,23 +1055,59 @@ See [Remote Access](remote-access.md) for details.
 
 ## Enterprise MCP Connectors
 
-Pre-built connectors for enterprise integrations. Install from **Settings > MCP Servers > Browse Registry**.
+**44 pre-built connectors** for enterprise integrations. Install from **Settings > Connectors > Browse Registry**.
 
-| Connector | Type | Tools |
+| Connector | Type | Notes |
 |-----------|------|-------|
-| **Salesforce** | CRM | health, list_objects, describe, get, search, create, update |
-| **Jira** | Issue Tracking | health, list_projects, get, search, create, update |
-| **HubSpot** | CRM | health, list, get, search, create, update contacts |
-| **Zendesk** | Support | health, list, get, search, create, update tickets |
-| **ServiceNow** | ITSM | health, list, get, search, create, update incidents |
-| **Linear** | Product | health, list, get, search, create, update issues |
-| **Asana** | Work Management | health, list, get, search, create, update tasks |
-| **Okta** | Identity | health, list, get, search, create, update users |
-| **Resend** | Email | health, send, list/create/delete webhooks |
-| **Discord** | Community | 19 tools: guilds, channels, messages, threads, roles, reactions, webhooks, members |
-| **Google Workspace** | Productivity (OAuth) | Calendar, Drive, Gmail with shared OAuth and PKCE flow |
+| **Salesforce** | CRM | OAuth, health, list/search/create/update |
+| **Jira** | Issue Tracking | OAuth, health, projects, issues |
+| **HubSpot** | CRM | OAuth, contacts, companies, deals |
+| **Zendesk** | Support | OAuth, tickets, search |
+| **ServiceNow** | ITSM | health, list, get, search, create, update |
+| **Linear** | Product | health, projects, issues |
+| **Asana** | Work Management | health, projects, tasks |
+| **Okta** | Identity | health, users, groups |
+| **Resend** | Email | send, webhooks |
+| **Discord** | Community | 19 tools: guilds, channels, messages, roles |
+| **Google Workspace** | Productivity (OAuth) | Calendar, Drive, Gmail |
+| **Figma** | Design | get file, export |
+| **Vercel** | Deploy | projects, deployments |
+| **Monday** | Work Management | boards, items |
+| **Miro** | Whiteboard | boards, content |
+| **Supabase** | Database | query, tables, auth |
+| **Excalidraw** | Diagrams | create, update elements |
+| **Stripe** | Payments | customers, payments, products |
+| **Hugging Face** | ML | models, inference, Gradio |
+| **Ahrefs** | SEO | search, metrics |
+| **Mermaid Chart** | Diagrams | validate, render SVG |
+| **Cloudflare** | Infrastructure | Workers, KV, D1, R2 |
+| **Make** | Automation | scenarios, modules |
+| **Clinical Trials** | Legal/Health | search studies |
+| **Smartsheet** | Spreadsheet | sheets, rows |
+| **Netlify** | Deploy | sites, deploy |
+| **Airtable** | Database | bases, records |
+| **PayPal** | Payments | invoices, orders |
+| **Square** | Payments | transactions, API |
+| **Attio** | CRM | companies, notes |
+| **Honeycomb** | Observability | datasets, queries |
+| **Cal.com** | Scheduling | bookings, event types |
+| **Cloudinary** | Media | upload, find assets |
+| **Tavily** | Web Search | search, extract, crawl |
+| **tldraw** | Diagrams | read/write .tldr canvases |
+| **Amplitude** | Analytics | track events, users |
+| **Clerk** | Auth | users, sessions, invitations |
+| **Mem** | Notes | mem_it, notes, collections |
+| **Grafana** | Monitoring | dashboards, datasources |
+| **Mailtrap** | Email | send, templates, sandbox |
+| **Socket** | Security | dependency scores |
+| **Metabase** | Analytics | dashboards, queries |
+| **Shadcn UI** | Components | list, search, install |
+| **GrowthBook** | Feature Flags | flags, experiments |
+| **Drafts** | Notes (macOS) | create, search drafts |
+| **Fantastical** | Calendar (macOS) | events, schedule |
+| **Tomba** | Email | finder, verifier, domain search |
 
-GitHub and Notion now prefer native CoWork integrations first, with MCP used only as a fallback path when needed. See [Enterprise Connectors](enterprise-connectors.md) for the current shipped connector contract.
+GitHub and Notion prefer native CoWork integrations first, with MCP as fallback. See [Enterprise Connectors](enterprise-connectors.md) for the full catalog and contract.
 
 ---
 
