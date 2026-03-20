@@ -17,6 +17,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/getting-started' },
       { text: 'Platform Updates', link: '/integration-skill-bootstrap-lifecycle' },
+      { text: 'Release Notes', link: '/release-notes-0.5.11' },
       { text: 'Architecture', link: '/architecture' },
       { text: 'Security', link: '/security/' },
       { text: 'GitHub', link: 'https://github.com/CoWork-OS/CoWork-OS' },
@@ -70,6 +71,7 @@ export default defineConfig({
         items: [
           { text: 'Channel Integrations', link: '/channels' },
           { text: 'Channel Comparison', link: '/channel-comparison' },
+          { text: 'Release Notes 0.5.11', link: '/release-notes-0.5.11' },
           { text: 'aurl skill (OpenAPI/GraphQL)', link: '/skills/aurl' },
           { text: 'Use Cases', link: '/use-cases' },
           { text: 'Simplify & Batch', link: '/simplify-batch' },

@@ -7230,6 +7230,12 @@ a,
   gap: 12px;
 }
 
+.input-status-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .input-status-workspace {
   display: flex;
   align-items: center;
@@ -7246,6 +7252,44 @@ a,
 
 .input-status-workspace:hover {
   color: var(--color-text);
+}
+
+.input-status-shell {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.input-status-shell:hover {
+  color: var(--color-text);
+}
+
+.input-status-shell.enabled {
+  color: var(--color-text);
+}
+
+.input-status-shell .goal-mode-switch-track {
+  width: 20px;
+  height: 12px;
+}
+
+.input-status-shell .goal-mode-switch-thumb {
+  width: 8px;
+  height: 8px;
+  top: 1px;
+  left: 1px;
+}
+
+.input-status-shell .goal-mode-switch-track.on .goal-mode-switch-thumb {
+  left: 9px;
 }
 
 .input-status-workspace-path {
@@ -10324,6 +10368,11 @@ button {
 
 .shell-toggle.enabled:hover {
   color: var(--color-text-primary);
+}
+
+.shell-toggle-inline {
+  padding: 4px 8px;
+  font-size: 11px;
 }
 
 .shell-toggle svg {

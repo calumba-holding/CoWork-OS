@@ -1,4 +1,14 @@
-import { memo, useState, useEffect, useRef, useCallback, useMemo, Fragment, Children } from "react";
+import {
+  memo,
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  Fragment,
+  Children,
+  startTransition,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -2190,8 +2200,6 @@ const TASK_DOMAIN_ICON: Record<TaskDomain, LucideIcon> = {
   writing: PenLine,
   general: LayoutGrid,
 };
-type OverflowSubmenu = "mode" | "domain";
-
 type SettingsTab =
   | "appearance"
   | "llm"
@@ -2617,6 +2625,943 @@ interface CommandOutputSession {
   startTimestamp: number; // When the command started, for positioning in timeline
   cwd?: string; // Working directory where the command runs
 }
+
+const STEP_WINDOW_SIZE = 7;
+
+const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
+  const agentContext = props.agentContext as AgentContext;
+  const childEvents = props.childEvents as TaskEvent[];
+  const childTasks = props.childTasks as Task[];
+  const collaborativeRun = props.collaborativeRun as AgentTeamRun | null;
+  const codePreviewsExpanded = props.codePreviewsExpanded as boolean;
+  const commandOutputSessionsByInsertIndex = props.commandOutputSessionsByInsertIndex as Map<
+    number,
+    CommandOutputSession[]
+  >;
+  const currentStep = props.currentStep as { description: string } | null;
+  const eventTitleMarkdownComponents = props.eventTitleMarkdownComponents as any;
+  const events = props.events as TaskEvent[];
+  const expandedActionBlocks = props.expandedActionBlocks as Set<string>;
+  const handleCanvasClose = props.handleCanvasClose as (sessionId: string) => void;
+  const handleMessageFeedback = props.handleMessageFeedback as (...args: any[]) => void;
+  const handleStepFeedback = props.handleStepFeedback as (...args: any[]) => void;
+  const isChatTask = props.isChatTask as boolean;
+  const isTaskWorking = props.isTaskWorking as boolean;
+  const lastAssistantMessage = props.lastAssistantMessage as TaskEvent | null;
+  const initialPromptEventId = props.initialPromptEventId as string | null;
+  const markdownComponents = props.markdownComponents as any;
+  const messageFeedbackMap = props.messageFeedbackMap as Map<string, string>;
+  const onOpenBrowserView = props.onOpenBrowserView as ((url?: string) => void) | undefined;
+  const onSelectChildTask = props.onSelectChildTask as ((taskId: string) => void) | undefined;
+  const onSelectTask = props.onSelectTask as ((taskId: string) => void) | undefined;
+  const onViewTaskOutputs = props.onViewTaskOutputs as
+    | ((taskId: string, primaryOutputPath?: string) => void)
+    | undefined;
+  const parallelGroupsByAnchorEventId = props.parallelGroupsByAnchorEventId as Map<string, any>;
+  const rejectMenuOpenFor = props.rejectMenuOpenFor as string | null;
+  const rejectMenuRef = props.rejectMenuRef as React.RefObject<HTMLDivElement | null>;
+  const renderCommandOutputs = props.renderCommandOutputs as (sessions?: CommandOutputSession[]) => React.ReactNode;
+  const setRejectMenuOpenFor = props.setRejectMenuOpenFor as React.Dispatch<
+    React.SetStateAction<string | null>
+  >;
+  const setExpandedActionBlocks = props.setExpandedActionBlocks as React.Dispatch<
+    React.SetStateAction<Set<string>>
+  >;
+  const setShowAllActionBlocks = props.setShowAllActionBlocks as React.Dispatch<
+    React.SetStateAction<Set<string>>
+  >;
+  const setStepFeedbackOpen = props.setStepFeedbackOpen as React.Dispatch<
+    React.SetStateAction<boolean>
+  >;
+  const setStepFeedbackText = props.setStepFeedbackText as React.Dispatch<
+    React.SetStateAction<string>
+  >;
+  const setToggledEvents = props.setToggledEvents as React.Dispatch<React.SetStateAction<Set<string>>>;
+  const setViewerFilePath = props.setViewerFilePath as React.Dispatch<React.SetStateAction<string | null>>;
+  const formatTime = props.formatTime as (timestamp: number) => string;
+  const shouldRenderTimelineEventInStepFeed = props.shouldRenderTimelineEventInStepFeed as (
+    event: TaskEvent,
+  ) => boolean;
+  const hasEventDetails = props.hasEventDetails as (event: TaskEvent) => boolean;
+  const isEventExpanded = props.isEventExpanded as (event: TaskEvent) => boolean;
+  const showAllActionBlocks = props.showAllActionBlocks as Set<string>;
+  const showSteps = props.showSteps as boolean;
+  const stepFeedbackOpen = props.stepFeedbackOpen as boolean;
+  const stepFeedbackSending = props.stepFeedbackSending as boolean;
+  const stepFeedbackText = props.stepFeedbackText as string;
+  const suppressedParallelEventIds = props.suppressedParallelEventIds as Set<string>;
+  const task = props.task as Task;
+  const timelineItems = props.timelineItems as Array<any>;
+  const timelineRef = props.timelineRef as React.RefObject<HTMLDivElement | null>;
+  const toggledEvents = props.toggledEvents as Set<string>;
+  const toggleEventExpanded = props.toggleEventExpanded as (eventId: string) => void;
+  const verboseSteps = props.verboseSteps as boolean;
+  const voiceEnabled = props.voiceEnabled as boolean;
+  const wrappingUp = props.wrappingUp as boolean;
+  const workspace = props.workspace as Workspace | null;
+
+  const stepFeedTimelineIndexPosition = new Map<number, number>();
+  let stepFeedEventCount = 0;
+  timelineItems.forEach((timelineItem, timelineIndex) => {
+    if (isChatTask && timelineItem.kind === "action_block") {
+      return;
+    }
+    if (timelineItem.kind === "action_block") {
+      stepFeedTimelineIndexPosition.set(timelineIndex, stepFeedEventCount);
+      stepFeedEventCount += 1;
+      return;
+    }
+    if (timelineItem.kind !== "event") return;
+    const event = timelineItem.event;
+    const eventId = event.id;
+    if (suppressedParallelEventIds.has(eventId) && !parallelGroupsByAnchorEventId.has(eventId)) {
+      return;
+    }
+    if (
+      !parallelGroupsByAnchorEventId.has(eventId) &&
+      !shouldRenderTimelineEventInStepFeed(event)
+    ) {
+      return;
+    }
+    stepFeedTimelineIndexPosition.set(timelineIndex, stepFeedEventCount);
+    stepFeedEventCount += 1;
+  });
+
+  const conversationFlow = useMemo(
+    () => (
+      <>
+          {/* Conversation Flow - renders all events in order; show when we have events OR collaborative run with child tasks */}
+          {(events.length > 0 || (collaborativeRun && childTasks.length > 0)) && (
+            <div className="conversation-flow" ref={timelineRef}>
+              {/* Render command outputs that started before any visible event */}
+              {renderCommandOutputs(commandOutputSessionsByInsertIndex.get(-1))}
+              {timelineItems.map((item, timelineIndex) => {
+                if (item.kind === "canvas") {
+                  return (
+                    <CanvasPreview
+                      key={item.session.id}
+                      session={item.session}
+                      onClose={() => handleCanvasClose(item.session.id)}
+                      forceSnapshot={item.forceSnapshot}
+                      onOpenBrowser={onOpenBrowserView}
+                    />
+                  );
+                }
+
+                if (item.kind === "cli-agent-frame") {
+                  const agentType = resolveCliAgentType(item.childTask, item.childTaskEvents) || "codex-cli";
+                  return (
+                    <CliAgentFrame
+                      key={`cli-frame-${item.childTask.id}`}
+                      task={item.childTask}
+                      events={item.childTaskEvents}
+                      agentType={agentType}
+                      defaultExpanded={item.childTask.status === "executing"}
+                    />
+                  );
+                }
+
+                if (item.kind === "dispatched-agents") {
+                  // Filter out CLI agent tasks — they render in their own frames above
+                  const nonCliChildTasks = childTasks.filter((t) => !isCliAgentChildTask(t));
+                  const panelTasks = nonCliChildTasks.length > 0 ? nonCliChildTasks : childTasks;
+                  const panelEvents = childEvents.filter((e) =>
+                    panelTasks.some((t) => t.id === e.taskId),
+                  );
+                  return (
+                    <div key="dispatched-agents" className="collaborative-thoughts-main">
+                      {collaborativeRun ? (
+                        <CollaborativeSummaryPanel
+                          collaborativeRun={collaborativeRun}
+                          childTasks={panelTasks}
+                          childEvents={panelEvents}
+                          userPrompt={task?.prompt || task?.userPrompt}
+                          onSelectChildTask={onSelectChildTask}
+                          mainTaskCompleted={
+                            !!task &&
+                            ["completed", "failed", "cancelled"].includes(task.status)
+                          }
+                          isWrappingUp={wrappingUp}
+                        />
+                      ) : (
+                        <DispatchedAgentsPanel
+                          parentTaskId={task!.id}
+                          childTasks={panelTasks}
+                          childEvents={panelEvents}
+                          onSelectChildTask={onSelectChildTask}
+                        />
+                      )}
+                    </div>
+                  );
+                }
+
+                if (item.kind === "action_block") {
+                  if (isChatTask) return null;
+                  const isBlockOnlyMinimalCompletions =
+                    !verboseSteps &&
+                    item.events.length > 0 &&
+                    item.events.every((ev: TaskEvent) => {
+                      const t = getEffectiveTaskEventType(ev);
+                      const out = resolveTaskOutputSummaryFromCompletionEvent(ev, events);
+                      return t === "task_completed" && !hasTaskOutputs(out);
+                    });
+                  if (isBlockOnlyMinimalCompletions) {
+                    const indicatorPosition = stepFeedTimelineIndexPosition.get(timelineIndex);
+                    const showConnectorAbove =
+                      typeof indicatorPosition === "number" && indicatorPosition > 0;
+                    const showConnectorBelow =
+                      typeof indicatorPosition === "number" &&
+                      indicatorPosition < stepFeedEventCount - 1;
+                    const commandOutputsForBlock = item.eventIndices.flatMap((ei: number) =>
+                      commandOutputSessionsByInsertIndex.get(ei) ?? [],
+                    );
+                    return (
+                      <Fragment key={item.blockId}>
+                        {item.events.map((event: TaskEvent, idx: number) => {
+                          const eventIndex = item.eventIndices[idx];
+                          if (!shouldRenderTimelineEventInStepFeed(event)) return null;
+                          const isLastChild = idx === item.events.length - 1;
+                          const showChildConnectorAbove = idx === 0 ? showConnectorAbove : true;
+                          const showChildConnectorBelow = !isLastChild || showConnectorBelow;
+                          return (
+                            <div
+                              key={event.id || `event-${eventIndex}`}
+                              className="timeline-event completion-compact"
+                            >
+                              <div className="event-indicator">
+                                {showChildConnectorAbove && (
+                                  <span className="event-connector event-connector-above" aria-hidden="true" />
+                                )}
+                                <span
+                                  className="event-indicator-icon tone-success"
+                                  aria-hidden="true"
+                                  title="Done"
+                                >
+                                  <CheckIcon size={12} strokeWidth={2} />
+                                </span>
+                                {showChildConnectorBelow && (
+                                  <span className="event-connector event-connector-below" aria-hidden="true" />
+                                )}
+                              </div>
+                              <div className="event-content completion-compact-content">
+                                <span className="completion-compact-label">Done</span>
+                                <span className="event-time-muted">{formatTime(event.timestamp)}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {renderCommandOutputs(commandOutputsForBlock)}
+                      </Fragment>
+                    );
+                  }
+                  const lastActionBlockIndex = (() => {
+                    for (let i = timelineItems.length - 1; i >= 0; i--) {
+                      if (timelineItems[i].kind === "action_block") return i;
+                    }
+                    return -1;
+                  })();
+                  const isActive = timelineIndex === lastActionBlockIndex && isTaskWorking;
+                  const { summary, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
+                    item.events,
+                    events,
+                  );
+                  const expanded =
+                    isActive || expandedActionBlocks.has(item.blockId);
+                  const onToggle = () => {
+                    setExpandedActionBlocks((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(item.blockId)) next.delete(item.blockId);
+                      else next.add(item.blockId);
+                      return next;
+                    });
+                  };
+                  const indicatorPosition = stepFeedTimelineIndexPosition.get(timelineIndex);
+                  const showConnectorAbove =
+                    typeof indicatorPosition === "number" && indicatorPosition > 0;
+                  const showConnectorBelow =
+                    typeof indicatorPosition === "number" &&
+                    indicatorPosition < stepFeedEventCount - 1;
+                  const commandOutputsForBlock = item.eventIndices.flatMap((ei: number) =>
+                    commandOutputSessionsByInsertIndex.get(ei) ?? [],
+                  );
+                  const isBlockShowAll = showAllActionBlocks.has(item.blockId);
+                  // Count only truly renderable events to avoid slicing on non-renderable raw events
+                  const renderableRawIndices: number[] = [];
+                  for (let ri = 0; ri < item.events.length; ri++) {
+                    const ev = item.events[ri];
+                    if (suppressedParallelEventIds.has(ev.id) && !parallelGroupsByAnchorEventId.has(ev.id)) continue;
+                    if (!parallelGroupsByAnchorEventId.has(ev.id) && !shouldRenderTimelineEventInStepFeed(ev)) continue;
+                    renderableRawIndices.push(ri);
+                  }
+                  const renderableCount = renderableRawIndices.length;
+                  const needsWindow = !isBlockShowAll && renderableCount > STEP_WINDOW_SIZE;
+                  const hiddenBlockEventCount = needsWindow ? renderableCount - STEP_WINDOW_SIZE : 0;
+                  let visibleBlockEvents: typeof item.events;
+                  let visibleBlockEventIndices: typeof item.eventIndices;
+                  if (needsWindow) {
+                    const firstVisibleRawIdx = renderableRawIndices[renderableCount - STEP_WINDOW_SIZE];
+                    visibleBlockEvents = item.events.slice(firstVisibleRawIdx);
+                    visibleBlockEventIndices = item.eventIndices.slice(firstVisibleRawIdx);
+                  } else {
+                    visibleBlockEvents = item.events;
+                    visibleBlockEventIndices = item.eventIndices;
+                  }
+                  const lastRenderableEvent = [...item.events].reverse().find((ev: TaskEvent) => {
+                    if (suppressedParallelEventIds.has(ev.id) && !parallelGroupsByAnchorEventId.has(ev.id)) return false;
+                    return parallelGroupsByAnchorEventId.has(ev.id) || shouldRenderTimelineEventInStepFeed(ev);
+                  });
+                  const lastStepLabelRaw = lastRenderableEvent
+                    ? renderEventTitle(lastRenderableEvent, workspace?.path, setViewerFilePath, agentContext, { summaryMode: !verboseSteps })
+                    : undefined;
+                  const lastStepLabel = typeof lastStepLabelRaw === "string" ? lastStepLabelRaw : undefined;
+                  return (
+                    <Fragment key={item.blockId}>
+                      <ActionBlock
+                        blockId={item.blockId}
+                        summary={summary}
+                        toolCallCount={toolCallCount}
+                        durationMs={durationMs}
+                        outputTokens={outputTokens}
+                        isActive={isActive}
+                        expanded={expanded}
+                        onToggle={onToggle}
+                        showConnectorAbove={showConnectorAbove}
+                        showConnectorBelow={showConnectorBelow}
+                        lastStepLabel={lastStepLabel}
+                      >
+                        {hiddenBlockEventCount > 0 && (
+                          <button
+                            type="button"
+                            className="action-block-show-all-btn"
+                            onClick={() =>
+                              setShowAllActionBlocks((prev) => {
+                                const next = new Set(prev);
+                                next.add(item.blockId);
+                                return next;
+                              })
+                            }
+                          >
+                            ↑ Show all ({item.events.length} steps)
+                          </button>
+                        )}
+                        {isBlockShowAll && (
+                          <button
+                            type="button"
+                            className="action-block-show-all-btn action-block-show-less-btn"
+                            onClick={() =>
+                              setShowAllActionBlocks((prev) => {
+                                const next = new Set(prev);
+                                next.delete(item.blockId);
+                                return next;
+                              })
+                            }
+                          >
+                            Show less
+                          </button>
+                        )}
+                        {visibleBlockEvents.map((event: TaskEvent, idx: number) => {
+                          const eventIndex = visibleBlockEventIndices[idx];
+                          const parallelGroup = parallelGroupsByAnchorEventId.get(event.id);
+                          if (suppressedParallelEventIds.has(event.id) && !parallelGroup) return null;
+                          if (!parallelGroup && !shouldRenderTimelineEventInStepFeed(event)) {
+                            return null;
+                          }
+                          const isLastChild = idx === visibleBlockEvents.length - 1;
+                          const showChildConnectorAbove = true;
+                          const showChildConnectorBelow = !isLastChild || showConnectorBelow;
+                          if (parallelGroup) {
+                            return (
+                              <ParallelGroupFeed
+                                key={event.id || `event-${eventIndex}`}
+                                group={parallelGroup}
+                                timeLabel={formatTime(parallelGroup.startedAt)}
+                                formatTime={formatTime}
+                                showConnectorAbove={showChildConnectorAbove}
+                                showConnectorBelow={showChildConnectorBelow}
+                              />
+                            );
+                          }
+                          // In summary mode, render minimal "Done" for task_completed with no outputs
+                          // to preserve turn rhythm without the noisy "1 step / All set" card
+                          const effectiveType = getEffectiveTaskEventType(event);
+                          const outputSummary = resolveTaskOutputSummaryFromCompletionEvent(
+                            event,
+                            events,
+                          );
+                          const isMinimalCompletion =
+                            !verboseSteps &&
+                            effectiveType === "task_completed" &&
+                            !hasTaskOutputs(outputSummary);
+                          if (isMinimalCompletion) {
+                            return (
+                              <div
+                                key={event.id || `event-${eventIndex}`}
+                                className="timeline-event completion-compact"
+                              >
+                                <div className="event-indicator">
+                                  {showChildConnectorAbove && (
+                                    <span className="event-connector event-connector-above" aria-hidden="true" />
+                                  )}
+                                  <span
+                                    className="event-indicator-icon tone-success"
+                                    aria-hidden="true"
+                                    title="Done"
+                                  >
+                                    <CheckIcon size={12} strokeWidth={2} />
+                                  </span>
+                                  {showChildConnectorBelow && (
+                                    <span className="event-connector event-connector-below" aria-hidden="true" />
+                                  )}
+                                </div>
+                                <div className="event-content completion-compact-content">
+                                  <span className="completion-compact-label">Done</span>
+                                  <span className="event-time-muted">{formatTime(event.timestamp)}</span>
+                                </div>
+                              </div>
+                            );
+                          }
+                          const isExpandable = hasEventDetails(event);
+                          const isExpanded = isEventExpanded(event);
+                          const eventTitle = renderEventTitle(
+                            event,
+                            workspace?.path,
+                            setViewerFilePath,
+                            agentContext,
+                            { summaryMode: !verboseSteps },
+                          );
+                          return (
+                            <StepFeed
+                              key={event.id || `event-${eventIndex}`}
+                              title={
+                                typeof eventTitle === "string" ? (
+                                  <ReactMarkdown
+                                    remarkPlugins={[remarkGfm]}
+                                    components={eventTitleMarkdownComponents}
+                                  >
+                                    {normalizeTimelineTitleMarkdownForDisplay(eventTitle)}
+                                  </ReactMarkdown>
+                                ) : (
+                                  eventTitle
+                                )
+                              }
+                              timeLabel={formatTime(event.timestamp)}
+                              indicator={resolveTimelineIndicator(event, {
+                                isTaskCompleted: !isTaskWorking,
+                              })}
+                              showConnectorAbove={showChildConnectorAbove}
+                              showConnectorBelow={showChildConnectorBelow}
+                              showBranchStub={shouldShowTimelineBranchStub(event)}
+                              expandable={isExpandable}
+                              expanded={isExpanded}
+                              onToggle={
+                                isExpandable ? () => toggleEventExpanded(event.id) : undefined
+                              }
+                              details={
+                                isExpanded
+                                  ? renderEventDetails(event, voiceEnabled, markdownComponents, {
+                                      workspacePath: workspace?.path,
+                                      onOpenViewer: setViewerFilePath,
+                                      events,
+                                      onViewOutputs: onViewTaskOutputs,
+                                      hideVerificationSteps: true,
+                                      summaryMode: !verboseSteps,
+                                      task,
+                                      childTasks,
+                                    })
+                                  : undefined
+                              }
+                            />
+                          );
+                        })}
+                      </ActionBlock>
+                      {renderCommandOutputs(commandOutputsForBlock)}
+                    </Fragment>
+                  );
+                }
+
+                const event = item.event;
+                const effectiveType = getEffectiveTaskEventType(event);
+                const isUserMessage = effectiveType === "user_message";
+                const isAssistantMessage = effectiveType === "assistant_message";
+                const commandOutputsAfterEvent = commandOutputSessionsByInsertIndex.get(
+                  item.eventIndex,
+                );
+
+                if (isChatTask && !isUserMessage && !isAssistantMessage) {
+                  if (effectiveType === "llm_streaming" && isTaskWorking) {
+                    const streamingText =
+                      typeof event.payload?.text === "string"
+                        ? event.payload.text
+                        : typeof event.payload?.message === "string"
+                          ? event.payload.message
+                          : "";
+                    return (
+                      <Fragment key={event.id || `event-${item.eventIndex}`}>
+                        <div className="chat-message assistant-message">
+                          <div className="chat-bubble assistant-bubble">
+                            <div className="chat-bubble-content markdown-content">
+                              <AssistantMessageContent
+                                message={cleanAssistantMessageForDisplay(streamingText)}
+                                markdownComponents={markdownComponents}
+                                workspacePath={workspace?.path}
+                                onOpenViewer={setViewerFilePath}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </Fragment>
+                    );
+                  }
+                  if (commandOutputsAfterEvent && commandOutputsAfterEvent.length > 0) {
+                    return (
+                      <Fragment key={event.id || `event-${item.eventIndex}`}>
+                        {renderCommandOutputs(commandOutputsAfterEvent)}
+                      </Fragment>
+                    );
+                  }
+                  return null;
+                }
+
+                // Render user messages as chat bubbles on the right
+                if (isUserMessage) {
+                  if (event.id === initialPromptEventId) {
+                    return (
+                      <Fragment key={event.id || `event-${item.eventIndex}`}>
+                        {renderCommandOutputs(commandOutputsAfterEvent)}
+                      </Fragment>
+                    );
+                  }
+                  const rawMessage = event.payload?.message || "User message";
+                  const messageText = stripStrategyContextBlock(stripPptxBubbleContent(rawMessage));
+                  const attachmentNames = extractAttachmentNames(rawMessage);
+                  return (
+                    <Fragment key={event.id || `event-${item.eventIndex}`}>
+                      <div className="chat-message user-message">
+                        <CollapsibleUserBubble>
+                          <ReactMarkdown
+                            remarkPlugins={userMarkdownPlugins}
+                            components={markdownComponents}
+                          >
+                            {messageText}
+                          </ReactMarkdown>
+                          {attachmentNames.length > 0 && (
+                            <div className="bubble-attachments">
+                              {attachmentNames.map((name, i) => (
+                                <span className="bubble-attachment-chip" key={i}>
+                                  <svg
+                                    width="12"
+                                    height="12"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                  >
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                    <path d="M14 2v6h6" />
+                                  </svg>
+                                  <span className="bubble-attachment-name" title={name}>
+                                    {name}
+                                  </span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </CollapsibleUserBubble>
+                        <MessageCopyButton text={messageText} />
+                      </div>
+                      {renderCommandOutputs(commandOutputsAfterEvent)}
+                    </Fragment>
+                  );
+                }
+
+                // Render assistant messages as chat bubbles on the left
+                if (isAssistantMessage) {
+                  const messageText = event.payload?.message || "";
+                  const cleanedMessageText = cleanAssistantMessageForDisplay(messageText);
+                  const isLastAssistant = event === lastAssistantMessage;
+                  return (
+                    <Fragment key={event.id || `event-${item.eventIndex}`}>
+                      <div className="chat-message assistant-message">
+                        <div className="chat-bubble assistant-bubble">
+                          {isLastAssistant && !isChatTask && (
+                            <div className="chat-bubble-header">
+                              {task.status === "completed" && (
+                                <span className="chat-status">
+                                  {task.terminalStatus === "needs_user_action"
+                                    ? "Completed - action required"
+                                    : task.terminalStatus === "partial_success"
+                                      ? "Completed - partial success"
+                                      : agentContext.getMessage("taskComplete")}
+                                </span>
+                              )}
+                              {task.status === "paused" && (
+                                <span className="chat-status">Waiting for your direction</span>
+                              )}
+                              {task.status === "blocked" && (
+                                <span className="chat-status">
+                                  {task.terminalStatus === "awaiting_approval"
+                                    ? agentContext.getMessage("taskBlocked") || "Needs approval"
+                                    : "Waiting for your input"}
+                                </span>
+                              )}
+                              {task.status === "interrupted" && task.terminalStatus === "resume_available" && (
+                                <span className="chat-status">Interrupted - resume available</span>
+                              )}
+                              {isTaskWorking && (
+                                <span className="chat-status executing">
+                                  <svg
+                                    className="spinner"
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                  >
+                                    <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                                    <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+                                  </svg>
+                                  {agentContext.getMessage("taskWorking")}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          <div className="chat-bubble-content markdown-content">
+                            <AssistantMessageContent
+                              message={cleanedMessageText}
+                              markdownComponents={markdownComponents}
+                              workspacePath={workspace?.path}
+                              onOpenViewer={setViewerFilePath}
+                            />
+                          </div>
+                        </div>
+                        <div className="message-actions">
+                          <MessageCopyButton text={messageText} />
+                          <MessageSpeakButton text={messageText} voiceEnabled={voiceEnabled} />
+                          {event.id && !isTaskWorking && (
+                            <>
+                              <button
+                                className={`message-feedback-btn${messageFeedbackMap.get(event.id) === "accepted" ? " active" : ""}`}
+                                title="Helpful"
+                                onClick={() =>
+                                  void handleMessageFeedback({
+                                    messageId: event.id!,
+                                    decision: "accepted",
+                                  })
+                                }
+                              >
+                                👍
+                              </button>
+                              <div
+                                ref={
+                                  rejectMenuOpenFor === event.id
+                                    ? rejectMenuRef
+                                    : undefined
+                                }
+                                className="message-feedback-thumbdown-wrap"
+                              >
+                                <button
+                                  className={`message-feedback-btn${messageFeedbackMap.get(event.id) === "rejected" ? " active" : ""}`}
+                                  title="Not helpful"
+                                  onClick={() =>
+                                    setRejectMenuOpenFor((v) =>
+                                      v === event.id ? null : (event.id ?? null),
+                                    )
+                                  }
+                                >
+                                  👎
+                                </button>
+                                {rejectMenuOpenFor === event.id && (
+                                  <div className="message-feedback-menu">
+                                    {(
+                                      [
+                                        ["incorrect", "Incorrect"],
+                                        ["too_verbose", "Too verbose"],
+                                        ["ignored_instructions", "Ignored instructions"],
+                                        ["wrong_tone", "Wrong tone"],
+                                        ["unsafe", "Unsafe / unwanted"],
+                                      ] as const
+                                    ).map(([reason, label]) => (
+                                      <button
+                                        key={reason}
+                                        className="message-feedback-reason"
+                                        onClick={() =>
+                                          void handleMessageFeedback({
+                                            messageId: event.id!,
+                                            decision: "rejected",
+                                            reason,
+                                          })
+                                        }
+                                      >
+                                        {label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </>
+                          )}
+                          {isLastAssistant && isTaskWorking && (
+                            <button
+                              className="bubble-feedback-toggle"
+                              onClick={() => setStepFeedbackOpen((o) => !o)}
+                              title="Give feedback"
+                            >
+                              <svg
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <circle cx="12" cy="12" r="1" />
+                                <circle cx="19" cy="12" r="1" />
+                                <circle cx="5" cy="12" r="1" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                        {isLastAssistant && stepFeedbackOpen && (
+                          <div className="bubble-feedback-panel">
+                            {currentStep && (
+                              <div className="bubble-feedback-step-label">
+                                {currentStep.description === "Thinking..." ? (
+                                  <span className="thinking-title">
+                                    Thinking
+                                    <span className="thinking-ellipsis">
+                                      <span>.</span>
+                                      <span>.</span>
+                                      <span>.</span>
+                                    </span>
+                                  </span>
+                                ) : (
+                                  currentStep.description
+                                )}
+                              </div>
+                            )}
+                            <div className="bubble-feedback-actions">
+                              {currentStep && (
+                                <>
+                                  <button
+                                    className="bubble-feedback-btn skip"
+                                    disabled={stepFeedbackSending}
+                                    onClick={() => handleStepFeedback("skip")}
+                                  >
+                                    Skip
+                                  </button>
+                                  <button
+                                    className="bubble-feedback-btn retry"
+                                    disabled={stepFeedbackSending}
+                                    onClick={() => handleStepFeedback("retry")}
+                                  >
+                                    Retry
+                                  </button>
+                                </>
+                              )}
+                              <button
+                                className="bubble-feedback-btn stop"
+                                disabled={stepFeedbackSending || !currentStep}
+                                onClick={() => handleStepFeedback("stop")}
+                              >
+                                Stop
+                              </button>
+                            </div>
+                            <div className="bubble-feedback-input-row">
+                              <input
+                                className="bubble-feedback-input"
+                                type="text"
+                                placeholder="Adjust direction…"
+                                value={stepFeedbackText}
+                                onChange={(e) => setStepFeedbackText(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && stepFeedbackText.trim()) {
+                                    handleStepFeedback("drift", stepFeedbackText.trim());
+                                  }
+                                }}
+                                disabled={stepFeedbackSending}
+                              />
+                              <button
+                                className="bubble-feedback-btn drift"
+                                disabled={stepFeedbackSending || !stepFeedbackText.trim()}
+                                onClick={() => handleStepFeedback("drift", stepFeedbackText.trim())}
+                              >
+                                Send
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      {renderCommandOutputs(commandOutputsAfterEvent)}
+                    </Fragment>
+                  );
+                }
+
+                const parallelGroup = parallelGroupsByAnchorEventId.get(event.id);
+                if (suppressedParallelEventIds.has(event.id) && !parallelGroup) {
+                  if (commandOutputsAfterEvent && commandOutputsAfterEvent.length > 0) {
+                    return (
+                      <Fragment key={event.id || `event-${item.eventIndex}`}>
+                        {renderCommandOutputs(commandOutputsAfterEvent)}
+                      </Fragment>
+                    );
+                  }
+                  return null;
+                }
+
+                if (!parallelGroup && !shouldRenderTimelineEventInStepFeed(event)) {
+                  // Even if we're not showing steps, we may still need to render command output.
+                  if (commandOutputsAfterEvent && commandOutputsAfterEvent.length > 0) {
+                    return (
+                      <Fragment key={event.id || `event-${item.eventIndex}`}>
+                        {renderCommandOutputs(commandOutputsAfterEvent)}
+                      </Fragment>
+                    );
+                  }
+                  return null;
+                }
+
+                const indicatorPosition = stepFeedTimelineIndexPosition.get(timelineIndex);
+                const showConnectorAbove =
+                  typeof indicatorPosition === "number" && indicatorPosition > 0;
+                const showConnectorBelow =
+                  typeof indicatorPosition === "number" &&
+                  indicatorPosition < stepFeedEventCount - 1;
+
+                if (parallelGroup) {
+                  return (
+                    <Fragment key={event.id || `event-${item.eventIndex}`}>
+                      <ParallelGroupFeed
+                        group={parallelGroup}
+                        timeLabel={formatTime(parallelGroup.startedAt)}
+                        formatTime={formatTime}
+                        showConnectorAbove={showConnectorAbove}
+                        showConnectorBelow={showConnectorBelow}
+                      />
+                      {renderCommandOutputs(commandOutputsAfterEvent)}
+                    </Fragment>
+                  );
+                }
+
+                const isExpandable = hasEventDetails(event);
+                const isExpanded = isEventExpanded(event);
+                const eventTitle = renderEventTitle(
+                  event,
+                  workspace?.path,
+                  setViewerFilePath,
+                  agentContext,
+                  { summaryMode: !verboseSteps },
+                );
+
+                return (
+                  <Fragment key={event.id || `event-${item.eventIndex}`}>
+                    <StepFeed
+                      title={
+                        typeof eventTitle === "string" ? (
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={eventTitleMarkdownComponents}
+                          >
+                            {normalizeTimelineTitleMarkdownForDisplay(eventTitle)}
+                          </ReactMarkdown>
+                        ) : (
+                          eventTitle
+                        )
+                      }
+                      timeLabel={formatTime(event.timestamp)}
+                      indicator={resolveTimelineIndicator(event, {
+                        isTaskCompleted: !isTaskWorking,
+                      })}
+                      showConnectorAbove={showConnectorAbove}
+                      showConnectorBelow={showConnectorBelow}
+                      showBranchStub={shouldShowTimelineBranchStub(event)}
+                      expandable={isExpandable}
+                      expanded={isExpanded}
+                      onToggle={isExpandable ? () => toggleEventExpanded(event.id) : undefined}
+                      details={
+                        isExpanded
+                          ? renderEventDetails(event, voiceEnabled, markdownComponents, {
+                              workspacePath: workspace?.path,
+                              onOpenViewer: setViewerFilePath,
+                              events,
+                              onViewOutputs: onViewTaskOutputs,
+                              hideVerificationSteps: true,
+                              summaryMode: !verboseSteps,
+                              task,
+                              childTasks,
+                            })
+                          : undefined
+                      }
+                    />
+                    {renderCommandOutputs(commandOutputsAfterEvent)}
+                  </Fragment>
+                );
+              })}
+            </div>
+          )}
+      </>
+    ),
+    [
+      agentContext,
+      childEvents,
+      childTasks,
+      collaborativeRun,
+      codePreviewsExpanded,
+      commandOutputSessionsByInsertIndex,
+      currentStep,
+      eventTitleMarkdownComponents,
+      events,
+      expandedActionBlocks,
+      handleCanvasClose,
+      handleMessageFeedback,
+      handleStepFeedback,
+      isChatTask,
+      isTaskWorking,
+      markdownComponents,
+      messageFeedbackMap,
+      onOpenBrowserView,
+      onSelectChildTask,
+      onSelectTask,
+      onViewTaskOutputs,
+      parallelGroupsByAnchorEventId,
+      rejectMenuOpenFor,
+      rejectMenuRef,
+      renderCommandOutputs,
+      setExpandedActionBlocks,
+      setShowAllActionBlocks,
+      setStepFeedbackOpen,
+      setStepFeedbackText,
+      setToggledEvents,
+      setViewerFilePath,
+      showAllActionBlocks,
+      showSteps,
+      stepFeedbackOpen,
+      stepFeedbackSending,
+      stepFeedbackText,
+      suppressedParallelEventIds,
+      task,
+      task?.id,
+      task?.prompt,
+      task?.status,
+      task?.terminalStatus,
+      task?.userPrompt,
+      timelineItems,
+      timelineRef,
+      toggledEvents,
+      toggleEventExpanded,
+      verboseSteps,
+      voiceEnabled,
+      wrappingUp,
+      workspace,
+      workspace?.id,
+      workspace?.path,
+    ],
+  );
+
+  return conversationFlow;
+});
 
 export function MainContent({
   task,
@@ -3077,9 +4022,9 @@ export function MainContent({
   const lastSpokenMessageRef = useRef<string | null>(null);
   const skillsMenuRef = useRef<HTMLDivElement>(null);
   const workspaceDropdownRef = useRef<HTMLDivElement>(null);
-  // Focused mode overflow menu state
+  // Overflow menu state (welcome view only - no task)
   const [showOverflowMenu, setShowOverflowMenu] = useState(false);
-  const [overflowSubmenu, setOverflowSubmenu] = useState<OverflowSubmenu | null>(null);
+  const [overflowSubmenu, setOverflowSubmenu] = useState<"mode" | "domain" | null>(null);
   const overflowMenuRef = useRef<HTMLDivElement>(null);
   const overflowToggleBtnRef = useRef<HTMLButtonElement>(null);
   const [showModelDropdownFromLabel, setShowModelDropdownFromLabel] = useState(false);
@@ -3244,8 +4189,6 @@ export function MainContent({
     return null;
   }, [task, events, isTaskWorking]);
 
-  // Action block step windowing
-  const STEP_WINDOW_SIZE = 7;
   const [showAllActionBlocks, setShowAllActionBlocks] = useState<Set<string>>(new Set());
 
   // Step feedback UI state
@@ -4039,18 +4982,18 @@ export function MainContent({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showDomainDropdown]);
 
-  // Close overflow menu on click outside (focused mode)
+  // Close overflow menu on click outside (welcome view)
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (overflowMenuRef.current && !overflowMenuRef.current.contains(e.target as Node)) {
         setShowOverflowMenu(false);
       }
     };
-    if (showOverflowMenu) {
+    if (showOverflowMenu && !task) {
       document.addEventListener("mousedown", handleClickOutside);
     }
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showOverflowMenu]);
+  }, [showOverflowMenu, task]);
 
   const getOverflowMenuItems = useCallback((): HTMLElement[] => {
     if (!overflowMenuRef.current) return [];
@@ -4062,10 +5005,10 @@ export function MainContent({
   }, []);
 
   useEffect(() => {
-    if (!showOverflowMenu) return;
+    if (!showOverflowMenu || task) return;
     const items = getOverflowMenuItems();
     items[0]?.focus();
-  }, [showOverflowMenu, getOverflowMenuItems]);
+  }, [showOverflowMenu, task, getOverflowMenuItems]);
 
   useEffect(() => {
     if (!showOverflowMenu) {
@@ -4124,6 +5067,132 @@ export function MainContent({
     },
     [getOverflowMenuItems],
   );
+
+  const renderWelcomeExecutionModeRow = () => (
+    <div className="overflow-menu-item" role="none">
+      <button
+        className={`goal-mode-toggle overflow-submenu-trigger menu-tooltip-target ${
+          overflowSubmenu === "mode" ? "active" : ""
+        }`}
+        style={{ margin: 0 }}
+        onClick={() => setOverflowSubmenu((current) => (current === "mode" ? null : "mode"))}
+        data-tooltip={EXECUTION_MODE_HINT[executionMode]}
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={overflowSubmenu === "mode"}
+        data-overflow-menu-item
+      >
+        <span className="overflow-submenu-trigger-content">
+          <span className="goal-mode-toggle-text">
+            <span className="goal-mode-label">Mode: {EXECUTION_MODE_LABEL[executionMode]}</span>
+          </span>
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            className="overflow-submenu-chevron"
+            aria-hidden="true"
+          >
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+        </span>
+      </button>
+    </div>
+  );
+
+  const renderWelcomeTaskDomainRow = () => (
+    <div className="overflow-menu-item" role="none">
+      <button
+        className={`goal-mode-toggle overflow-submenu-trigger menu-tooltip-target ${
+          overflowSubmenu === "domain" ? "active" : ""
+        }`}
+        style={{ margin: 0 }}
+        onClick={() => setOverflowSubmenu((current) => (current === "domain" ? null : "domain"))}
+        data-tooltip={TASK_DOMAIN_HINT[taskDomain]}
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={overflowSubmenu === "domain"}
+        data-overflow-menu-item
+      >
+        <span className="overflow-submenu-trigger-content">
+          <span className="goal-mode-toggle-text">
+            <span className="goal-mode-label">Domain: {TASK_DOMAIN_LABEL[taskDomain]}</span>
+          </span>
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            className="overflow-submenu-chevron"
+            aria-hidden="true"
+          >
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+        </span>
+      </button>
+    </div>
+  );
+
+  const renderWelcomeOverflowSubmenu = () => {
+    if (overflowSubmenu === null) return null;
+
+    const isModeSubmenu = overflowSubmenu === "mode";
+    const title = isModeSubmenu ? "Mode" : "Domain";
+
+    return (
+      <div className="overflow-submenu-panel" role="menu" aria-label={`${title} options`}>
+        <div className="overflow-submenu-header">
+          <span className="overflow-submenu-title">{title}</span>
+        </div>
+        {(isModeSubmenu ? EXECUTION_MODE_ORDER : TASK_DOMAIN_ORDER).map((value) => {
+          const label = isModeSubmenu
+            ? EXECUTION_MODE_LABEL[value as ExecutionMode]
+            : TASK_DOMAIN_LABEL[value as TaskDomain];
+          const selected = isModeSubmenu ? executionMode === value : taskDomain === value;
+
+          return (
+            <button
+              key={value}
+              type="button"
+              className={`overflow-submenu-option ${selected ? "active" : ""}`}
+              onClick={() => {
+                if (isModeSubmenu) {
+                  setExecutionMode(value as ExecutionMode);
+                } else {
+                  setTaskDomain(value as TaskDomain);
+                }
+                setOverflowSubmenu(null);
+              }}
+              role="menuitemradio"
+              aria-checked={selected}
+              data-overflow-menu-item
+            >
+              <span>{label}</span>
+              {selected && (
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  className="overflow-submenu-check"
+                  aria-hidden="true"
+                >
+                  <path d="M20 6L9 17l-5-5" />
+                </svg>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
 
   // Close model dropdown from label on click outside (focused mode)
   useEffect(() => {
@@ -4196,7 +5265,7 @@ export function MainContent({
   };
 
   // Toggle an event's expanded state using its ID
-  const toggleEventExpanded = (eventId: string) => {
+  const toggleEventExpanded = useCallback((eventId: string) => {
     setToggledEvents((prev) => {
       const next = new Set(prev);
       if (next.has(eventId)) {
@@ -4206,9 +5275,9 @@ export function MainContent({
       }
       return next;
     });
-  };
+  }, []);
 
-  const isImageFileEvent = (event: TaskEvent): boolean => {
+  const isImageFileEvent = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (
       effectiveType !== "file_created" &&
@@ -4223,9 +5292,9 @@ export function MainContent({
     return (
       event.payload?.type === "image" || mimeType.startsWith("image/") || imageExt.test(filePath)
     );
-  };
+  }, []);
 
-  const isSpreadsheetFileEvent = (event: TaskEvent): boolean => {
+  const isSpreadsheetFileEvent = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (
       effectiveType !== "file_created" &&
@@ -4235,9 +5304,9 @@ export function MainContent({
       return false;
     const filePath = String(event.payload?.path || event.payload?.from || "");
     return event.payload?.type === "spreadsheet" || /\.xlsx?$/i.test(filePath);
-  };
+  }, []);
 
-  const shouldRenderTimelineEventInStepFeed = (event: TaskEvent): boolean => {
+  const shouldRenderTimelineEventInStepFeed = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (effectiveType === "user_message" || effectiveType === "assistant_message") {
       return false;
@@ -4249,10 +5318,10 @@ export function MainContent({
       isSpreadsheetFileEvent(event) ||
       (effectiveType === "tool_result" && event.payload?.tool === "schedule_task");
     return showSteps || showEvenWithoutSteps;
-  };
+  }, [isImageFileEvent, isSpreadsheetFileEvent, showSteps]);
 
   // Check if an event has details to show
-  const hasEventDetails = (event: TaskEvent): boolean => {
+  const hasEventDetails = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (isImageFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
@@ -4299,12 +5368,12 @@ export function MainContent({
       "step_failed",
       "approval_requested",
     ].includes(effectiveType);
-  };
+  }, [events, isImageFileEvent, isSpreadsheetFileEvent, verboseSteps, workspace?.path]);
 
   // Determine if an event should be expanded by default
   // Important events (plan, assistant responses, errors) should be expanded
   // Verbose events (tool calls/results) should be collapsed
-  const shouldDefaultExpand = (event: TaskEvent): boolean => {
+  const shouldDefaultExpand = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (isImageFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
@@ -4334,16 +5403,22 @@ export function MainContent({
         return true;
     }
     return ["plan_created", "assistant_message", "error", "step_failed"].includes(effectiveType);
-  };
+  }, [
+    codePreviewsExpanded,
+    hasEventDetails,
+    isImageFileEvent,
+    isSpreadsheetFileEvent,
+    workspace?.path,
+  ]);
 
   // Check if an event is currently expanded using its ID
   // If the event should default expand, clicking toggles it to collapsed (and vice versa)
-  const isEventExpanded = (event: TaskEvent): boolean => {
+  const isEventExpanded = useCallback((event: TaskEvent): boolean => {
     const defaultExpanded = shouldDefaultExpand(event);
     const isToggled = toggledEvents.has(event.id);
     // XOR: if toggled, invert the default state
     return defaultExpanded ? !isToggled : isToggled;
-  };
+  }, [shouldDefaultExpand, toggledEvents]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const mainBodyRef = useRef<HTMLDivElement>(null);
@@ -5018,9 +6093,13 @@ export function MainContent({
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
+    const cursor = e.target.selectionStart;
     setInputValue(value);
-    updateMentionState(value, e.target.selectionStart);
-    updateSlashState(value, e.target.selectionStart);
+    // Defer mention/slash autocomplete updates so typing stays responsive
+    startTransition(() => {
+      updateMentionState(value, cursor);
+      updateSlashState(value, cursor);
+    });
 
     // Debounced mode suggestion detection
     if (modeSuggestionTimerRef.current) clearTimeout(modeSuggestionTimerRef.current);
@@ -5178,132 +6257,6 @@ export function MainContent({
     );
   };
 
-  const renderExecutionModeRow = () => (
-    <div className="overflow-menu-item" role="none">
-      <button
-        className={`goal-mode-toggle overflow-submenu-trigger menu-tooltip-target ${
-          overflowSubmenu === "mode" ? "active" : ""
-        }`}
-        style={{ margin: 0 }}
-        onClick={() => setOverflowSubmenu((current) => (current === "mode" ? null : "mode"))}
-        data-tooltip={EXECUTION_MODE_HINT[executionMode]}
-        role="menuitem"
-        aria-haspopup="menu"
-        aria-expanded={overflowSubmenu === "mode"}
-        data-overflow-menu-item
-      >
-        <span className="overflow-submenu-trigger-content">
-          <span className="goal-mode-toggle-text">
-            <span className="goal-mode-label">Mode: {EXECUTION_MODE_LABEL[executionMode]}</span>
-          </span>
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            className="overflow-submenu-chevron"
-            aria-hidden="true"
-          >
-            <path d="M9 6l6 6-6 6" />
-          </svg>
-        </span>
-      </button>
-    </div>
-  );
-
-  const renderTaskDomainRow = () => (
-    <div className="overflow-menu-item" role="none">
-      <button
-        className={`goal-mode-toggle overflow-submenu-trigger menu-tooltip-target ${
-          overflowSubmenu === "domain" ? "active" : ""
-        }`}
-        style={{ margin: 0 }}
-        onClick={() => setOverflowSubmenu((current) => (current === "domain" ? null : "domain"))}
-        data-tooltip={TASK_DOMAIN_HINT[taskDomain]}
-        role="menuitem"
-        aria-haspopup="menu"
-        aria-expanded={overflowSubmenu === "domain"}
-        data-overflow-menu-item
-      >
-        <span className="overflow-submenu-trigger-content">
-          <span className="goal-mode-toggle-text">
-            <span className="goal-mode-label">Domain: {TASK_DOMAIN_LABEL[taskDomain]}</span>
-          </span>
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            className="overflow-submenu-chevron"
-            aria-hidden="true"
-          >
-            <path d="M9 6l6 6-6 6" />
-          </svg>
-        </span>
-      </button>
-    </div>
-  );
-
-  const renderOverflowSubmenu = () => {
-    if (overflowSubmenu === null) return null;
-
-    const isModeSubmenu = overflowSubmenu === "mode";
-    const title = isModeSubmenu ? "Mode" : "Domain";
-
-    return (
-      <div className="overflow-submenu-panel" role="menu" aria-label={`${title} options`}>
-        <div className="overflow-submenu-header">
-          <span className="overflow-submenu-title">{title}</span>
-        </div>
-        {(isModeSubmenu ? EXECUTION_MODE_ORDER : TASK_DOMAIN_ORDER).map((value) => {
-          const label = isModeSubmenu
-            ? EXECUTION_MODE_LABEL[value as ExecutionMode]
-            : TASK_DOMAIN_LABEL[value as TaskDomain];
-          const selected = isModeSubmenu ? executionMode === value : taskDomain === value;
-
-          return (
-            <button
-              key={value}
-              type="button"
-              className={`overflow-submenu-option ${selected ? "active" : ""}`}
-              onClick={() => {
-                if (isModeSubmenu) {
-                  setExecutionMode(value as ExecutionMode);
-                } else {
-                  setTaskDomain(value as TaskDomain);
-                }
-                setOverflowSubmenu(null);
-              }}
-              role="menuitemradio"
-              aria-checked={selected}
-              data-overflow-menu-item
-            >
-              <span>{label}</span>
-              {selected && (
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  className="overflow-submenu-check"
-                  aria-hidden="true"
-                >
-                  <path d="M20 6L9 17l-5-5" />
-                </svg>
-              )}
-            </button>
-          );
-        })}
-      </div>
-    );
-  };
-
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (mentionOpen && mentionOptions.length > 0) {
       switch (e.key) {
@@ -5373,12 +6326,12 @@ export function MainContent({
     }
   }, [task?.status]);
 
-  const formatTime = (timestamp: number) => {
+  const formatTime = useCallback((timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString(undefined, {
       hour: "2-digit",
       minute: "2-digit",
     });
-  };
+  }, []);
 
   // Get the last assistant message to always show the response
   const lastAssistantMessage = useMemo(() => {
@@ -5411,6 +6364,32 @@ export function MainContent({
     }
     return null;
   }, [events, trimmedPrompt]);
+
+  const baseTitle = task?.title || buildTaskTitle(trimmedPrompt);
+  const normalizedTitle = baseTitle.replace(TITLE_ELLIPSIS_REGEX, "");
+  const titleMatchesPrompt =
+    normalizedTitle.length > 0 && trimmedPrompt.startsWith(normalizedTitle);
+  const isTitleTruncated = titleMatchesPrompt && trimmedPrompt.length > normalizedTitle.length;
+  const headerTitle =
+    isTitleTruncated && !TITLE_ELLIPSIS_REGEX.test(baseTitle) ? `${baseTitle}...` : baseTitle;
+  const headerTooltip = trimmedPrompt || baseTitle;
+  const latestPauseEvent = [...events]
+    .reverse()
+    .find((event) => getEffectiveTaskEventType(event) === "task_paused");
+  const latestApprovalEvent = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        getEffectiveTaskEventType(event) === "approval_requested" &&
+        event.payload?.autoApproved !== true,
+    );
+  const hasActiveStructuredInputRequest = Boolean(
+    task &&
+      inputRequest &&
+      inputRequest.taskId === task.id &&
+      onSubmitInputRequest &&
+      onDismissInputRequest,
+  );
 
   // Welcome/Empty state
   if (!task) {
@@ -5963,11 +6942,11 @@ export function MainContent({
                                 </button>
                               </div>
                             )}
-                            {renderExecutionModeRow()}
-                            {renderTaskDomainRow()}
+                            {renderWelcomeExecutionModeRow()}
+                            {renderWelcomeTaskDomainRow()}
                           </div>
                         )}
-                        {showOverflowMenu && renderOverflowSubmenu()}
+                        {showOverflowMenu && renderWelcomeOverflowSubmenu()}
                       </div>
                       <div className="workspace-dropdown-container" ref={workspaceDropdownRef}>
                         {showWorkspaceDropdown && (
@@ -6357,8 +7336,8 @@ export function MainContent({
                                 </button>
                               </div>
                             )}
-                            {renderExecutionModeRow()}
-                            {renderTaskDomainRow()}
+                            {renderWelcomeExecutionModeRow()}
+                            {renderWelcomeTaskDomainRow()}
                             <div className="overflow-menu-item" role="none">
                               <button
                                 className="goal-mode-toggle menu-tooltip-target"
@@ -6379,7 +7358,7 @@ export function MainContent({
                             </div>
                           </div>
                         )}
-                        {showOverflowMenu && renderOverflowSubmenu()}
+                        {showOverflowMenu && renderWelcomeOverflowSubmenu()}
                       </div>
                       <ModelDropdown
                         models={availableModels}
@@ -6708,58 +7687,64 @@ export function MainContent({
     );
   }
 
-  const stepFeedTimelineIndexPosition = new Map<number, number>();
-  let stepFeedEventCount = 0;
-  timelineItems.forEach((timelineItem, timelineIndex) => {
-    if (isChatTask && timelineItem.kind === "action_block") {
-      return;
-    }
-    if (timelineItem.kind === "action_block") {
-      stepFeedTimelineIndexPosition.set(timelineIndex, stepFeedEventCount);
-      stepFeedEventCount += 1;
-      return;
-    }
-    if (timelineItem.kind !== "event") return;
-    const event = timelineItem.event;
-    const eventId = event.id;
-    if (suppressedParallelEventIds.has(eventId) && !parallelGroupsByAnchorEventId.has(eventId)) {
-      return;
-    }
-    if (
-      !parallelGroupsByAnchorEventId.has(eventId) &&
-      !shouldRenderTimelineEventInStepFeed(event)
-    ) {
-      return;
-    }
-    stepFeedTimelineIndexPosition.set(timelineIndex, stepFeedEventCount);
-    stepFeedEventCount += 1;
-  });
-
-  const baseTitle = task.title || buildTaskTitle(trimmedPrompt);
-  const normalizedTitle = baseTitle.replace(TITLE_ELLIPSIS_REGEX, "");
-  const titleMatchesPrompt =
-    normalizedTitle.length > 0 && trimmedPrompt.startsWith(normalizedTitle);
-  const isTitleTruncated = titleMatchesPrompt && trimmedPrompt.length > normalizedTitle.length;
-  const headerTitle =
-    isTitleTruncated && !TITLE_ELLIPSIS_REGEX.test(baseTitle) ? `${baseTitle}...` : baseTitle;
-  const headerTooltip = trimmedPrompt || baseTitle;
-  const latestPauseEvent = [...events]
-    .reverse()
-    .find((event) => getEffectiveTaskEventType(event) === "task_paused");
-  const latestApprovalEvent = [...events]
-    .reverse()
-    .find(
-      (event) =>
-        getEffectiveTaskEventType(event) === "approval_requested" &&
-        event.payload?.autoApproved !== true,
-    );
-  const hasActiveStructuredInputRequest = Boolean(
-    task &&
-      inputRequest &&
-      inputRequest.taskId === task.id &&
-      onSubmitInputRequest &&
-      onDismissInputRequest,
+  const conversationFlow = (
+    <TaskConversationFlow
+      agentContext={agentContext}
+      childEvents={childEvents}
+      childTasks={childTasks}
+      collaborativeRun={collaborativeRun}
+      codePreviewsExpanded={codePreviewsExpanded}
+      commandOutputSessionsByInsertIndex={commandOutputSessionsByInsertIndex}
+      currentStep={currentStep}
+      lastAssistantMessage={lastAssistantMessage}
+      initialPromptEventId={initialPromptEventId}
+      eventTitleMarkdownComponents={eventTitleMarkdownComponents}
+      events={events}
+      expandedActionBlocks={expandedActionBlocks}
+      handleCanvasClose={handleCanvasClose}
+      handleMessageFeedback={handleMessageFeedback}
+      handleStepFeedback={handleStepFeedback}
+      isChatTask={isChatTask}
+      isTaskWorking={isTaskWorking}
+      markdownComponents={markdownComponents}
+      messageFeedbackMap={messageFeedbackMap}
+      onOpenBrowserView={onOpenBrowserView}
+      onSelectChildTask={onSelectChildTask}
+      onSelectTask={onSelectTask}
+      onViewTaskOutputs={onViewTaskOutputs}
+      parallelGroupsByAnchorEventId={parallelGroupsByAnchorEventId}
+      rejectMenuOpenFor={rejectMenuOpenFor}
+      rejectMenuRef={rejectMenuRef}
+      renderCommandOutputs={renderCommandOutputs}
+      setRejectMenuOpenFor={setRejectMenuOpenFor}
+      setExpandedActionBlocks={setExpandedActionBlocks}
+      setShowAllActionBlocks={setShowAllActionBlocks}
+      setStepFeedbackOpen={setStepFeedbackOpen}
+      setStepFeedbackText={setStepFeedbackText}
+      setToggledEvents={setToggledEvents}
+      setViewerFilePath={setViewerFilePath}
+      formatTime={formatTime}
+      shouldRenderTimelineEventInStepFeed={shouldRenderTimelineEventInStepFeed}
+      hasEventDetails={hasEventDetails}
+      isEventExpanded={isEventExpanded}
+      showAllActionBlocks={showAllActionBlocks}
+      showSteps={showSteps}
+      stepFeedbackOpen={stepFeedbackOpen}
+      stepFeedbackSending={stepFeedbackSending}
+      stepFeedbackText={stepFeedbackText}
+      suppressedParallelEventIds={suppressedParallelEventIds}
+      task={task}
+      timelineItems={timelineItems}
+      timelineRef={timelineRef}
+      toggledEvents={toggledEvents}
+      toggleEventExpanded={toggleEventExpanded}
+      verboseSteps={verboseSteps}
+      voiceEnabled={voiceEnabled}
+      wrappingUp={wrappingUp}
+      workspace={workspace}
+    />
   );
+
 
   // Task view
   return (
@@ -6928,777 +7913,7 @@ export function MainContent({
             </div>
           )}
 
-          {/* Conversation Flow - renders all events in order; show when we have events OR collaborative run with child tasks */}
-          {(events.length > 0 || (collaborativeRun && childTasks.length > 0)) && (
-            <div className="conversation-flow" ref={timelineRef}>
-              {/* Render command outputs that started before any visible event */}
-              {renderCommandOutputs(commandOutputSessionsByInsertIndex.get(-1))}
-              {timelineItems.map((item, timelineIndex) => {
-                if (item.kind === "canvas") {
-                  return (
-                    <CanvasPreview
-                      key={item.session.id}
-                      session={item.session}
-                      onClose={() => handleCanvasClose(item.session.id)}
-                      forceSnapshot={item.forceSnapshot}
-                      onOpenBrowser={onOpenBrowserView}
-                    />
-                  );
-                }
-
-                if (item.kind === "cli-agent-frame") {
-                  const agentType = resolveCliAgentType(item.childTask, item.childTaskEvents) || "codex-cli";
-                  return (
-                    <CliAgentFrame
-                      key={`cli-frame-${item.childTask.id}`}
-                      task={item.childTask}
-                      events={item.childTaskEvents}
-                      agentType={agentType}
-                      defaultExpanded={item.childTask.status === "executing"}
-                    />
-                  );
-                }
-
-                if (item.kind === "dispatched-agents") {
-                  // Filter out CLI agent tasks — they render in their own frames above
-                  const nonCliChildTasks = childTasks.filter((t) => !isCliAgentChildTask(t));
-                  const panelTasks = nonCliChildTasks.length > 0 ? nonCliChildTasks : childTasks;
-                  const panelEvents = childEvents.filter((e) =>
-                    panelTasks.some((t) => t.id === e.taskId),
-                  );
-                  return (
-                    <div key="dispatched-agents" className="collaborative-thoughts-main">
-                      {collaborativeRun ? (
-                        <CollaborativeSummaryPanel
-                          collaborativeRun={collaborativeRun}
-                          childTasks={panelTasks}
-                          childEvents={panelEvents}
-                          userPrompt={task?.prompt || task?.userPrompt}
-                          onSelectChildTask={onSelectChildTask}
-                          mainTaskCompleted={
-                            !!task &&
-                            ["completed", "failed", "cancelled"].includes(task.status)
-                          }
-                          isWrappingUp={wrappingUp}
-                        />
-                      ) : (
-                        <DispatchedAgentsPanel
-                          parentTaskId={task!.id}
-                          childTasks={panelTasks}
-                          childEvents={panelEvents}
-                          onSelectChildTask={onSelectChildTask}
-                        />
-                      )}
-                    </div>
-                  );
-                }
-
-                if (item.kind === "action_block") {
-                  if (isChatTask) return null;
-                  const isBlockOnlyMinimalCompletions =
-                    !verboseSteps &&
-                    item.events.length > 0 &&
-                    item.events.every((ev) => {
-                      const t = getEffectiveTaskEventType(ev);
-                      const out = resolveTaskOutputSummaryFromCompletionEvent(ev, events);
-                      return t === "task_completed" && !hasTaskOutputs(out);
-                    });
-                  if (isBlockOnlyMinimalCompletions) {
-                    const indicatorPosition = stepFeedTimelineIndexPosition.get(timelineIndex);
-                    const showConnectorAbove =
-                      typeof indicatorPosition === "number" && indicatorPosition > 0;
-                    const showConnectorBelow =
-                      typeof indicatorPosition === "number" &&
-                      indicatorPosition < stepFeedEventCount - 1;
-                    const commandOutputsForBlock = item.eventIndices.flatMap((ei) =>
-                      commandOutputSessionsByInsertIndex.get(ei) ?? [],
-                    );
-                    return (
-                      <Fragment key={item.blockId}>
-                        {item.events.map((event, idx) => {
-                          const eventIndex = item.eventIndices[idx];
-                          if (!shouldRenderTimelineEventInStepFeed(event)) return null;
-                          const isLastChild = idx === item.events.length - 1;
-                          const showChildConnectorAbove = idx === 0 ? showConnectorAbove : true;
-                          const showChildConnectorBelow = !isLastChild || showConnectorBelow;
-                          return (
-                            <div
-                              key={event.id || `event-${eventIndex}`}
-                              className="timeline-event completion-compact"
-                            >
-                              <div className="event-indicator">
-                                {showChildConnectorAbove && (
-                                  <span className="event-connector event-connector-above" aria-hidden="true" />
-                                )}
-                                <span
-                                  className="event-indicator-icon tone-success"
-                                  aria-hidden="true"
-                                  title="Done"
-                                >
-                                  <CheckIcon size={12} strokeWidth={2} />
-                                </span>
-                                {showChildConnectorBelow && (
-                                  <span className="event-connector event-connector-below" aria-hidden="true" />
-                                )}
-                              </div>
-                              <div className="event-content completion-compact-content">
-                                <span className="completion-compact-label">Done</span>
-                                <span className="event-time-muted">{formatTime(event.timestamp)}</span>
-                              </div>
-                            </div>
-                          );
-                        })}
-                        {renderCommandOutputs(commandOutputsForBlock)}
-                      </Fragment>
-                    );
-                  }
-                  const lastActionBlockIndex = (() => {
-                    for (let i = timelineItems.length - 1; i >= 0; i--) {
-                      if (timelineItems[i].kind === "action_block") return i;
-                    }
-                    return -1;
-                  })();
-                  const isActive = timelineIndex === lastActionBlockIndex && isTaskWorking;
-                  const { summary, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
-                    item.events,
-                    events,
-                  );
-                  const expanded =
-                    isActive || expandedActionBlocks.has(item.blockId);
-                  const onToggle = () => {
-                    setExpandedActionBlocks((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(item.blockId)) next.delete(item.blockId);
-                      else next.add(item.blockId);
-                      return next;
-                    });
-                  };
-                  const indicatorPosition = stepFeedTimelineIndexPosition.get(timelineIndex);
-                  const showConnectorAbove =
-                    typeof indicatorPosition === "number" && indicatorPosition > 0;
-                  const showConnectorBelow =
-                    typeof indicatorPosition === "number" &&
-                    indicatorPosition < stepFeedEventCount - 1;
-                  const commandOutputsForBlock = item.eventIndices.flatMap((ei) =>
-                    commandOutputSessionsByInsertIndex.get(ei) ?? [],
-                  );
-                  const isBlockShowAll = showAllActionBlocks.has(item.blockId);
-                  // Count only truly renderable events to avoid slicing on non-renderable raw events
-                  const renderableRawIndices: number[] = [];
-                  for (let ri = 0; ri < item.events.length; ri++) {
-                    const ev = item.events[ri];
-                    if (suppressedParallelEventIds.has(ev.id) && !parallelGroupsByAnchorEventId.has(ev.id)) continue;
-                    if (!parallelGroupsByAnchorEventId.has(ev.id) && !shouldRenderTimelineEventInStepFeed(ev)) continue;
-                    renderableRawIndices.push(ri);
-                  }
-                  const renderableCount = renderableRawIndices.length;
-                  const needsWindow = !isBlockShowAll && renderableCount > STEP_WINDOW_SIZE;
-                  const hiddenBlockEventCount = needsWindow ? renderableCount - STEP_WINDOW_SIZE : 0;
-                  let visibleBlockEvents: typeof item.events;
-                  let visibleBlockEventIndices: typeof item.eventIndices;
-                  if (needsWindow) {
-                    const firstVisibleRawIdx = renderableRawIndices[renderableCount - STEP_WINDOW_SIZE];
-                    visibleBlockEvents = item.events.slice(firstVisibleRawIdx);
-                    visibleBlockEventIndices = item.eventIndices.slice(firstVisibleRawIdx);
-                  } else {
-                    visibleBlockEvents = item.events;
-                    visibleBlockEventIndices = item.eventIndices;
-                  }
-                  const lastRenderableEvent = [...item.events].reverse().find((ev) => {
-                    if (suppressedParallelEventIds.has(ev.id) && !parallelGroupsByAnchorEventId.has(ev.id)) return false;
-                    return parallelGroupsByAnchorEventId.has(ev.id) || shouldRenderTimelineEventInStepFeed(ev);
-                  });
-                  const lastStepLabelRaw = lastRenderableEvent
-                    ? renderEventTitle(lastRenderableEvent, workspace?.path, setViewerFilePath, agentContext, { summaryMode: !verboseSteps })
-                    : undefined;
-                  const lastStepLabel = typeof lastStepLabelRaw === "string" ? lastStepLabelRaw : undefined;
-                  return (
-                    <Fragment key={item.blockId}>
-                      <ActionBlock
-                        blockId={item.blockId}
-                        summary={summary}
-                        toolCallCount={toolCallCount}
-                        durationMs={durationMs}
-                        outputTokens={outputTokens}
-                        isActive={isActive}
-                        expanded={expanded}
-                        onToggle={onToggle}
-                        showConnectorAbove={showConnectorAbove}
-                        showConnectorBelow={showConnectorBelow}
-                        lastStepLabel={lastStepLabel}
-                      >
-                        {hiddenBlockEventCount > 0 && (
-                          <button
-                            type="button"
-                            className="action-block-show-all-btn"
-                            onClick={() =>
-                              setShowAllActionBlocks((prev) => {
-                                const next = new Set(prev);
-                                next.add(item.blockId);
-                                return next;
-                              })
-                            }
-                          >
-                            ↑ Show all ({item.events.length} steps)
-                          </button>
-                        )}
-                        {isBlockShowAll && (
-                          <button
-                            type="button"
-                            className="action-block-show-all-btn action-block-show-less-btn"
-                            onClick={() =>
-                              setShowAllActionBlocks((prev) => {
-                                const next = new Set(prev);
-                                next.delete(item.blockId);
-                                return next;
-                              })
-                            }
-                          >
-                            Show less
-                          </button>
-                        )}
-                        {visibleBlockEvents.map((event, idx) => {
-                          const eventIndex = visibleBlockEventIndices[idx];
-                          const parallelGroup = parallelGroupsByAnchorEventId.get(event.id);
-                          if (suppressedParallelEventIds.has(event.id) && !parallelGroup) return null;
-                          if (!parallelGroup && !shouldRenderTimelineEventInStepFeed(event)) {
-                            return null;
-                          }
-                          const isLastChild = idx === visibleBlockEvents.length - 1;
-                          const showChildConnectorAbove = true;
-                          const showChildConnectorBelow = !isLastChild || showConnectorBelow;
-                          if (parallelGroup) {
-                            return (
-                              <ParallelGroupFeed
-                                key={event.id || `event-${eventIndex}`}
-                                group={parallelGroup}
-                                timeLabel={formatTime(parallelGroup.startedAt)}
-                                formatTime={formatTime}
-                                showConnectorAbove={showChildConnectorAbove}
-                                showConnectorBelow={showChildConnectorBelow}
-                              />
-                            );
-                          }
-                          // In summary mode, render minimal "Done" for task_completed with no outputs
-                          // to preserve turn rhythm without the noisy "1 step / All set" card
-                          const effectiveType = getEffectiveTaskEventType(event);
-                          const outputSummary = resolveTaskOutputSummaryFromCompletionEvent(
-                            event,
-                            events,
-                          );
-                          const isMinimalCompletion =
-                            !verboseSteps &&
-                            effectiveType === "task_completed" &&
-                            !hasTaskOutputs(outputSummary);
-                          if (isMinimalCompletion) {
-                            return (
-                              <div
-                                key={event.id || `event-${eventIndex}`}
-                                className="timeline-event completion-compact"
-                              >
-                                <div className="event-indicator">
-                                  {showChildConnectorAbove && (
-                                    <span className="event-connector event-connector-above" aria-hidden="true" />
-                                  )}
-                                  <span
-                                    className="event-indicator-icon tone-success"
-                                    aria-hidden="true"
-                                    title="Done"
-                                  >
-                                    <CheckIcon size={12} strokeWidth={2} />
-                                  </span>
-                                  {showChildConnectorBelow && (
-                                    <span className="event-connector event-connector-below" aria-hidden="true" />
-                                  )}
-                                </div>
-                                <div className="event-content completion-compact-content">
-                                  <span className="completion-compact-label">Done</span>
-                                  <span className="event-time-muted">{formatTime(event.timestamp)}</span>
-                                </div>
-                              </div>
-                            );
-                          }
-                          const isExpandable = hasEventDetails(event);
-                          const isExpanded = isEventExpanded(event);
-                          const eventTitle = renderEventTitle(
-                            event,
-                            workspace?.path,
-                            setViewerFilePath,
-                            agentContext,
-                            { summaryMode: !verboseSteps },
-                          );
-                          return (
-                            <StepFeed
-                              key={event.id || `event-${eventIndex}`}
-                              title={
-                                typeof eventTitle === "string" ? (
-                                  <ReactMarkdown
-                                    remarkPlugins={[remarkGfm]}
-                                    components={eventTitleMarkdownComponents}
-                                  >
-                                    {normalizeTimelineTitleMarkdownForDisplay(eventTitle)}
-                                  </ReactMarkdown>
-                                ) : (
-                                  eventTitle
-                                )
-                              }
-                              timeLabel={formatTime(event.timestamp)}
-                              indicator={resolveTimelineIndicator(event, {
-                                isTaskCompleted: !isTaskWorking,
-                              })}
-                              showConnectorAbove={showChildConnectorAbove}
-                              showConnectorBelow={showChildConnectorBelow}
-                              showBranchStub={shouldShowTimelineBranchStub(event)}
-                              expandable={isExpandable}
-                              expanded={isExpanded}
-                              onToggle={
-                                isExpandable ? () => toggleEventExpanded(event.id) : undefined
-                              }
-                              details={
-                                isExpanded
-                                  ? renderEventDetails(event, voiceEnabled, markdownComponents, {
-                                      workspacePath: workspace?.path,
-                                      onOpenViewer: setViewerFilePath,
-                                      events,
-                                      onViewOutputs: onViewTaskOutputs,
-                                      hideVerificationSteps: true,
-                                      summaryMode: !verboseSteps,
-                                      task,
-                                      childTasks,
-                                    })
-                                  : undefined
-                              }
-                            />
-                          );
-                        })}
-                      </ActionBlock>
-                      {renderCommandOutputs(commandOutputsForBlock)}
-                    </Fragment>
-                  );
-                }
-
-                const event = item.event;
-                const effectiveType = getEffectiveTaskEventType(event);
-                const isUserMessage = effectiveType === "user_message";
-                const isAssistantMessage = effectiveType === "assistant_message";
-                const commandOutputsAfterEvent = commandOutputSessionsByInsertIndex.get(
-                  item.eventIndex,
-                );
-
-                if (isChatTask && !isUserMessage && !isAssistantMessage) {
-                  if (effectiveType === "llm_streaming" && isTaskWorking) {
-                    const streamingText =
-                      typeof event.payload?.text === "string"
-                        ? event.payload.text
-                        : typeof event.payload?.message === "string"
-                          ? event.payload.message
-                          : "";
-                    return (
-                      <Fragment key={event.id || `event-${item.eventIndex}`}>
-                        <div className="chat-message assistant-message">
-                          <div className="chat-bubble assistant-bubble">
-                            <div className="chat-bubble-content markdown-content">
-                              <AssistantMessageContent
-                                message={cleanAssistantMessageForDisplay(streamingText)}
-                                markdownComponents={markdownComponents}
-                                workspacePath={workspace?.path}
-                                onOpenViewer={setViewerFilePath}
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      </Fragment>
-                    );
-                  }
-                  if (commandOutputsAfterEvent && commandOutputsAfterEvent.length > 0) {
-                    return (
-                      <Fragment key={event.id || `event-${item.eventIndex}`}>
-                        {renderCommandOutputs(commandOutputsAfterEvent)}
-                      </Fragment>
-                    );
-                  }
-                  return null;
-                }
-
-                // Render user messages as chat bubbles on the right
-                if (isUserMessage) {
-                  if (event.id === initialPromptEventId) {
-                    return (
-                      <Fragment key={event.id || `event-${item.eventIndex}`}>
-                        {renderCommandOutputs(commandOutputsAfterEvent)}
-                      </Fragment>
-                    );
-                  }
-                  const rawMessage = event.payload?.message || "User message";
-                  const messageText = stripStrategyContextBlock(stripPptxBubbleContent(rawMessage));
-                  const attachmentNames = extractAttachmentNames(rawMessage);
-                  return (
-                    <Fragment key={event.id || `event-${item.eventIndex}`}>
-                      <div className="chat-message user-message">
-                        <CollapsibleUserBubble>
-                          <ReactMarkdown
-                            remarkPlugins={userMarkdownPlugins}
-                            components={markdownComponents}
-                          >
-                            {messageText}
-                          </ReactMarkdown>
-                          {attachmentNames.length > 0 && (
-                            <div className="bubble-attachments">
-                              {attachmentNames.map((name, i) => (
-                                <span className="bubble-attachment-chip" key={i}>
-                                  <svg
-                                    width="12"
-                                    height="12"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2"
-                                  >
-                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                    <path d="M14 2v6h6" />
-                                  </svg>
-                                  <span className="bubble-attachment-name" title={name}>
-                                    {name}
-                                  </span>
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                        </CollapsibleUserBubble>
-                        <MessageCopyButton text={messageText} />
-                      </div>
-                      {renderCommandOutputs(commandOutputsAfterEvent)}
-                    </Fragment>
-                  );
-                }
-
-                // Render assistant messages as chat bubbles on the left
-                if (isAssistantMessage) {
-                  const messageText = event.payload?.message || "";
-                  const cleanedMessageText = cleanAssistantMessageForDisplay(messageText);
-                  const isLastAssistant = event === lastAssistantMessage;
-                  return (
-                    <Fragment key={event.id || `event-${item.eventIndex}`}>
-                      <div className="chat-message assistant-message">
-                        <div className="chat-bubble assistant-bubble">
-                          {isLastAssistant && !isChatTask && (
-                            <div className="chat-bubble-header">
-                              {task.status === "completed" && (
-                                <span className="chat-status">
-                                  {task.terminalStatus === "needs_user_action"
-                                    ? "Completed - action required"
-                                    : task.terminalStatus === "partial_success"
-                                      ? "Completed - partial success"
-                                      : agentContext.getMessage("taskComplete")}
-                                </span>
-                              )}
-                              {task.status === "paused" && (
-                                <span className="chat-status">Waiting for your direction</span>
-                              )}
-                              {task.status === "blocked" && (
-                                <span className="chat-status">
-                                  {task.terminalStatus === "awaiting_approval"
-                                    ? agentContext.getMessage("taskBlocked") || "Needs approval"
-                                    : "Waiting for your input"}
-                                </span>
-                              )}
-                              {task.status === "interrupted" && task.terminalStatus === "resume_available" && (
-                                <span className="chat-status">Interrupted - resume available</span>
-                              )}
-                              {isTaskWorking && (
-                                <span className="chat-status executing">
-                                  <svg
-                                    className="spinner"
-                                    width="14"
-                                    height="14"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2"
-                                  >
-                                    <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
-                                    <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
-                                  </svg>
-                                  {agentContext.getMessage("taskWorking")}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                          <div className="chat-bubble-content markdown-content">
-                            <AssistantMessageContent
-                              message={cleanedMessageText}
-                              markdownComponents={markdownComponents}
-                              workspacePath={workspace?.path}
-                              onOpenViewer={setViewerFilePath}
-                            />
-                          </div>
-                        </div>
-                        <div className="message-actions">
-                          <MessageCopyButton text={messageText} />
-                          <MessageSpeakButton text={messageText} voiceEnabled={voiceEnabled} />
-                          {event.id && !isTaskWorking && (
-                            <>
-                              <button
-                                className={`message-feedback-btn${messageFeedbackMap.get(event.id) === "accepted" ? " active" : ""}`}
-                                title="Helpful"
-                                onClick={() =>
-                                  void handleMessageFeedback({
-                                    messageId: event.id!,
-                                    decision: "accepted",
-                                  })
-                                }
-                              >
-                                👍
-                              </button>
-                              <div
-                                ref={
-                                  rejectMenuOpenFor === event.id
-                                    ? rejectMenuRef
-                                    : undefined
-                                }
-                                className="message-feedback-thumbdown-wrap"
-                              >
-                                <button
-                                  className={`message-feedback-btn${messageFeedbackMap.get(event.id) === "rejected" ? " active" : ""}`}
-                                  title="Not helpful"
-                                  onClick={() =>
-                                    setRejectMenuOpenFor((v) =>
-                                      v === event.id ? null : (event.id ?? null),
-                                    )
-                                  }
-                                >
-                                  👎
-                                </button>
-                                {rejectMenuOpenFor === event.id && (
-                                  <div className="message-feedback-menu">
-                                    {(
-                                      [
-                                        ["incorrect", "Incorrect"],
-                                        ["too_verbose", "Too verbose"],
-                                        ["ignored_instructions", "Ignored instructions"],
-                                        ["wrong_tone", "Wrong tone"],
-                                        ["unsafe", "Unsafe / unwanted"],
-                                      ] as const
-                                    ).map(([reason, label]) => (
-                                      <button
-                                        key={reason}
-                                        className="message-feedback-reason"
-                                        onClick={() =>
-                                          void handleMessageFeedback({
-                                            messageId: event.id!,
-                                            decision: "rejected",
-                                            reason,
-                                          })
-                                        }
-                                      >
-                                        {label}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            </>
-                          )}
-                          {isLastAssistant && isTaskWorking && (
-                            <button
-                              className="bubble-feedback-toggle"
-                              onClick={() => setStepFeedbackOpen((o) => !o)}
-                              title="Give feedback"
-                            >
-                              <svg
-                                width="14"
-                                height="14"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              >
-                                <circle cx="12" cy="12" r="1" />
-                                <circle cx="19" cy="12" r="1" />
-                                <circle cx="5" cy="12" r="1" />
-                              </svg>
-                            </button>
-                          )}
-                        </div>
-                        {isLastAssistant && stepFeedbackOpen && (
-                          <div className="bubble-feedback-panel">
-                            {currentStep && (
-                              <div className="bubble-feedback-step-label">
-                                {currentStep.description === "Thinking..." ? (
-                                  <span className="thinking-title">
-                                    Thinking
-                                    <span className="thinking-ellipsis">
-                                      <span>.</span>
-                                      <span>.</span>
-                                      <span>.</span>
-                                    </span>
-                                  </span>
-                                ) : (
-                                  currentStep.description
-                                )}
-                              </div>
-                            )}
-                            <div className="bubble-feedback-actions">
-                              {currentStep && (
-                                <>
-                                  <button
-                                    className="bubble-feedback-btn skip"
-                                    disabled={stepFeedbackSending}
-                                    onClick={() => handleStepFeedback("skip")}
-                                  >
-                                    Skip
-                                  </button>
-                                  <button
-                                    className="bubble-feedback-btn retry"
-                                    disabled={stepFeedbackSending}
-                                    onClick={() => handleStepFeedback("retry")}
-                                  >
-                                    Retry
-                                  </button>
-                                </>
-                              )}
-                              <button
-                                className="bubble-feedback-btn stop"
-                                disabled={stepFeedbackSending || !currentStep}
-                                onClick={() => handleStepFeedback("stop")}
-                              >
-                                Stop
-                              </button>
-                            </div>
-                            <div className="bubble-feedback-input-row">
-                              <input
-                                className="bubble-feedback-input"
-                                type="text"
-                                placeholder="Adjust direction…"
-                                value={stepFeedbackText}
-                                onChange={(e) => setStepFeedbackText(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter" && stepFeedbackText.trim()) {
-                                    handleStepFeedback("drift", stepFeedbackText.trim());
-                                  }
-                                }}
-                                disabled={stepFeedbackSending}
-                              />
-                              <button
-                                className="bubble-feedback-btn drift"
-                                disabled={stepFeedbackSending || !stepFeedbackText.trim()}
-                                onClick={() => handleStepFeedback("drift", stepFeedbackText.trim())}
-                              >
-                                Send
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                      {renderCommandOutputs(commandOutputsAfterEvent)}
-                    </Fragment>
-                  );
-                }
-
-                const parallelGroup = parallelGroupsByAnchorEventId.get(event.id);
-                if (suppressedParallelEventIds.has(event.id) && !parallelGroup) {
-                  if (commandOutputsAfterEvent && commandOutputsAfterEvent.length > 0) {
-                    return (
-                      <Fragment key={event.id || `event-${item.eventIndex}`}>
-                        {renderCommandOutputs(commandOutputsAfterEvent)}
-                      </Fragment>
-                    );
-                  }
-                  return null;
-                }
-
-                if (!parallelGroup && !shouldRenderTimelineEventInStepFeed(event)) {
-                  // Even if we're not showing steps, we may still need to render command output.
-                  if (commandOutputsAfterEvent && commandOutputsAfterEvent.length > 0) {
-                    return (
-                      <Fragment key={event.id || `event-${item.eventIndex}`}>
-                        {renderCommandOutputs(commandOutputsAfterEvent)}
-                      </Fragment>
-                    );
-                  }
-                  return null;
-                }
-
-                const indicatorPosition = stepFeedTimelineIndexPosition.get(timelineIndex);
-                const showConnectorAbove =
-                  typeof indicatorPosition === "number" && indicatorPosition > 0;
-                const showConnectorBelow =
-                  typeof indicatorPosition === "number" &&
-                  indicatorPosition < stepFeedEventCount - 1;
-
-                if (parallelGroup) {
-                  return (
-                    <Fragment key={event.id || `event-${item.eventIndex}`}>
-                      <ParallelGroupFeed
-                        group={parallelGroup}
-                        timeLabel={formatTime(parallelGroup.startedAt)}
-                        formatTime={formatTime}
-                        showConnectorAbove={showConnectorAbove}
-                        showConnectorBelow={showConnectorBelow}
-                      />
-                      {renderCommandOutputs(commandOutputsAfterEvent)}
-                    </Fragment>
-                  );
-                }
-
-                const isExpandable = hasEventDetails(event);
-                const isExpanded = isEventExpanded(event);
-                const eventTitle = renderEventTitle(
-                  event,
-                  workspace?.path,
-                  setViewerFilePath,
-                  agentContext,
-                  { summaryMode: !verboseSteps },
-                );
-
-                return (
-                  <Fragment key={event.id || `event-${item.eventIndex}`}>
-                    <StepFeed
-                      title={
-                        typeof eventTitle === "string" ? (
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            components={eventTitleMarkdownComponents}
-                          >
-                            {normalizeTimelineTitleMarkdownForDisplay(eventTitle)}
-                          </ReactMarkdown>
-                        ) : (
-                          eventTitle
-                        )
-                      }
-                      timeLabel={formatTime(event.timestamp)}
-                      indicator={resolveTimelineIndicator(event, {
-                        isTaskCompleted: !isTaskWorking,
-                      })}
-                      showConnectorAbove={showConnectorAbove}
-                      showConnectorBelow={showConnectorBelow}
-                      showBranchStub={shouldShowTimelineBranchStub(event)}
-                      expandable={isExpandable}
-                      expanded={isExpanded}
-                      onToggle={isExpandable ? () => toggleEventExpanded(event.id) : undefined}
-                      details={
-                        isExpanded
-                          ? renderEventDetails(event, voiceEnabled, markdownComponents, {
-                              workspacePath: workspace?.path,
-                              onOpenViewer: setViewerFilePath,
-                              events,
-                              onViewOutputs: onViewTaskOutputs,
-                              hideVerificationSteps: true,
-                              summaryMode: !verboseSteps,
-                              task,
-                              childTasks,
-                            })
-                          : undefined
-                      }
-                    />
-                    {renderCommandOutputs(commandOutputsAfterEvent)}
-                  </Fragment>
-                );
-              })}
-            </div>
-          )}
+          {conversationFlow}
         </div>
       </div>
 
@@ -7897,105 +8112,7 @@ export function MainContent({
               </svg>
             </button>
             {uiDensity === "focused" && (
-              <>
-                <div className="overflow-menu-container" ref={overflowMenuRef}>
-                  <button
-                    ref={overflowToggleBtnRef}
-                    className={`overflow-menu-btn ${showOverflowMenu ? "active" : ""}`}
-                    onClick={() => setShowOverflowMenu(!showOverflowMenu)}
-                    onKeyDown={handleOverflowButtonKeyDown}
-                    title="More options"
-                    aria-label="More options"
-                    aria-haspopup="menu"
-                    aria-expanded={showOverflowMenu}
-                  >
-                    <svg
-                      width="16"
-                      height="16"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                    >
-                      <circle cx="12" cy="12" r="1" />
-                      <circle cx="19" cy="12" r="1" />
-                      <circle cx="5" cy="12" r="1" />
-                    </svg>
-                  </button>
-                  {showOverflowMenu && (
-                    <div
-                      className="overflow-menu-dropdown"
-                      role="menu"
-                      aria-label="More options"
-                      onKeyDown={handleOverflowMenuKeyDown}
-                    >
-                      <div className="overflow-menu-item" role="none">
-                        <button
-                          className="folder-selector"
-                          onClick={() => {
-                            setOverflowSubmenu(null);
-                            setShowOverflowMenu(false);
-                            handleWorkspaceDropdownToggle();
-                          }}
-                          role="menuitem"
-                          data-overflow-menu-item
-                        >
-                          <svg
-                            width="14"
-                            height="14"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                          >
-                            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-                          </svg>
-                          <span>
-                            {workspace?.isTemp || isTempWorkspaceId(workspace?.id)
-                              ? "Work in a folder"
-                              : workspace?.name || "Work in a folder"}
-                          </span>
-                        </button>
-                      </div>
-                      <div className="overflow-menu-item" role="none">
-                        <button
-                          className={`shell-toggle ${shellEnabled ? "enabled" : ""}`}
-                          onClick={() => {
-                            setOverflowSubmenu(null);
-                            handleShellToggle();
-                            setShowOverflowMenu(false);
-                          }}
-                          role="menuitemcheckbox"
-                          aria-checked={shellEnabled}
-                          aria-label={`Shell commands ${shellEnabled ? "on" : "off"}`}
-                          data-overflow-menu-item
-                        >
-                          <svg
-                            width="14"
-                            height="14"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                          >
-                            <path d="M4 17l6-6-6-6M12 19h8" />
-                          </svg>
-                          <span>Shell</span>
-                          <span
-                            className={`goal-mode-switch-track ${shellEnabled ? "on" : ""}`}
-                            aria-hidden="true"
-                          >
-                            <span className="goal-mode-switch-thumb" />
-                          </span>
-                        </button>
-                      </div>
-                      {renderExecutionModeRow()}
-                      {renderTaskDomainRow()}
-                    </div>
-                  )}
-                  {showOverflowMenu && renderOverflowSubmenu()}
-                </div>
-                <div className="workspace-dropdown-container" ref={workspaceDropdownRef}>
+              <div className="workspace-dropdown-container" ref={workspaceDropdownRef}>
                   {showWorkspaceDropdown && (
                     <div className="workspace-dropdown">
                       {workspacesList.length > 0 && (
@@ -8057,7 +8174,6 @@ export function MainContent({
                     </div>
                   )}
                 </div>
-              </>
             )}
             <div className="mention-autocomplete-wrapper" ref={mentionContainerRef}>
               <textarea
@@ -8347,37 +8463,69 @@ export function MainContent({
           </div>
         </div>
         <div className="input-status-text">
-          <button
-            className="input-status-workspace"
-            onClick={handleWorkspaceDropdownToggle}
-            title={workspace?.path || "Select a workspace folder"}
-          >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden
+          <div className="input-status-left">
+            <button
+              className="input-status-workspace"
+              onClick={handleWorkspaceDropdownToggle}
+              title={workspace?.path || "Select a workspace folder"}
             >
-              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-              <line x1="8" y1="21" x2="16" y2="21" />
-              <line x1="12" y1="17" x2="12" y2="21" />
-            </svg>
-            <span className="input-status-workspace-path">
-              {workspace?.isTemp || isTempWorkspaceId(workspace?.id)
-                ? "Work in a folder"
-                : workspace?.path
-                  ? (() => {
-                      const parts = workspace.path.split(/[/\\]/).filter(Boolean);
-                      return parts.length > 2
-                        ? `~/.../${parts.slice(-2).join("/")}`
-                        : workspace.path;
-                    })()
-                  : "No folder selected"}
-            </span>
-          </button>
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden
+              >
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+              <span className="input-status-workspace-path">
+                {workspace?.isTemp || isTempWorkspaceId(workspace?.id)
+                  ? "Work in a folder"
+                  : workspace?.path
+                    ? (() => {
+                        const parts = workspace.path.split(/[/\\]/).filter(Boolean);
+                        return parts.length > 2
+                          ? `~/.../${parts.slice(-2).join("/")}`
+                          : workspace.path;
+                      })()
+                    : "No folder selected"}
+              </span>
+            </button>
+            <button
+              className={`input-status-shell ${shellEnabled ? "enabled" : ""}`}
+              onClick={handleShellToggle}
+              role="switch"
+              aria-checked={shellEnabled}
+              aria-label={`Shell commands ${shellEnabled ? "on" : "off"}`}
+              title={
+                shellEnabled
+                  ? "Shell commands enabled - click to disable"
+                  : "Shell commands disabled - click to enable"
+              }
+            >
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <path d="M4 17l6-6-6-6M12 19h8" />
+              </svg>
+              <span>Shell</span>
+              <span
+                className={`goal-mode-switch-track ${shellEnabled ? "on" : ""}`}
+                aria-hidden="true"
+              >
+                <span className="goal-mode-switch-thumb" />
+              </span>
+            </button>
+          </div>
           <div className="input-status-right">
             <div className="input-status-mode-wrap" ref={modeDropdownRef}>
               <button

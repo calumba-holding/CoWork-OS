@@ -1420,6 +1420,7 @@ export class TaskExecutor {
       typeof this.currentToolBatchGroupId === "string" && this.currentToolBatchGroupId.trim().length > 0
         ? this.currentToolBatchGroupId
         : undefined;
+    const batchCreatedPaths = new Set<string>();
     let projectedStepWebSearchCount = params.stepWebSearchCallCount;
     let callIndex = 0;
     const jobs: ParallelExecutionJob[] = [];
@@ -1464,7 +1465,7 @@ export class TaskExecutor {
         return null;
       }
 
-      const fileOpCheck = this.checkFileOperation(content.name, content.input);
+      const fileOpCheck = this.checkFileOperation(content.name, content.input, batchCreatedPaths);
       if (fileOpCheck.blocked) {
         return null;
       }
@@ -6572,6 +6573,7 @@ ${transcript}
   private checkFileOperation(
     toolName: string,
     input: Any,
+    batchCreatedPaths?: Set<string>,
   ): { blocked: boolean; reason?: string; suggestion?: string; cachedResult?: string } {
     // Check for redundant file reads
     if (toolName === "read_file" && input?.path) {
@@ -6609,6 +6611,17 @@ ${transcript}
     if (fileCreationTools.has(toolName) || isArtifactGenerationToolNameUtil(toolName)) {
       const filename = input?.filename || input?.path || input?.destPath || input?.destination;
       if (filename) {
+        const normalizedFilename = String(filename).toLowerCase().replace(/\\/g, "/");
+        if (batchCreatedPaths?.has(normalizedFilename)) {
+          return {
+            blocked: true,
+            reason: `File "${filename}" is already scheduled for creation in this tool batch`,
+            suggestion:
+              "Create the file once and then edit or refine that file in the same response instead of emitting a second creation call.",
+          };
+        }
+        batchCreatedPaths?.add(normalizedFilename);
+
         // Guard: don't write tiny HTML placeholders right after a failed fetch
         if (
           toolName === "write_file" &&
@@ -7254,6 +7267,21 @@ ${transcript}
     );
   }
 
+  private stepAllowsOptionalStructuredInput(description: string): boolean {
+    const desc = String(description || "").toLowerCase();
+    if (!desc.trim()) return false;
+    return (
+      /\bif it cannot be derived\b/.test(desc) ||
+      /\bif it cannot be inferred\b/.test(desc) ||
+      /\bif it cannot be determined\b/.test(desc) ||
+      /\bif[\s\S]{0,80}\b(?:git metadata|workspace git metadata|workspace metadata)\b/.test(desc) ||
+      /\bunless\b[\s\S]{0,80}\b(?:derived|inferred|determined|known|available)\b/.test(desc) ||
+      /\bif\b[\s\S]{0,80}\b(?:unknown|missing|unavailable|not available)\b[\s\S]{0,60}\b(?:repo|repository|owner\/repo|scope)\b/.test(
+        desc,
+      )
+    );
+  }
+
   private extractRequiredToolsFromStepDescription(description: string): Set<string> {
     const desc = String(description || "").toLowerCase();
     const required = new Set<string>();
@@ -7455,6 +7483,7 @@ ${transcript}
 
     const structuredInputIntent =
       executionMode === "plan" &&
+      !this.stepAllowsOptionalStructuredInput(desc) &&
       (/\b(ask|collect|gather|clarify|confirm)\b[\s\S]{0,60}\b(user|preferences?|inputs?|choices?|options?|requirements?|constraints?)\b/.test(
         desc,
       ) ||
@@ -18733,6 +18762,7 @@ TASK / CONVERSATION HISTORY:
       let stepSucceededWithCanvasMutation = false;
       const mutationEvidence: MutationEvidence[] = [];
       const successfulMutationGuardKeys = new Set<string>();
+      const batchCreatedPaths = new Set<string>();
       const stepStartedAt =
         typeof step.startedAt === "number" && Number.isFinite(step.startedAt)
           ? step.startedAt
@@ -20124,7 +20154,11 @@ TASK / CONVERSATION HISTORY:
             }
 
             // Check for redundant file operations
-            const fileOpCheck = this.checkFileOperation(content.name, content.input);
+            const fileOpCheck = this.checkFileOperation(
+              content.name,
+              content.input,
+              batchCreatedPaths,
+            );
             if (fileOpCheck.blocked) {
               console.log(`${this.logTag} Blocking redundant file operation: ${content.name}`);
               this.emitEvent("tool_blocked", {
@@ -24289,6 +24323,7 @@ TASK / CONVERSATION HISTORY:
         let hasDuplicateToolAttempt = false;
         let hasUnavailableToolAttempt = false;
         let hasHardToolFailureAttempt = false;
+        const batchCreatedPaths = new Set<string>();
         const followUpToolUseCount = (response.content || []).filter(
           (content: Any) => content?.type === "tool_use",
         ).length;
@@ -24655,7 +24690,11 @@ TASK / CONVERSATION HISTORY:
             }
 
             // Check for redundant file operations
-            const fileOpCheck = this.checkFileOperation(content.name, content.input);
+            const fileOpCheck = this.checkFileOperation(
+              content.name,
+              content.input,
+              batchCreatedPaths,
+            );
             if (fileOpCheck.blocked) {
               console.log(`${this.logTag} Blocking redundant file operation: ${content.name}`);
               this.emitEvent("tool_blocked", {

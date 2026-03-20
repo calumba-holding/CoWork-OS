@@ -494,6 +494,21 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     expect(requiredTools.has("localstorage")).toBe(false);
   });
 
+  it("does not require request_user_input when the step makes structured input conditional on missing git metadata", () => {
+    const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
+    fakeThis.task = {
+      agentConfig: {
+        executionMode: "plan",
+      },
+    };
+    const requiredTools = (TaskExecutor as Any).prototype.extractRequiredToolsFromStepDescription.call(
+      fakeThis,
+      "Use request_user_input to confirm the target GitHub repository in `owner/repo` format and the review scope if it cannot be derived from the current workspace git metadata.",
+    ) as Set<string>;
+
+    expect(requiredTools.has("request_user_input")).toBe(false);
+  });
+
   it("still infers real tools from via phrases when the tool exists", () => {
     const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
     const requiredTools = (TaskExecutor as Any).prototype.extractRequiredToolsFromStepDescription.call(

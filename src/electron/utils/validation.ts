@@ -1470,7 +1470,7 @@ const ConversationExampleSchema = z.object({
 });
 const ContextOverrideSchema = z.object({
   mode: ContextModeSchema,
-  traitOverrides: z.record(z.number().int().min(0).max(100)).optional(),
+  traitOverrides: z.record(z.string(), z.number().int().min(0).max(100)).optional(),
   additionalRules: z.array(BehavioralRuleSchema).max(20).optional(),
   styleOverrides: CommunicationStyleSchema.partial().optional(),
 });
@@ -1539,7 +1539,7 @@ export const PersonalityConfigV2Schema = z
 export const AwarenessUpdateBeliefSchema = z.object({
   id: z.string().min(1).max(200),
   patch: z
-    .record(z.unknown())
+    .record(z.string(), z.unknown())
     .optional()
     .refine(
       (p) => p == null || (typeof p === "object" && JSON.stringify(p).length <= 50000),
@@ -1550,7 +1550,7 @@ export const AwarenessUpdateBeliefSchema = z.object({
 export const AutonomyUpdateDecisionSchema = z.object({
   id: z.string().min(1).max(200),
   patch: z
-    .record(z.unknown())
+    .record(z.string(), z.unknown())
     .optional()
     .refine(
       (p) => p == null || (typeof p === "object" && JSON.stringify(p).length <= 50000),

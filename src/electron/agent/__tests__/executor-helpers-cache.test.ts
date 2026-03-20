@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FileOperationTracker, ToolCallDeduplicator, ToolFailureTracker } from "../executor-helpers";
+import { TaskExecutor } from "../executor";
 
 describe("ToolCallDeduplicator read-history invalidation", () => {
   it("clears read/list duplicate history while preserving write history", () => {
@@ -159,6 +160,30 @@ describe("FileOperationTracker cache invalidation", () => {
     expect(tracker.checkFileCreation("deliverables/report.md")).toEqual(
       expect.objectContaining({ isDuplicate: false }),
     );
+  });
+
+  it("blocks duplicate file creation within the same tool batch", () => {
+    const fakeThis: Any = Object.create(TaskExecutor.prototype);
+    fakeThis.fileOperationTracker = new FileOperationTracker();
+    fakeThis.logTag = "[Executor:test]";
+
+    const batchCreatedPaths = new Set<string>();
+    const first = (TaskExecutor as Any).prototype.checkFileOperation.call(
+      fakeThis,
+      "write_file",
+      { path: "artifacts/skills/demo/autonovel/chapters/ch_08.md", content: "one" },
+      batchCreatedPaths,
+    );
+    const second = (TaskExecutor as Any).prototype.checkFileOperation.call(
+      fakeThis,
+      "write_file",
+      { path: "artifacts/skills/demo/autonovel/chapters/ch_08.md", content: "two" },
+      batchCreatedPaths,
+    );
+
+    expect(first.blocked).toBe(false);
+    expect(second.blocked).toBe(true);
+    expect(second.reason || "").toContain("tool batch");
   });
 });
 

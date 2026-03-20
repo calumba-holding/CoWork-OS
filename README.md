@@ -57,19 +57,18 @@
 - **Runtime resilience** — Adaptive turn budgets, context-overflow recovery, and safe path normalization keep long-running tasks moving without silent file drift.
 - **Local-first & BYOK** — Your data and API keys stay on your machine. No telemetry. No middleman.
 
-### Recent Platform Updates
+### Release 0.5.11 Highlights
 
-Since `v0.5.0`, the main product updates are:
+The 0.5.11 release adds a broader operating surface around mission control, health, QA, connector profiling, and autonomous follow-up, while also refreshing the core agent runtime and documentation.
 
-- **44 MCP connectors** — The shipped registry includes Salesforce, Jira, HubSpot, Zendesk, ServiceNow, Linear, Asana, Okta, Resend, Discord, Google Workspace, Figma, Vercel, Stripe, Tavily, Grafana, Metabase, Socket, and 26 more. Install from Settings > Connectors. See [Enterprise Connectors](docs/enterprise-connectors.md).
-- **Direct-API-first integrations for GitHub and Notion** — Native CoWork paths are now preferred for GitHub and Notion, with MCP used only as a fallback when needed.
-- **Versioned tool catalog snapshots** — Tool discovery now uses a stable SHA-1 catalog version hash that covers native tools plus MCP state. MCP status or `tools_changed` events rebuild the snapshot immediately, and executor caches are busted when the shared catalog version changes.
-- **Collaborative UI refresh** — The sidebar and collaborative task views now use inline agent headers, Lucide-based role icons instead of raw emoji, cleaner markdown normalization, and explicit back-navigation from sub-task views into the parent task flow.
-- **Research channels for Telegram and WhatsApp** — Mark specific chats as link-dump channels so posted URLs automatically produce a structured findings report for follow-up work.
-- **Local AI expansion** — In addition to Ollama, CoWork OS now supports HuggingFace Local AI via `hf-agents` + `llama.cpp` for zero-API-cost local runs.
-- **Notification polish** — In-app notifications now show cleaner titles, humanized statuses, and direct task/view actions.
+- **Mission Control and health surfaces** — new Mission Control tabs, a dedicated Health panel, Dispatch panel, and connector profile view for operating and inspecting the system from the UI.
+- **QA and validation workflow** — Playwright QA tooling, QA IPC handlers, and browser-based validation panels for structured verification tasks.
+- **New native and connector integrations** — Figma, Monday, and Vercel MCP connectors; live Discord fetch support; and a native HealthKit bridge for Apple Health data.
+- **Runtime and agent routing** — chat-mode and context-mode detection, proactive suggestions, managed output paths, better tool-policy handling, and executor/provider refresh work.
+- **Operator intelligence updates** — autonomy/awareness services, heartbeat and briefing changes, strategic planner updates, mode-suggestion detection, automated-task detection, connector profiles, and health primitives.
+- **Shared release assets** — new bundled skills (`aurl`, `autonovel`, `autoresearch-report`, `playwright-qa`), document generators, and broad renderer polish across sidebar, settings, notifications, and personality tabs.
 
-See [Features](docs/features.md), [Research Channels](docs/research-channels.md), and [Providers](docs/providers.md) for the current runtime details.
+See [release notes for 0.5.11](docs/release-notes-0.5.11.md), [Features](docs/features.md), [Research Channels](docs/research-channels.md), and [Providers](docs/providers.md) for the current runtime details.
 
 ## Quick Start
 

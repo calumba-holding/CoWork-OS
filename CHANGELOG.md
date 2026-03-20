@@ -7,9 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-03-20
+
 ### Added
+- **Release notes for 0.5.11**: added a detailed summary page covering the mission-control surfaces, QA workflow, native HealthKit bridge, new connectors, and runtime routing changes included in this release. See [Release Notes 0.5.11](docs/release-notes-0.5.11.md).
 - **Discord live API tools**: `channel_fetch_discord_messages` fetches up to 100 recent messages directly from Discord (not just the local gateway log). `channel_download_discord_attachment` downloads attachments from any message by ID. Both tools require Discord channel configured and connected. See [Channel Integrations](docs/channels.md#discord) and [Channel Comparison](docs/channel-comparison.md).
 - **14 new MCP connectors** (44 total): Tavily (web search), tldraw (diagrams), Amplitude (analytics), Clerk (auth), Mem (notes), Grafana (monitoring), Mailtrap (email), Socket (dependency security), Metabase (analytics), Shadcn UI (components), GrowthBook (feature flags), Drafts (macOS notes), Fantastical (macOS calendar), Tomba (email finder/verifier). All npm-installable from Settings > Connectors.
+
+### Changed
+- **Mission Control and health surfaces**: new Mission Control tabs, a dedicated Health panel, Dispatch panel, and connector profile view now extend the primary operator surface.
+- **Runtime and agent routing**: chat-mode and context-mode detection, proactive suggestions, managed output paths, tool-policy changes, and executor/provider refreshes tightened task routing.
+- **Operator intelligence**: autonomy/awareness services, heartbeat orchestration, briefing updates, strategic planner changes, mode-suggestion detection, automated-task detection, connector profiles, and health primitives were refreshed.
+- **Renderer refresh**: sidebar, settings, home dashboard, notification, and personality surfaces were broadly updated for the new release layout.
+- **Shared release assets**: bundled skills, document generators, and type/provider formatting updates were added to support the expanded runtime.
 
 ## [0.5.1] - 2026-03-18
 
@@ -1079,7 +1089,8 @@ This release is the first recommended Windows install baseline for normal users 
 | 0.1.0 | 2025-01-24 | First public release with core features |
 | 0.0.1 | 2025-01-20 | Initial development setup |
 
-[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.11...HEAD
+[0.5.11]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.11
 [0.5.1]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.1
 [0.5.0]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.0
 [0.4.13]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.13

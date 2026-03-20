@@ -3533,7 +3533,10 @@ export async function setupIpcHandlers(
         );
       }
     }
-    return PersonalityManager.getPreviewPrompt(draft, contextMode as import("../../shared/types").ContextMode);
+    return PersonalityManager.getPreviewPrompt(
+      draft as Partial<import("../../shared/types").PersonalityConfigV2>,
+      contextMode as import("../../shared/types").ContextMode,
+    );
   });
 
   ipcMain.handle(IPC_CHANNELS.PERSONALITY_GET_TRAIT_PRESETS, async () => {
