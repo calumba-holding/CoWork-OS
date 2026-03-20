@@ -132,7 +132,7 @@ export function FileViewer({ filePath, workspacePath, onClose }: FileViewerProps
           <iframe
             className="file-viewer-html"
             srcDoc={fileData.htmlContent || ""}
-            sandbox="allow-same-origin"
+            sandbox="allow-scripts allow-same-origin"
             title={fileData.fileName}
           />
         );
