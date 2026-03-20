@@ -222,6 +222,37 @@ describe("ImprovementCandidateService", () => {
     expect(service.listCandidates("workspace-1").filter((candidate) => candidate.source === "task_failure")).toHaveLength(0);
   });
 
+  it("ignores failure candidates produced by automated autonomy tasks", async () => {
+    tasks.set("task-1", {
+      id: "task-1",
+      title: "Chief of Staff briefing",
+      prompt: "Prepare the latest briefing",
+      status: "completed",
+      workspaceId: "workspace-1",
+      source: "hook",
+      terminalStatus: "partial_success",
+      failureClass: "contract_error",
+      resultSummary: "Verification failed: expected artifact file evidence was not detected.",
+    });
+    recentTaskRows = [{ id: "task-1" }];
+    recentEventRows = [
+      {
+        task_id: "task-1",
+        type: "verification_failed",
+        payload: JSON.stringify({
+          message: "Verification failed during routine automated briefing generation.",
+        }),
+        id: "event-1",
+        timestamp: Date.now(),
+      },
+    ];
+
+    const service = new ImprovementCandidateService(db);
+    await service.refresh();
+
+    expect(service.listCandidates("workspace-1").filter((candidate) => candidate.source !== "dev_log")).toHaveLength(0);
+  });
+
   it("lowers fixability for quota and timeout-driven failures", async () => {
     tasks.set("task-1", {
       id: "task-1",
