@@ -3,9 +3,9 @@
  * Allows switching between Anthropic API and AWS Bedrock
  */
 
-import type { LLMProviderType } from "../../../shared/types";
+import type { LLMProviderType, AzureReasoningEffort } from "../../../shared/types";
 
-export type { LLMProviderType };
+export type { LLMProviderType, AzureReasoningEffort };
 
 export interface LLMProviderConfig {
   type: LLMProviderType;
@@ -37,6 +37,7 @@ export interface LLMProviderConfig {
   azureEndpoint?: string;
   azureDeployment?: string;
   azureApiVersion?: string;
+  azureReasoningEffort?: AzureReasoningEffort;
   // Groq-specific
   groqApiKey?: string;
   groqBaseUrl?: string;
