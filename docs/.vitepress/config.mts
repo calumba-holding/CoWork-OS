@@ -68,6 +68,9 @@ export default defineConfig({
       {
         text: 'Reference',
         items: [
+          { text: 'Channel Integrations', link: '/channels' },
+          { text: 'Channel Comparison', link: '/channel-comparison' },
+          { text: 'aurl skill (OpenAPI/GraphQL)', link: '/skills/aurl' },
           { text: 'Use Cases', link: '/use-cases' },
           { text: 'Simplify & Batch', link: '/simplify-batch' },
           { text: 'GTM Strategy', link: '/gtm-strategy' },
