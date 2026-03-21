@@ -239,7 +239,7 @@ export class IntentRouter {
       "execution",
       3,
       "action-verb",
-      /\b(create|build|make|edit|write|fix|deploy|run|install|execute|open|search|fetch|schedule|configure|implement|check|read|review|find|analyze|examine|inspect|list|show|scan|look|update|modify|delete|remove|rename|move|copy|test|verify|continue|commit|push|pull|merge|raise|raised|cherry-?pick|rebase|revert|publish|release|tag|submit|approve|request|close|research|investigate|summarize|compare|generate|draft|prepare|export|troubleshoot|diagnose|explore|spawn|crawl|scrape|extract|index|monitor|track|profile|audit|map|catalog|enumerate|parse|process|transform|migrate|sync|import|clone|fork)\b/.test(
+      /\b(create|build|make|edit|write|fix|deploy|run|install|execute|open|search|fetch|schedule|configure|implement|check|read|review|find|analyze|examine|inspect|list|show|scan|look|update|modify|delete|remove|rename|move|copy|test|verify|continue|commit|push|pull|merge|raise|raised|cherry-?pick|rebase|revert|publish|release|tag|submit|approve|request|close|research|investigate|summarize|compare|generate|draft|prepare|export|troubleshoot|diagnose|explore|spawn|crawl|scrape|extract|index|monitor|track|profile|audit|map|catalog|enumerate|parse|process|transform|migrate|sync|import|clone|fork|draw|paint|illustrate|render|sketch)\b/.test(
         lower,
       ),
     );
@@ -310,6 +310,16 @@ export class IntentRouter {
       2,
       "cloud-storage-query",
       cloudProviderMentioned && cloudQueryIntent,
+    );
+    // Image creation: draw, create image, generate picture, etc.
+    add(
+      "execution",
+      4,
+      "image-creation-intent",
+      /\b(draw|paint|illustrate|render|sketch)\b.*\b(in|of|a|an|the)\b/.test(lower) ||
+        /\b(create|generate|make)\s+(?:an?\s+)?(?:image|picture|photo|illustration)\s+(?:of|with)\b/i.test(
+          lower,
+        ),
     );
 
     // Redirect / re-scope intent — user is pivoting away from prior work to a new direction.
