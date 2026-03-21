@@ -65,6 +65,8 @@ import {
   TEMP_WORKSPACE_ROOT_DIR_NAME,
   isTempWorkspaceId,
 } from "../shared/types";
+import type { Task } from "../shared/types";
+import { isAutomatedTaskLike } from "../shared/automated-task-detection";
 import { GuardrailManager } from "./guardrails/guardrail-manager";
 import { AppearanceManager } from "./settings/appearance-manager";
 import { MemoryFeaturesManager } from "./settings/memory-features-manager";
@@ -243,6 +245,23 @@ registerMediaScheme();
 // Ensure only one CoWork OS instance runs at a time.
 // Without this, a second instance can mark in-flight tasks as "orphaned" (failed) and contend on the DB.
 const gotTheLock = app.requestSingleInstanceLock();
+
+const ACTIVE_FOREGROUND_TASK_STATUSES = new Set<Task["status"]>([
+  "pending",
+  "queued",
+  "planning",
+  "executing",
+  "interrupted",
+  "paused",
+  "blocked",
+]);
+
+function isForegroundUserTask(task: Task): boolean {
+  if (!ACTIVE_FOREGROUND_TASK_STATUSES.has(task.status)) return false;
+  if (isAutomatedTaskLike(task)) return false;
+  const source = task.source || "manual";
+  return source === "manual" || source === "api";
+}
 if (!gotTheLock) {
   app.quit();
 } else {
@@ -1126,6 +1145,14 @@ if (!gotTheLock) {
         );
       };
 
+      const hasActiveForegroundTask = (workspaceId?: string): boolean => {
+        const activeTasks = taskRepo.findByStatus(Array.from(ACTIVE_FOREGROUND_TASK_STATUSES));
+        return activeTasks.some((task) => {
+          if (workspaceId && task.workspaceId !== workspaceId) return false;
+          return isForegroundUserTask(task);
+        });
+      };
+
       // Initialize HeartbeatService with dependencies
       const heartbeatDeps: HeartbeatServiceDeps = {
         agentRoleRepo,
@@ -1177,6 +1204,7 @@ if (!gotTheLock) {
           const workspace = workspaceRepo.findById(workspaceId);
           return workspace?.path;
         },
+        hasActiveForegroundTask,
         recordActivity: ({ workspaceId, agentRoleId, title, description, metadata }) => {
           activityRepo.create({
             workspaceId,
@@ -1211,8 +1239,8 @@ if (!gotTheLock) {
           const notificationService = getNotificationService();
           await notificationService?.add(params);
         },
-        captureMemory: (workspaceId, taskId, type, content, isPrivate) =>
-          MemoryService.capture(workspaceId, taskId, type, content, isPrivate),
+        captureMemory: (workspaceId, taskId, type, content, isPrivate, options) =>
+          MemoryService.capture(workspaceId, taskId, type, content, isPrivate, options),
       };
 
       heartbeatService = new HeartbeatService(heartbeatDeps);
@@ -1249,6 +1277,7 @@ if (!gotTheLock) {
               allowUserInput: false,
             },
           }),
+        hasActiveManualTask: (workspaceId) => hasActiveForegroundTask(workspaceId) || hasActiveForegroundTask(),
         recordActivity: ({ workspaceId, title, description, metadata }) => {
           activityRepo.create({
             workspaceId,
