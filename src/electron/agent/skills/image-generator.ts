@@ -7,7 +7,7 @@ import { LLMProviderFactory } from "../llm/provider-factory";
 /**
  * Image generation provider types
  */
-export type ImageProvider = "gemini" | "openai" | "azure";
+export type ImageProvider = "gemini" | "openai" | "azure" | "openrouter";
 
 /**
  * Image generation model types
@@ -71,10 +71,15 @@ export interface ImageGenerationResult {
 
 /**
  * Map our Gemini presets to Gemini model IDs.
+ * nano-banana-2 = Gemini 3.1 Flash Image Preview (Nano Banana 2)
  */
-const GEMINI_MODEL_MAP: Record<"gemini-image-fast" | "gemini-image-pro", string> = {
+const GEMINI_MODEL_MAP: Record<
+  "gemini-image-fast" | "gemini-image-pro" | "nano-banana-2",
+  string
+> = {
   "gemini-image-fast": "gemini-2.5-flash-image",
   "gemini-image-pro": "gemini-3-pro-image-preview",
+  "nano-banana-2": "gemini-3.1-flash-image-preview",
 };
 
 function buildSetupHint(provider: ImageProvider): { type: string; label: string; target: string } {
@@ -82,6 +87,8 @@ function buildSetupHint(provider: ImageProvider): { type: string; label: string;
     return { type: "open_settings", label: "Set up Gemini API key", target: "gemini" };
   if (provider === "azure")
     return { type: "open_settings", label: "Set up Azure OpenAI", target: "azure" };
+  if (provider === "openrouter")
+    return { type: "open_settings", label: "Set up OpenRouter API key", target: "openrouter" };
   return { type: "open_settings", label: "Set up OpenAI API key", target: "openai" };
 }
 
@@ -213,6 +220,7 @@ export function inferImageProviderFromText(text: string): ImageProvider | null {
   const t = (text || "").toLowerCase();
   if (!t.trim()) return null;
   if (t.includes("azure openai") || /\bazure\b/.test(t)) return "azure";
+  if (t.includes("openrouter")) return "openrouter";
   if (t.includes("gemini")) return "gemini";
   if (t.includes("openai")) return "openai";
   return null;
@@ -230,9 +238,11 @@ function getConfiguredImageProviders(
     azureImageDeployments.length > 0;
   if (azureOk) providers.push("azure");
 
-  // For image generation, OpenAI currently requires API key (OAuth not supported here yet).
   const openaiKey = settings.openai?.apiKey?.trim();
   if (openaiKey) providers.push("openai");
+
+  const openrouterKey = settings.openrouter?.apiKey?.trim();
+  if (openrouterKey) providers.push("openrouter");
 
   const geminiKey = settings.gemini?.apiKey?.trim();
   if (geminiKey) providers.push("gemini");
@@ -241,8 +251,50 @@ function getConfiguredImageProviders(
 }
 
 function sortProvidersByDefaultPreference(providers: ImageProvider[]): ImageProvider[] {
-  const priority: Record<ImageProvider, number> = { azure: 0, openai: 1, gemini: 2 };
-  return [...providers].sort((a, b) => priority[a] - priority[b]);
+  const priority: Record<ImageProvider, number> = {
+    azure: 0,
+    openai: 1,
+    openrouter: 2,
+    gemini: 3,
+  };
+  return [...providers].sort((a, b) => (priority[a] ?? 99) - (priority[b] ?? 99));
+}
+
+type ImageModelPreset = "gpt-image-1.5" | "nano-banana-2";
+
+/** Build provider order from settings.imageGeneration (default + backup). */
+function buildProviderOrderFromImageSettings(
+  settings: ReturnType<typeof LLMProviderFactory.loadSettings>,
+): Array<{ provider: ImageProvider; modelPreset?: ImageModelPreset }> {
+  const img = settings.imageGeneration;
+  const defaultPreset = img?.defaultModel;
+  const backupPreset = img?.backupModel;
+  const configured = getConfiguredImageProviders(settings);
+
+  const order: Array<{ provider: ImageProvider; modelPreset?: ImageModelPreset }> = [];
+
+  if (defaultPreset === "gpt-image-1.5") {
+    for (const p of ["azure", "openai", "openrouter"] as ImageProvider[]) {
+      if (configured.includes(p)) order.push({ provider: p, modelPreset: "gpt-image-1.5" });
+    }
+  }
+  if (defaultPreset === "nano-banana-2" && configured.includes("gemini")) {
+    order.push({ provider: "gemini", modelPreset: "nano-banana-2" });
+  }
+
+  if (backupPreset && backupPreset !== defaultPreset) {
+    if (backupPreset === "gpt-image-1.5") {
+      for (const p of ["azure", "openai", "openrouter"] as ImageProvider[]) {
+        if (configured.includes(p) && !order.some((o) => o.provider === p))
+          order.push({ provider: p, modelPreset: "gpt-image-1.5" });
+      }
+    } else if (backupPreset === "nano-banana-2" && configured.includes("gemini")) {
+      if (!order.some((o) => o.provider === "gemini"))
+        order.push({ provider: "gemini", modelPreset: "nano-banana-2" });
+    }
+  }
+
+  return order;
 }
 
 export function selectImageProviderOrder(args: {
@@ -250,8 +302,9 @@ export function selectImageProviderOrder(args: {
   providerOverride?: ImageProvider | "auto";
   modelOverride?: string;
   prompt: string;
-}): ImageProvider[] {
-  const configured = sortProvidersByDefaultPreference(getConfiguredImageProviders(args.settings));
+}): Array<{ provider: ImageProvider; modelPreset?: ImageModelPreset }> {
+  const settings = args.settings;
+  const configured = sortProvidersByDefaultPreference(getConfiguredImageProviders(settings));
 
   const requestedOpenAIModel =
     resolveOpenAIModelOverride(args.modelOverride) || inferOpenAIImageModelFromText(args.prompt);
@@ -261,6 +314,12 @@ export function selectImageProviderOrder(args: {
     inferImageProviderFromText(args.modelOverride || "") ||
     inferImageProviderFromText(args.prompt);
 
+  const fromSettings = buildProviderOrderFromImageSettings(settings);
+  if (fromSettings.length > 0 && !explicitProvider && !args.modelOverride) {
+    return fromSettings;
+  }
+
+  const legacyOrder: ImageProvider[] = [];
   const base =
     explicitProvider ||
     (requestedOpenAIModel
@@ -268,15 +327,23 @@ export function selectImageProviderOrder(args: {
         ? "azure"
         : configured.includes("openai")
           ? "openai"
-          : null
+          : configured.includes("openrouter")
+            ? "openrouter"
+            : null
       : null) ||
     configured[0] ||
     null;
-  if (!base) return [];
-
-  // Start with base, then configured providers, then stable global order (deduped).
-  const order: ImageProvider[] = [base, ...configured, "gemini", "openai", "azure"];
-  return order.filter((p, idx) => order.indexOf(p) === idx);
+  if (base) {
+    legacyOrder.push(base);
+    for (const p of configured) {
+      if (!legacyOrder.includes(p)) legacyOrder.push(p);
+    }
+    for (const p of ["gemini", "openai", "azure", "openrouter"] as ImageProvider[]) {
+      if (!legacyOrder.includes(p)) legacyOrder.push(p);
+    }
+  }
+  const deduped = legacyOrder.filter((p, idx) => legacyOrder.indexOf(p) === idx);
+  return deduped.map((provider) => ({ provider }));
 }
 
 /**
@@ -302,7 +369,8 @@ export class ImageGenerator {
       prompt,
     });
 
-    const baseProvider = providerOrder[0] || null;
+    const baseEntry = providerOrder[0];
+    const baseProvider = baseEntry?.provider ?? null;
     // Use a ref object so TS doesn't incorrectly narrow a local union to `null` across closures.
     const bestErrorRef: {
       current: {
@@ -332,26 +400,28 @@ export class ImageGenerator {
         images: [],
         model: normalizeOpenAIImageModel(modelOverride) || "gpt-image-1.5",
         error:
-          "No image generation provider configured. Configure Gemini/OpenAI/Azure OpenAI in Settings.",
+          "No image generation provider configured. Configure Gemini/OpenAI/Azure/OpenRouter in Settings.",
         actionHint: buildSetupHint("openai"),
       };
     }
 
-    for (const provider of providerOrder) {
+    for (const entry of providerOrder) {
+      const { provider, modelPreset } = entry;
       try {
         if (provider === "gemini") {
           const apiKey = settings.gemini?.apiKey?.trim();
           if (!apiKey) {
-            // Only surface this if Gemini is actually configured as an image provider.
             if (configuredProviders.includes("gemini")) {
               considerError("gemini", "Gemini API key not configured.");
             }
             continue;
           }
-          const chosen: "gemini-image-fast" | "gemini-image-pro" =
-            modelOverride === "gemini-image-fast" || modelOverride === "gemini-image-pro"
-              ? (modelOverride as Any)
-              : "gemini-image-pro";
+          const chosen: "gemini-image-fast" | "gemini-image-pro" | "nano-banana-2" =
+            modelPreset === "nano-banana-2"
+              ? "nano-banana-2"
+              : modelOverride === "gemini-image-fast" || modelOverride === "gemini-image-pro"
+                ? (modelOverride as Any)
+                : "gemini-image-pro";
           const modelId = GEMINI_MODEL_MAP[chosen];
           return await this.generateWithGemini({
             apiKey,
@@ -366,7 +436,6 @@ export class ImageGenerator {
         if (provider === "openai") {
           const apiKey = settings.openai?.apiKey?.trim();
           if (!apiKey) {
-            // Only surface this if OpenAI is actually configured as an image provider.
             if (configuredProviders.includes("openai")) {
               considerError(
                 "openai",
@@ -377,6 +446,7 @@ export class ImageGenerator {
           }
           const chosenModel =
             resolveOpenAIModelOverride(modelOverride) ||
+            (modelPreset === "gpt-image-1.5" ? "gpt-image-1.5" : null) ||
             inferOpenAIImageModelFromText(prompt) ||
             "gpt-image-1.5";
           return await this.generateWithOpenAI({
@@ -395,7 +465,7 @@ export class ImageGenerator {
           const apiVersion = settings.azure?.apiVersion?.trim() || "2024-02-15-preview";
           const deploymentsToTry = selectAzureImageDeployments({
             settings,
-            modelOverride,
+            modelOverride: modelPreset === "gpt-image-1.5" ? "gpt-image-1.5" : modelOverride,
             prompt,
           });
 
@@ -431,6 +501,41 @@ export class ImageGenerator {
             "azure",
             azureLast?.error || "Azure OpenAI image generation failed",
             azureLast?.model,
+          );
+          continue;
+        }
+
+        if (provider === "openrouter") {
+          const apiKey = settings.openrouter?.apiKey?.trim();
+          const baseUrl = (
+            settings.openrouter?.baseUrl?.trim() || "https://openrouter.ai/api/v1"
+          ).replace(/\/+$/, "");
+          if (!apiKey) {
+            if (configuredProviders.includes("openrouter")) {
+              considerError("openrouter", "OpenRouter API key not configured.");
+            }
+            continue;
+          }
+          const openaiModel =
+            resolveOpenAIModelOverride(modelOverride) ||
+            (modelPreset === "gpt-image-1.5" ? "gpt-image-1.5" : null) ||
+            inferOpenAIImageModelFromText(prompt) ||
+            "gpt-image-1.5";
+          const openRouterModel = `openai/${openaiModel}`;
+          const result = await this.generateWithOpenRouter({
+            apiKey,
+            baseUrl,
+            model: openRouterModel,
+            prompt,
+            filename,
+            imageSize,
+            numberOfImages,
+          });
+          if (result.success) return result;
+          considerError(
+            "openrouter",
+            result.error || "OpenRouter image generation failed",
+            result.model,
           );
           continue;
         }
@@ -849,6 +954,112 @@ export class ImageGenerator {
         model: args.deployment,
         error: error?.message || "Failed to generate image",
         actionHint: buildSetupHint("azure"),
+      };
+    }
+  }
+
+  private async generateWithOpenRouter(args: {
+    apiKey: string;
+    baseUrl: string;
+    model: string;
+    prompt: string;
+    filename?: string;
+    imageSize: ImageSize;
+    numberOfImages: number;
+  }): Promise<ImageGenerationResult> {
+    const baseFilename = args.filename || `generated_${Date.now()}`;
+    const outputDir = this.workspace.path;
+    const url = `${args.baseUrl}/chat/completions`;
+
+    try {
+      console.log(`[ImageGenerator] Generating image with openrouter (${args.model})`);
+
+      const body: Record<string, Any> = {
+        model: args.model,
+        messages: [{ role: "user", content: args.prompt }],
+        modalities: ["image", "text"],
+        image_config: { image_size: args.imageSize },
+      };
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${args.apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        let errorMessage = `OpenRouter image generation failed: ${response.status} ${response.statusText}`;
+        try {
+          const errorJson = JSON.parse(errorBody);
+          if (errorJson.error?.message) errorMessage = errorJson.error.message;
+        } catch {
+          // Preserve fallback message when API error is not JSON.
+        }
+        return {
+          success: false,
+          images: [],
+          provider: "openrouter",
+          model: args.model,
+          error: errorMessage,
+          actionHint: buildSetupHint("openrouter"),
+        };
+      }
+
+      const data = (await response.json()) as Any;
+      const message = data?.choices?.[0]?.message;
+      const imageItems: Array<{ image_url?: { url?: string }; imageUrl?: { url?: string } }> =
+        message?.images || message?.content?.filter?.((p: Any) => p.type === "image_url") || [];
+
+      const images: ImageGenerationResult["images"] = [];
+      const n = Math.min(args.numberOfImages, imageItems.length || 4);
+
+      for (let i = 0; i < imageItems.length && images.length < n; i++) {
+        const item = imageItems[i];
+        const dataUrl =
+          item?.image_url?.url || item?.imageUrl?.url || (typeof item === "string" ? item : null);
+        if (!dataUrl || !dataUrl.startsWith("data:image/")) continue;
+
+        const match = dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+        if (!match) continue;
+
+        const mimeType = `image/${match[1]}`;
+        const extension = mimetypes.extension(mimeType) || "png";
+        const imageName =
+          imageItems.length > 1 ? `${baseFilename}_${i + 1}.${extension}` : `${baseFilename}.${extension}`;
+        const outputPath = path.join(outputDir, imageName);
+
+        const imageBuffer = Buffer.from(match[2], "base64");
+        await fs.promises.writeFile(outputPath, imageBuffer);
+        const stats = await fs.promises.stat(outputPath);
+        images.push({ path: outputPath, filename: imageName, mimeType, size: stats.size });
+      }
+
+      if (images.length === 0) {
+        return {
+          success: false,
+          images: [],
+          provider: "openrouter",
+          model: args.model,
+          error:
+            (message?.content as string) ||
+            "No images were returned by OpenRouter. The model may not support image generation.",
+          actionHint: buildSetupHint("openrouter"),
+        };
+      }
+
+      return { success: true, images, provider: "openrouter", model: args.model };
+    } catch (error: Any) {
+      return {
+        success: false,
+        images: [],
+        provider: "openrouter",
+        model: args.model,
+        error: error?.message || "Failed to generate image",
+        actionHint: buildSetupHint("openrouter"),
       };
     }
   }
