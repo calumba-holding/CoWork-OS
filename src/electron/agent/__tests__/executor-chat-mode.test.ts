@@ -89,6 +89,52 @@ describe("TaskExecutor chat mode", () => {
     expect(highConfidenceRouting).not.toHaveBeenCalled();
   });
 
+  it("does not treat inferred chat intent as explicit chat mode", async () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+
+    executor.task = {
+      id: "task-inferred-chat",
+      title: "hello",
+      prompt: "hello",
+      userPrompt: "hello",
+      rawPrompt: "hello",
+      createdAt: Date.now(),
+      agentConfig: {
+        executionMode: "execute",
+        executionModeSource: "strategy",
+        conversationMode: "chat",
+        taskIntent: "chat",
+      },
+    };
+
+    expect((TaskExecutor as Any).prototype.isExplicitChatExecutionMode.call(executor)).toBe(false);
+
+    executor.shouldEmitAnswerFirst = vi.fn().mockReturnValue(true);
+    executor.hasDirectAnswerReady = vi.fn().mockReturnValue(true);
+    executor.promptRequestsArtifactOutput = vi.fn().mockReturnValue(false);
+    executor.isLikelyTaskRequest = vi.fn().mockReturnValue(false);
+
+    expect((TaskExecutor as Any).prototype.shouldShortCircuitSimpleNonExecuteAnswer.call(executor)).toBe(false);
+  });
+
+  it("only exposes the last non-verification step as an assistant bubble", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.plan = {
+      description: "Hello plan",
+      steps: [
+        { id: "1", description: "Interpret the task as a simple chat greeting.", kind: "primary" },
+        { id: "2", description: "Draft a concise reply.", kind: "primary" },
+        { id: "3", description: "Send the greeting response.", kind: "primary" },
+        { id: "4", description: "Verify: confirm the reply includes a greeting and help offer.", kind: "verification" },
+      ],
+    };
+
+    expect((TaskExecutor as Any).prototype.isLastVisibleAssistantStep.call(executor, executor.plan.steps[0])).toBe(false);
+    expect((TaskExecutor as Any).prototype.isLastVisibleAssistantStep.call(executor, executor.plan.steps[1])).toBe(false);
+    expect((TaskExecutor as Any).prototype.isLastVisibleAssistantStep.call(executor, executor.plan.steps[2])).toBe(true);
+    expect((TaskExecutor as Any).prototype.isLastVisibleAssistantStep.call(executor, executor.plan.steps[3])).toBe(false);
+  });
+
   it("uses the 48K cap for explicit chat sessions", async () => {
     const executor = Object.create(TaskExecutor.prototype) as Any;
     const createMessageWithTimeout = vi.fn().mockResolvedValue({
