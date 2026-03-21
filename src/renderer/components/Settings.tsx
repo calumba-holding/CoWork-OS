@@ -210,6 +210,7 @@ interface ProviderRoutingConfig {
   profileRoutingEnabled?: boolean;
   strongModelKey?: string;
   cheapModelKey?: string;
+  automatedTaskModelKey?: string;
   preferStrongForVerification?: boolean;
 }
 
@@ -531,6 +532,7 @@ const LLM_PROVIDER_ICONS: Record<string, ReactNode> = {
   anthropic: <Layers {...S} />,
   openai: <CircleDot {...S} />,
   azure: <Cloud {...S} />,
+  "azure-anthropic": <Cloud {...S} />,
   gemini: <Star {...S} />,
   openrouter: <Globe {...S} />,
   ollama: <Box {...S} />,
@@ -689,6 +691,14 @@ export function Settings({
   const [openaiOAuthConnected, setOpenaiOAuthConnected] = useState(false);
   const [openaiOAuthLoading, setOpenaiOAuthLoading] = useState(false);
 
+  // Image generation (text-to-image) state
+  const [imageGenDefaultModel, setImageGenDefaultModel] = useState<
+    "gpt-image-1.5" | "nano-banana-2" | ""
+  >("");
+  const [imageGenBackupModel, setImageGenBackupModel] = useState<
+    "gpt-image-1.5" | "nano-banana-2" | ""
+  >("");
+
   // Azure OpenAI state
   const [azureApiKey, setAzureApiKey] = useState("");
   const [azureEndpoint, setAzureEndpoint] = useState("");
@@ -697,6 +707,13 @@ export function Settings({
   const [azureApiVersion, setAzureApiVersion] = useState("2024-02-15-preview");
   const [azureReasoningEffort, setAzureReasoningEffort] =
     useState<AzureReasoningEffort>("medium");
+
+  // Azure Anthropic state
+  const [azureAnthropicApiKey, setAzureAnthropicApiKey] = useState("");
+  const [azureAnthropicEndpoint, setAzureAnthropicEndpoint] = useState("");
+  const [azureAnthropicDeployment, setAzureAnthropicDeployment] = useState("");
+  const [azureAnthropicDeploymentsText, setAzureAnthropicDeploymentsText] = useState("");
+  const [azureAnthropicApiVersion, setAzureAnthropicApiVersion] = useState("2023-06-01");
 
   // Groq state
   const [groqApiKey, setGroqApiKey] = useState("");
@@ -849,6 +866,7 @@ export function Settings({
         : undefined;
       const strongModelKey = value.strongModelKey?.trim();
       const cheapModelKey = value.cheapModelKey?.trim();
+      const automatedTaskModelKey = value.automatedTaskModelKey?.trim();
       const profileRoutingEnabled = value.profileRoutingEnabled === true;
       const preferStrongForVerification =
         typeof value.preferStrongForVerification === "boolean"
@@ -861,6 +879,7 @@ export function Settings({
         (cachedModels && cachedModels.length > 0) ||
         strongModelKey ||
         cheapModelKey ||
+        automatedTaskModelKey ||
         profileRoutingEnabled ||
         typeof preferStrongForVerification === "boolean"
       ) {
@@ -871,6 +890,7 @@ export function Settings({
           ...(cachedModels && cachedModels.length > 0 ? { cachedModels } : {}),
           ...(strongModelKey ? { strongModelKey } : {}),
           ...(cheapModelKey ? { cheapModelKey } : {}),
+          ...(automatedTaskModelKey ? { automatedTaskModelKey } : {}),
           ...(profileRoutingEnabled ? { profileRoutingEnabled: true } : {}),
           ...(typeof preferStrongForVerification === "boolean"
             ? { preferStrongForVerification }
@@ -913,6 +933,23 @@ export function Settings({
     };
   };
 
+  const buildAzureAnthropicSettings = () => {
+    const deployments = parseAzureDeployments(azureAnthropicDeploymentsText);
+    let deployment = azureAnthropicDeployment.trim();
+    if (deployment) {
+      if (!deployments.includes(deployment)) {
+        deployments.unshift(deployment);
+      }
+    } else if (deployments.length > 0) {
+      deployment = deployments[0];
+    }
+
+    return {
+      deployment: deployment || undefined,
+      deployments: deployments.length > 0 ? deployments : undefined,
+    };
+  };
+
   const getProviderRoutingConfig = (providerType: LLMProviderType): ProviderRoutingConfig => {
     const resolvedType = resolveCustomProviderId(providerType);
     const customEntry = CUSTOM_PROVIDER_MAP.get(resolvedType);
@@ -935,6 +972,8 @@ export function Settings({
         return settings.openai || {};
       case "azure":
         return settings.azure || {};
+      case "azure-anthropic":
+        return settings.azureAnthropic || {};
       case "groq":
         return settings.groq || {};
       case "xai":
@@ -998,6 +1037,9 @@ export function Settings({
       case "azure":
         patchSettings("azure");
         return;
+      case "azure-anthropic":
+        patchSettings("azureAnthropic");
+        return;
       case "groq":
         patchSettings("groq");
         return;
@@ -1042,6 +1084,10 @@ export function Settings({
         const azureBuilt = buildAzureSettings();
         return azureBuilt.deployment || settings.azure?.deployment || "";
       }
+      case "azure-anthropic": {
+        const azureAnthropicBuilt = buildAzureAnthropicSettings();
+        return azureAnthropicBuilt.deployment || settings.azureAnthropic?.deployment || "";
+      }
       case "groq":
         return groqModel || settings.groq?.model || "";
       case "xai":
@@ -1071,6 +1117,7 @@ export function Settings({
     addOption(getProviderPrimaryModel(providerType));
     addOption(routing.strongModelKey);
     addOption(routing.cheapModelKey);
+    addOption(routing.automatedTaskModelKey);
 
     return Array.from(deduped.values());
   };
@@ -1093,6 +1140,15 @@ export function Settings({
       }
     }
   }, [azureDeploymentsText, azureDeployment]);
+
+  useEffect(() => {
+    if (!azureAnthropicDeployment) {
+      const deployments = parseAzureDeployments(azureAnthropicDeploymentsText);
+      if (deployments[0]) {
+        setAzureAnthropicDeployment(deployments[0]);
+      }
+    }
+  }, [azureAnthropicDeploymentsText, azureAnthropicDeployment]);
 
   const loadConfigStatus = async () => {
     try {
@@ -1222,6 +1278,33 @@ export function Settings({
       }
       setAzureReasoningEffort(loadedSettings.azure?.reasoningEffort || "medium");
 
+      // Set Azure Anthropic form state
+      if (loadedSettings.azureAnthropic?.apiKey) {
+        setAzureAnthropicApiKey(loadedSettings.azureAnthropic.apiKey);
+      }
+      if (loadedSettings.azureAnthropic?.endpoint) {
+        setAzureAnthropicEndpoint(loadedSettings.azureAnthropic.endpoint);
+      }
+      {
+        const loadedDeployments =
+          loadedSettings.azureAnthropic?.deployments && loadedSettings.azureAnthropic.deployments.length > 0
+            ? loadedSettings.azureAnthropic.deployments
+            : loadedSettings.azureAnthropic?.deployment
+              ? [loadedSettings.azureAnthropic.deployment]
+              : [];
+        if (loadedDeployments.length > 0) {
+          setAzureAnthropicDeploymentsText(loadedDeployments.join("\n"));
+        }
+        const selectedDeployment =
+          loadedSettings.azureAnthropic?.deployment || loadedDeployments[0];
+        if (selectedDeployment) {
+          setAzureAnthropicDeployment(selectedDeployment);
+        }
+      }
+      if (loadedSettings.azureAnthropic?.apiVersion) {
+        setAzureAnthropicApiVersion(loadedSettings.azureAnthropic.apiVersion);
+      }
+
       // Set Groq form state
       if (loadedSettings.groq?.apiKey) {
         setGroqApiKey(loadedSettings.groq.apiKey);
@@ -1278,6 +1361,18 @@ export function Settings({
       }
       if (loadedSettings.cachedOpenAICompatibleModels) {
         setOpenaiCompatModels(loadedSettings.cachedOpenAICompatibleModels);
+      }
+
+      // Image generation (text-to-image) settings
+      if (loadedSettings.imageGeneration?.defaultModel) {
+        setImageGenDefaultModel(loadedSettings.imageGeneration.defaultModel);
+      } else {
+        setImageGenDefaultModel("");
+      }
+      if (loadedSettings.imageGeneration?.backupModel) {
+        setImageGenBackupModel(loadedSettings.imageGeneration.backupModel);
+      } else {
+        setImageGenBackupModel("");
       }
 
       // Set Bedrock form state (access key and secret key are set earlier)
@@ -1859,6 +1954,13 @@ export function Settings({
         setAzureApiVersion("2024-02-15-preview");
         setAzureReasoningEffort("medium");
         break;
+      case "azure-anthropic":
+        setAzureAnthropicApiKey("");
+        setAzureAnthropicEndpoint("");
+        setAzureAnthropicDeployment("");
+        setAzureAnthropicDeploymentsText("");
+        setAzureAnthropicApiVersion("2023-06-01");
+        break;
       case "groq":
         setGroqApiKey("");
         setGroqBaseUrl("");
@@ -1946,14 +2048,17 @@ export function Settings({
         sanitizedCustomProviders[resolvedProviderTypeForSave] = withDefaults;
       }
       const azureSettings = buildAzureSettings();
+      const azureAnthropicSettings = buildAzureAnthropicSettings();
       const routingFor = (providerType: LLMProviderType): ProviderRoutingConfig => {
         const routing = getProviderRoutingConfig(providerType);
         const strongModelKey = routing.strongModelKey?.trim();
         const cheapModelKey = routing.cheapModelKey?.trim();
+        const automatedTaskModelKey = routing.automatedTaskModelKey?.trim();
         return {
           profileRoutingEnabled: routing.profileRoutingEnabled === true,
           strongModelKey: strongModelKey || undefined,
           cheapModelKey: cheapModelKey || undefined,
+          automatedTaskModelKey: automatedTaskModelKey || undefined,
           preferStrongForVerification:
             typeof routing.preferStrongForVerification === "boolean"
               ? routing.preferStrongForVerification
@@ -2022,6 +2127,15 @@ export function Settings({
           reasoningEffort: azureReasoningEffort,
           ...routingFor("azure"),
         },
+        // Always include Azure Anthropic settings
+        azureAnthropic: {
+          apiKey: azureAnthropicApiKey || undefined,
+          endpoint: azureAnthropicEndpoint || undefined,
+          deployment: azureAnthropicSettings.deployment,
+          deployments: azureAnthropicSettings.deployments,
+          apiVersion: azureAnthropicApiVersion || undefined,
+          ...routingFor("azure-anthropic"),
+        },
         // Always include Groq settings
         groq: {
           apiKey: groqApiKey || undefined,
@@ -2057,6 +2171,13 @@ export function Settings({
           model: openaiCompatModel || undefined,
           ...routingFor("openai-compatible"),
         },
+        imageGeneration:
+          imageGenDefaultModel || imageGenBackupModel
+            ? {
+                defaultModel: imageGenDefaultModel || undefined,
+                backupModel: imageGenBackupModel || undefined,
+              }
+            : undefined,
         customProviders:
           Object.keys(sanitizedCustomProviders).length > 0 ? sanitizedCustomProviders : undefined,
       };
@@ -2078,6 +2199,7 @@ export function Settings({
 
       const sanitizedCustomProviders = sanitizeCustomProviders(customProviders) || {};
       const azureSettings = buildAzureSettings();
+      const azureAnthropicSettings = buildAzureAnthropicSettings();
 
       const testConfig = {
         providerType: settings.providerType,
@@ -2145,6 +2267,16 @@ export function Settings({
                 reasoningEffort: azureReasoningEffort,
               }
             : undefined,
+        azureAnthropic:
+          settings.providerType === "azure-anthropic"
+            ? {
+                apiKey: azureAnthropicApiKey || undefined,
+                endpoint: azureAnthropicEndpoint || undefined,
+                deployment: azureAnthropicSettings.deployment,
+                deployments: azureAnthropicSettings.deployments,
+                apiVersion: azureAnthropicApiVersion || undefined,
+              }
+            : undefined,
         groq:
           settings.providerType === "groq"
             ? {
@@ -2210,6 +2342,7 @@ export function Settings({
   const providerPrimaryModel = getProviderPrimaryModel(currentProviderType);
   const strongRoutingModel = providerRouting.strongModelKey || providerPrimaryModel;
   const cheapRoutingModel = providerRouting.cheapModelKey || providerPrimaryModel;
+  const automatedTaskRoutingModel = providerRouting.automatedTaskModelKey || "";
   const routingModelOptions = getRoutingModelOptions(currentProviderType);
   const routingModelsIdentical =
     routingEnabled &&
@@ -2630,8 +2763,34 @@ export function Settings({
                     </>
                   )}
 
-                  {settings.providerType === "azure" && (
+                  {(settings.providerType === "azure" ||
+                    settings.providerType === "azure-anthropic") && (
                     <>
+                      <div className="settings-section">
+                        <h3>Azure</h3>
+                        <p className="settings-description">
+                          Configure Azure OpenAI (GPT models) or Azure Anthropic (Claude models).
+                        </p>
+                        <div className="auth-method-tabs" style={{ marginBottom: "1rem" }}>
+                          <button
+                            type="button"
+                            className={`auth-method-tab ${settings.providerType === "azure" ? "active" : ""}`}
+                            onClick={() => handleProviderSelect("azure")}
+                          >
+                            Azure OpenAI
+                          </button>
+                          <button
+                            type="button"
+                            className={`auth-method-tab ${settings.providerType === "azure-anthropic" ? "active" : ""}`}
+                            onClick={() => handleProviderSelect("azure-anthropic")}
+                          >
+                            Azure Anthropic
+                          </button>
+                        </div>
+                      </div>
+
+                      {settings.providerType === "azure" && (
+                        <>
                       <div className="settings-section">
                         <h3>Azure OpenAI Endpoint</h3>
                         <p className="settings-description">
@@ -2726,6 +2885,86 @@ export function Settings({
                           ))}
                         </select>
                       </div>
+                        </>
+                      )}
+
+                      {settings.providerType === "azure-anthropic" && (
+                        <>
+                      <div className="settings-section">
+                        <h3>Azure Anthropic Endpoint</h3>
+                        <p className="settings-description">
+                          Enter your Azure resource endpoint with the Anthropic path (for example,{" "}
+                          <code>https://your-resource.openai.azure.com/anthropic</code>
+                          ). The API uses the Anthropic Messages format with x-api-key and
+                          anthropic-version headers.
+                        </p>
+                        <input
+                          type="text"
+                          className="settings-input"
+                          placeholder="https://your-resource.openai.azure.com/anthropic"
+                          value={azureAnthropicEndpoint}
+                          onChange={(e) => setAzureAnthropicEndpoint(e.target.value)}
+                        />
+                      </div>
+
+                      <div className="settings-section">
+                        <h3>Azure Anthropic API Key</h3>
+                        <p className="settings-description">
+                          Enter the API key for your Azure OpenAI resource (same key as Azure OpenAI).
+                        </p>
+                        <input
+                          type="password"
+                          className="settings-input"
+                          placeholder="Azure API key"
+                          value={azureAnthropicApiKey}
+                          onChange={(e) => setAzureAnthropicApiKey(e.target.value)}
+                        />
+                      </div>
+
+                      <div className="settings-section">
+                        <h3>Deployment Names</h3>
+                        <p className="settings-description">
+                          Enter one or more deployment names (one per line), e.g. claude-opus-4-6,
+                          claude-sonnet-4-6.
+                        </p>
+                        <textarea
+                          className="settings-input"
+                          placeholder="claude-opus-4-6\nclaude-sonnet-4-6"
+                          rows={3}
+                          value={azureAnthropicDeploymentsText}
+                          onChange={(e) => setAzureAnthropicDeploymentsText(e.target.value)}
+                        />
+                      </div>
+
+                      <div className="settings-section">
+                        <h3>Default Deployment</h3>
+                        <p className="settings-description">
+                          The deployment name to use (e.g. claude-opus-4-6).
+                        </p>
+                        <input
+                          type="text"
+                          className="settings-input"
+                          placeholder="claude-opus-4-6"
+                          value={azureAnthropicDeployment}
+                          onChange={(e) => setAzureAnthropicDeployment(e.target.value)}
+                        />
+                      </div>
+
+                      <div className="settings-section">
+                        <h3>API Version</h3>
+                        <p className="settings-description">
+                          Anthropic API version (default 2023-06-01).
+                        </p>
+                        <input
+                          type="text"
+                          className="settings-input"
+                          placeholder="2023-06-01"
+                          value={azureAnthropicApiVersion}
+                          onChange={(e) => setAzureAnthropicApiVersion(e.target.value)}
+                        />
+                      </div>
+                        </>
+                      )}
                     </>
                   )}
 
@@ -3733,13 +3972,13 @@ export function Settings({
                     </>
                   )}
 
-                  <div className="settings-section">
+                  <div className="settings-section profile-routing-section">
                     <h3>Profile-Based Routing</h3>
                     <p className="settings-description">
                       Route strong tasks (planning/verification) and cheap execution tasks to
                       different models for this provider.
                     </p>
-                    <label className="settings-checkbox">
+                    <label className="settings-checkbox profile-routing-enable">
                       <input
                         type="checkbox"
                         checked={routingEnabled}
@@ -3765,9 +4004,10 @@ export function Settings({
                     </label>
 
                     {routingEnabled && (
-                      <>
-                        <div className="settings-subsection">
-                          <h4>Strong / Planning Model</h4>
+                      <div className="profile-routing-content">
+                        <div className="profile-routing-models">
+                          <div className="settings-subsection">
+                            <h4>Strong / Planning Model</h4>
                           <select
                             className="settings-select"
                             value={strongRoutingModel || ""}
@@ -3783,10 +4023,10 @@ export function Settings({
                               </option>
                             ))}
                           </select>
-                        </div>
+                          </div>
 
-                        <div className="settings-subsection">
-                          <h4>Cheap / Execution Model</h4>
+                          <div className="settings-subsection">
+                            <h4>Cheap / Execution Model</h4>
                           <select
                             className="settings-select"
                             value={cheapRoutingModel || ""}
@@ -3802,9 +4042,33 @@ export function Settings({
                               </option>
                             ))}
                           </select>
+                          </div>
+
+                          <div className="settings-subsection">
+                            <h4>Automated Tasks Model</h4>
+                            <p className="settings-hint">
+                              Optional. Dedicated model for cron, scheduled, and improvement tasks. When set, uses faster/cheaper models (e.g. gpt-4o-mini, nano). Leave empty to use the execution model above.
+                            </p>
+                            <select
+                              className="settings-select"
+                              value={automatedTaskRoutingModel}
+                              onChange={(e) =>
+                                setProviderRoutingConfig(currentProviderType, {
+                                  automatedTaskModelKey: e.target.value || undefined,
+                                })
+                              }
+                            >
+                              <option value="">Use execution model</option>
+                              {routingModelOptions.map((model) => (
+                                <option key={model.key} value={model.key}>
+                                  {model.displayName}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
                         </div>
 
-                        <div className="settings-subsection">
+                        <div className="settings-subsection profile-routing-sync">
                           <button
                             className="button-small button-secondary"
                             type="button"
@@ -3821,7 +4085,7 @@ export function Settings({
                           </button>
                         </div>
 
-                        <label className="settings-checkbox">
+                        <label className="settings-checkbox profile-routing-prefer">
                           <input
                             type="checkbox"
                             checked={providerRouting.preferStrongForVerification !== false}
@@ -3840,8 +4104,57 @@ export function Settings({
                             cost/quality.
                           </p>
                         )}
-                      </>
+                      </div>
                     )}
+                  </div>
+
+                  <div className="settings-section">
+                    <h3>Image Generation (Text-to-Image)</h3>
+                    <p className="settings-description">
+                      Default and backup model for prompts like &quot;draw a snow leopard&quot; or
+                      &quot;create an image of...&quot;. The agent will try the default first, then
+                      fall back to the backup if it fails.
+                    </p>
+                    <div className="settings-subsection" style={{ marginTop: "8px" }}>
+                      <label className="settings-label">Default model</label>
+                      <select
+                        className="settings-select"
+                        value={imageGenDefaultModel}
+                        onChange={(e) =>
+                          setImageGenDefaultModel(
+                            (e.target.value || "") as "gpt-image-1.5" | "nano-banana-2" | "",
+                          )
+                        }
+                      >
+                        <option value="">Auto (best configured)</option>
+                        <option value="gpt-image-1.5">
+                          gpt-image-1.5 (OpenAI / Azure / OpenRouter)
+                        </option>
+                        <option value="nano-banana-2">
+                          nano-banana-2 (Gemini 3.1 Flash Image)
+                        </option>
+                      </select>
+                    </div>
+                    <div className="settings-subsection" style={{ marginTop: "8px" }}>
+                      <label className="settings-label">Backup model</label>
+                      <select
+                        className="settings-select"
+                        value={imageGenBackupModel}
+                        onChange={(e) =>
+                          setImageGenBackupModel(
+                            (e.target.value || "") as "gpt-image-1.5" | "nano-banana-2" | "",
+                          )
+                        }
+                      >
+                        <option value="">None</option>
+                        <option value="gpt-image-1.5">
+                          gpt-image-1.5 (OpenAI / Azure / OpenRouter)
+                        </option>
+                        <option value="nano-banana-2">
+                          nano-banana-2 (Gemini 3.1 Flash Image)
+                        </option>
+                      </select>
+                    </div>
                   </div>
 
                   {testResult && (
