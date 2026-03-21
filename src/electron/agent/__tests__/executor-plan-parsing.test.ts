@@ -206,4 +206,32 @@ describe("TaskExecutor plan parsing", () => {
     const qaStep = executor.plan.steps.find((step: Any) => /visual qa with playwright/i.test(step.description));
     expect(qaStep?.kind).toBe("verification");
   });
+
+  it("does not append a Playwright QA step when the plan does not actually build a web app", async () => {
+    const response = {
+      usage: { inputTokens: 10, outputTokens: 20 },
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            description: "Execution plan",
+            steps: [
+              { id: "1", description: "Research examples of successful citizen portals and dashboards." },
+              { id: "2", description: "Write the implementation brief in README.md." },
+            ],
+          }),
+        },
+      ],
+    };
+    const executor = createPlanExecutor(response);
+    executor.task.title = "Design a portal concept";
+    executor.task.prompt = "Design a portal concept and make sure it is ready to ship.";
+    executor.requiresVisualQARun = true;
+
+    await executor.createPlan();
+
+    expect(executor.plan?.steps?.some((step: Any) => /visual qa with playwright/i.test(step.description))).toBe(
+      false,
+    );
+  });
 });
