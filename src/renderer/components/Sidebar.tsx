@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Fragment } from "react";
-import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server, Workflow, HeartPulse, Send } from "lucide-react";
+import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server, Workflow, HeartPulse, Send, Lightbulb } from "lucide-react";
 import { resolveTwinIcon } from "../utils/twin-icons";
 import { stripAllEmojis } from "../utils/emoji-replacer";
 import { Task, Workspace, UiDensity, InfraStatus } from "../../shared/types";
@@ -29,11 +29,13 @@ interface SidebarProps {
   tasks: Task[];
   selectedTaskId: string | null;
   isHomeActive?: boolean;
+  isIdeasActive?: boolean;
   isHealthActive?: boolean;
   isDispatchActive?: boolean;
   completionAttentionTaskIds?: string[];
   onSelectTask: (id: string | null) => void;
   onOpenHome?: () => void;
+  onOpenIdeas?: () => void;
   onOpenHealth?: () => void;
   onOpenDispatch?: () => void;
   onNewSession?: () => void;
@@ -197,11 +199,13 @@ export function Sidebar({
   tasks,
   selectedTaskId,
   isHomeActive = false,
+  isIdeasActive = false,
   isHealthActive = false,
   isDispatchActive = false,
   completionAttentionTaskIds = [],
   onSelectTask,
   onOpenHome,
+  onOpenIdeas,
   onOpenHealth,
   onOpenDispatch,
   onNewSession,
@@ -918,7 +922,8 @@ export function Sidebar({
     const taskMode = depth === 0 ? getSessionMode(task) : null;
     const modeClass = taskMode && taskMode !== "standard" ? `session-mode-${taskMode}` : "";
     const isChatSession =
-      task.agentConfig?.executionMode === "chat" || task.agentConfig?.conversationMode === "chat";
+      task.agentConfig?.executionMode === "chat" &&
+      task.agentConfig?.executionModeSource === "user";
     const showCompletionAttention =
       task.status === "completed" &&
       !isChatSession &&
@@ -1363,88 +1368,109 @@ export function Sidebar({
         </div>
       ) : (
         <>
-          {/* Sessions List Header (Unified with top navigation buttons structure) */}
-          <div className="sidebar-header-sessions" style={{ padding: "0 12px", marginBottom: "8px" }}>
-            <div className="new-task-btn cli-new-task-btn cli-action-btn cli-sessions-header" style={{ margin: 0, display: 'flex', justifyContent: 'flex-start' }}>
-              <button
-                type="button"
-                className="cli-list-header-toggle"
-                onClick={() => setSessionsCollapsed((value) => !value)}
-                aria-expanded={!sessionsCollapsed}
-                title={sessionsCollapsed ? "Expand sessions" : "Collapse sessions"}
-                style={{ display: 'flex', justifyContent: 'flex-start', textAlign: 'left' }}
-              >
-                <span className="cli-section-prompt terminal-only">{sessionsCollapsed ? "▸" : "▾"}</span>
-                <span className="terminal-only">SESSIONS</span>
-                <span className="modern-only cli-new-task-modern-label" style={{ flex: 1, minWidth: 0, display: 'inline-flex', justifyContent: 'flex-start' }}>
-                  <span className="sidebar-home-btn-icon cli-sessions-icon" aria-hidden="true">
-                    <SlidersHorizontal size={16} strokeWidth={2} style={{ display: 'block' }} />
+          {/* Ideas tab — above Sessions */}
+          <div className="sidebar-ideas-tab" style={{ padding: "0 12px", marginBottom: "6px" }}>
+            <button
+              type="button"
+              className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-ideas-btn ${isIdeasActive ? "active" : ""}`}
+              onClick={onOpenIdeas}
+              aria-pressed={isIdeasActive}
+              title="Ideas"
+            >
+              <span className="cli-btn-text">
+                <span className="terminal-only">ideas</span>
+                <span className="modern-only cli-new-task-modern-label">
+                  <span className="sidebar-home-btn-icon" aria-hidden="true" style={{ display: 'flex' }}>
+                    <Lightbulb size={16} strokeWidth={2} style={{ display: 'block' }} />
                   </span>
-                  <span className="cli-sessions-title">Sessions</span>
-                  <span className="cli-sessions-collapse-indicator" aria-hidden="true">
-                    {sessionsCollapsed ? (
-                      <ChevronRight size={14} strokeWidth={2.5} />
-                    ) : (
-                      <ChevronDown size={14} strokeWidth={2.5} />
-                    )}
-                  </span>
+                  <span>Ideas</span>
                 </span>
-              </button>
-              <div className="cli-list-header-actions">
-                {failedSessionCount > 0 && (
-                  <button
-                    type="button"
-                    className={`show-failed-toggle ${showFailedSessions ? "active" : ""}`}
-                    onClick={() => setShowFailedSessions(!showFailedSessions)}
-                    style={{ cursor: 'pointer', padding: '2px 4px' }}
-                  >
-                    {showFailedSessions ? "Hide" : "Show"} failed
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {(pinActionError || archiveActionError) && (
-              <div className="cli-sidebar-error" role="alert" style={{ marginTop: '4px', marginLeft: '4px', marginRight: '4px' }}>
-                {pinActionError || archiveActionError}
-              </div>
-            )}
-
-            {showFilterBar && (
-              <div className="session-filters-bar cli-session-filters">
-                <div className="session-filters-scroll">
-                  <button
-                    type="button"
-                    className={`session-filter-chip standard ${activeModeFilters.size === 0 ? "active" : ""}`}
-                    onClick={() => setActiveModeFilters(new Set())}
-                  >
-                    All
-                  </button>
-                  {availableModes.map((mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      className={`session-filter-chip ${mode} ${activeModeFilters.has(mode) ? "active" : ""}`}
-                      onClick={() => toggleModeFilter(mode)}
-                    >
-                      <span className="filter-chip-dot" />
-                      {mode}
-                    </button>
-                  ))}
-                </div>
-                {activeModeFilters.size > 0 && (
-                  <button
-                    type="button"
-                    className="session-filter-clear"
-                    onClick={() => setActiveModeFilters(new Set())}
-                    title="Clear filters"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            )}
+              </span>
+            </button>
           </div>
+
+          {/* Sessions List Header */}
+          <div className="sidebar-header-sessions" style={{ padding: "0 12px", marginBottom: "6px" }}>
+                <div className="new-task-btn cli-new-task-btn cli-action-btn cli-sessions-header" style={{ margin: 0, display: 'flex', justifyContent: 'flex-start' }}>
+                  <button
+                    type="button"
+                    className="cli-list-header-toggle"
+                    onClick={() => setSessionsCollapsed((value) => !value)}
+                    aria-expanded={!sessionsCollapsed}
+                    title={sessionsCollapsed ? "Expand sessions" : "Collapse sessions"}
+                    style={{ display: 'flex', justifyContent: 'flex-start', textAlign: 'left' }}
+                  >
+                    <span className="cli-section-prompt terminal-only">{sessionsCollapsed ? "▸" : "▾"}</span>
+                    <span className="terminal-only">SESSIONS</span>
+                    <span className="modern-only cli-new-task-modern-label" style={{ flex: 1, minWidth: 0, display: 'inline-flex', justifyContent: 'flex-start' }}>
+                      <span className="sidebar-home-btn-icon cli-sessions-icon" aria-hidden="true">
+                        <SlidersHorizontal size={16} strokeWidth={2} style={{ display: 'block' }} />
+                      </span>
+                      <span className="cli-sessions-title">Sessions</span>
+                      <span className="cli-sessions-collapse-indicator" aria-hidden="true">
+                        {sessionsCollapsed ? (
+                          <ChevronRight size={14} strokeWidth={2.5} />
+                        ) : (
+                          <ChevronDown size={14} strokeWidth={2.5} />
+                        )}
+                      </span>
+                    </span>
+                  </button>
+                  <div className="cli-list-header-actions">
+                    {failedSessionCount > 0 && (
+                      <button
+                        type="button"
+                        className={`show-failed-toggle ${showFailedSessions ? "active" : ""}`}
+                        onClick={() => setShowFailedSessions(!showFailedSessions)}
+                        style={{ cursor: 'pointer', padding: '2px 4px' }}
+                      >
+                        {showFailedSessions ? "Hide" : "Show"} failed
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {(pinActionError || archiveActionError) && (
+                  <div className="cli-sidebar-error" role="alert" style={{ marginTop: '4px', marginLeft: '4px', marginRight: '4px' }}>
+                    {pinActionError || archiveActionError}
+                  </div>
+                )}
+
+                {showFilterBar && (
+                  <div className="session-filters-bar cli-session-filters">
+                    <div className="session-filters-scroll">
+                      <button
+                        type="button"
+                        className={`session-filter-chip standard ${activeModeFilters.size === 0 ? "active" : ""}`}
+                        onClick={() => setActiveModeFilters(new Set())}
+                      >
+                        All
+                      </button>
+                      {availableModes.map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          className={`session-filter-chip ${mode} ${activeModeFilters.has(mode) ? "active" : ""}`}
+                          onClick={() => toggleModeFilter(mode)}
+                        >
+                          <span className="filter-chip-dot" />
+                          {mode}
+                        </button>
+                      ))}
+                    </div>
+                    {activeModeFilters.size > 0 && (
+                      <button
+                        type="button"
+                        className="session-filter-clear"
+                        onClick={() => setActiveModeFilters(new Set())}
+                        title="Clear filters"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
 
           {/* Sessions Scrollable List */}
           <div className="task-list cli-task-list" ref={taskListRef}>
