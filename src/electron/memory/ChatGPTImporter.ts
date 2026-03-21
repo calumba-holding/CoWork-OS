@@ -530,6 +530,8 @@ export class ChatGPTImporter {
           ? (distillProvider as LLMProviderType)
           : settings.providerType;
         const azureDeployment = settings.azure?.deployment || settings.azure?.deployments?.[0];
+        const azureAnthropicDeployment =
+          settings.azureAnthropic?.deployment || settings.azureAnthropic?.deployments?.[0];
         modelId = LLMProviderFactory.getModelId(
           settings.modelKey,
           providerType,
@@ -538,6 +540,7 @@ export class ChatGPTImporter {
           settings.openrouter?.model,
           settings.openai?.model,
           azureDeployment,
+          azureAnthropicDeployment,
           settings.groq?.model,
           settings.xai?.model,
           settings.kimi?.model,
