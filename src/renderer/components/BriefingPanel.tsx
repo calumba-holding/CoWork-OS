@@ -84,7 +84,9 @@ export const BriefingPanel: React.FC<{ workspaceId?: string }> = ({ workspaceId 
     try {
       setWorkspacesLoading(true);
       const loaded = await (window as Any).electronAPI.listWorkspaces();
-      const nonTemp = (loaded || []).filter((workspace: Workspace) => !workspace.id.startsWith("__temp_workspace__"));
+      const nonTemp: Workspace[] = (loaded || []).filter(
+        (workspace: Workspace) => !workspace.id.startsWith("__temp_workspace__"),
+      );
       setWorkspaces(nonTemp);
       setSelectedWorkspaceId((prev) => {
         if (prev === ALL_WORKSPACES_ID) return ALL_WORKSPACES_ID;
