@@ -289,7 +289,12 @@ export class AgentTeamOrchestrator {
 
         // Multi-LLM mode: override provider/model per child task
         if (run.multiLlmMode && multiLlmParticipants) {
-          const participant = multiLlmParticipants[spawnIdx];
+          const participantIndex = refreshedItems
+            .filter((candidate) => candidate.title !== SYNTHESIS_ITEM_TITLE)
+            .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt)
+            .findIndex((candidate) => candidate.id === item.id);
+          const participant =
+            participantIndex >= 0 ? multiLlmParticipants[participantIndex] : undefined;
           if (!participant) continue;
 
           const childPrompt = this.buildMultiLlmItemPrompt(participant, rootTask);
@@ -777,6 +782,18 @@ export class AgentTeamOrchestrator {
   private buildMultiLlmItemPrompt(participant: MultiLlmParticipant, rootTask: Task): string {
     const parts: string[] = [];
     parts.push("Analyze the following task thoroughly and provide your best response.");
+    if (participant.seatLabel) {
+      parts.push(`Seat: ${participant.seatLabel}`);
+    }
+    if (participant.roleInstruction) {
+      parts.push(`Role guidance: ${participant.roleInstruction}`);
+    }
+    if (participant.isIdeaProposer) {
+      parts.push("Special instruction: you are the rotating idea proposer for this run.");
+      parts.push("You must introduce at least one concrete new growth idea worth debating.");
+    } else {
+      parts.push("Special instruction: challenge weak ideas, refine strong ones, and push toward action.");
+    }
     parts.push("");
     parts.push("TASK:");
     parts.push(`Title: ${rootTask.title}`);
@@ -796,6 +813,9 @@ export class AgentTeamOrchestrator {
     thoughts: AgentThought[],
     _items: AgentTeamItem[],
   ): string {
+    if (rootTask.agentConfig?.councilMode) {
+      return this.buildCouncilSynthesisPrompt(rootTask, thoughts);
+    }
     const parts: string[] = [];
     parts.push("You are the JUDGE in a multi-LLM comparison.");
     parts.push("Multiple AI models have independently analyzed the same task.");
@@ -845,6 +865,57 @@ export class AgentTeamOrchestrator {
     parts.push("2. Identify the strongest elements from each response.");
     parts.push("3. Synthesize the best comprehensive answer combining the strongest elements.");
     parts.push("4. Note any disagreements between models and explain which view is more accurate.");
+
+    return parts.join("\n");
+  }
+
+  private buildCouncilSynthesisPrompt(rootTask: Task, thoughts: AgentThought[]): string {
+    const parts: string[] = [];
+    parts.push("You are the judge and synthesizer for an R&D Council run.");
+    parts.push("Multiple models debated a business/product growth question using a curated source bundle.");
+    parts.push("Your job is to produce a single decision memo.");
+    parts.push("");
+    parts.push("IMPORTANT INSTRUCTIONS:");
+    parts.push("- Use ONLY the model outputs provided below plus the original council prompt.");
+    parts.push("- Do NOT use tools or read external files.");
+    parts.push("- Keep the memo concrete, specific, and action-oriented.");
+    parts.push("- Preserve meaningful disagreements instead of flattening them away.");
+    parts.push("");
+    parts.push("ORIGINAL COUNCIL PROMPT:");
+    parts.push(`Title: ${rootTask.title}`);
+    parts.push(rootTask.prompt);
+    parts.push("");
+
+    if (thoughts.length > 0) {
+      parts.push("=== MODEL OUTPUTS (COMPLETE) ===");
+      parts.push("");
+      const byModel = new Map<string, AgentThought[]>();
+      for (const thought of thoughts) {
+        const existing = byModel.get(thought.agentRoleId) || [];
+        existing.push(thought);
+        byModel.set(thought.agentRoleId, existing);
+      }
+      for (const [, modelThoughts] of byModel) {
+        const first = modelThoughts[0];
+        parts.push(`### ${first.agentIcon} ${first.agentDisplayName}`);
+        for (const thought of modelThoughts) {
+          parts.push(thought.content);
+        }
+        parts.push("");
+      }
+      parts.push("=== END OF MODEL OUTPUTS ===");
+      parts.push("");
+    }
+
+    parts.push("Return the memo using EXACTLY these sections and headings:");
+    parts.push("## Executive Summary");
+    parts.push("## What We Reviewed");
+    parts.push("## Best New Idea");
+    parts.push("## Where The Models Agreed");
+    parts.push("## Where They Disagreed");
+    parts.push("## Recommended Next Actions");
+    parts.push("## Experiments To Run");
+    parts.push("## Risks / Missing Inputs");
 
     return parts.join("\n");
   }
