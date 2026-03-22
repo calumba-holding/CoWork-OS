@@ -30,6 +30,7 @@ interface BuiltinToolsSettingsData {
   toolTimeouts: Record<string, number>;
   toolAutoApprove: Record<string, boolean>;
   runCommandApprovalMode: "per_command" | "single_bundle";
+  codexRuntimeMode: "native" | "acpx";
   version: string;
 }
 
@@ -245,6 +246,26 @@ export function BuiltinToolsSettings() {
     }
   };
 
+  const handleCodexRuntimeMode = async (mode: "native" | "acpx") => {
+    if (!settings) return;
+
+    const newSettings = {
+      ...settings,
+      codexRuntimeMode: mode,
+    };
+
+    setSettings(newSettings);
+
+    try {
+      setSaving(true);
+      await window.electronAPI.saveBuiltinToolsSettings(newSettings);
+    } catch (error) {
+      console.error("Failed to save settings:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading) {
     return <div className="settings-loading">Loading settings...</div>;
   }
@@ -357,6 +378,27 @@ export function BuiltinToolsSettings() {
                     >
                       <option value="per_command">Per command</option>
                       <option value="single_bundle">Single approval bundle</option>
+                    </select>
+                  </div>
+
+                  <div className="builtin-tool-advanced-row">
+                    <div className="builtin-tool-advanced-text">
+                      <div className="builtin-tool-advanced-label">Codex runtime</div>
+                      <div className="builtin-tool-advanced-hint">
+                        Native uses CoWork&apos;s current shell path. ACP routes explicit Codex child
+                        tasks through acpx with structured session output.
+                      </div>
+                    </div>
+                    <select
+                      className="builtin-tool-mode-select"
+                      value={settings.codexRuntimeMode}
+                      onChange={(e) =>
+                        handleCodexRuntimeMode(e.target.value as "native" | "acpx")
+                      }
+                      disabled={!config.enabled}
+                    >
+                      <option value="native">Native</option>
+                      <option value="acpx">ACP via acpx</option>
                     </select>
                   </div>
 
