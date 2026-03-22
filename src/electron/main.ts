@@ -118,6 +118,8 @@ import { EventTriggerService } from "./triggers/EventTriggerService";
 import { setupTriggerHandlers } from "./ipc/trigger-handlers";
 import { DailyBriefingService } from "./briefing/DailyBriefingService";
 import { syncDailyBriefingCronJob, DAILY_BRIEFING_MARKER } from "./briefing/briefing-scheduler";
+import { CouncilService } from "./council/CouncilService";
+import { setCouncilService } from "./council";
 import {
   readWorkspaceOpenLoops,
   readWorkspacePriorities,
@@ -144,6 +146,7 @@ let dbManager: DatabaseManager;
 let agentDaemon: AgentDaemon;
 let channelGateway: ChannelGateway;
 let cronService: CronService | null = null;
+let councilService: CouncilService | null = null;
 let dailyBriefingService: DailyBriefingService | null = null;
 let ambientMonitoringService: AmbientMonitoringService | null = null;
 let heartbeatService: HeartbeatService | null = null;
@@ -692,6 +695,31 @@ if (!gotTheLock) {
       // Don't fail app startup if infra init fails
     }
 
+    try {
+      councilService = new CouncilService({
+        db: dbManager.getDatabase(),
+        getCronService: () => cronService,
+        getNotificationService: () => getNotificationService(),
+        deliverToChannel: async (params) => {
+          if (!channelGateway) {
+            throw new Error("Cannot deliver council memo - gateway not initialized");
+          }
+          let resolvedType = params.channelType as string;
+          if (params.channelDbId) {
+            const ch = channelGateway.getChannel(params.channelDbId);
+            if (ch) resolvedType = ch.type;
+          }
+          await channelGateway.sendMessage(resolvedType as Any, params.channelId, params.message, {
+            parseMode: "markdown",
+            idempotencyKey: params.idempotencyKey,
+          });
+        },
+      });
+      setCouncilService(councilService);
+    } catch (error) {
+      logger.error("Failed to initialize Council Service:", error);
+    }
+
     // Initialize Cron Service for scheduled task execution
     try {
       const db = dbManager.getDatabase();
@@ -789,6 +817,28 @@ if (!gotTheLock) {
               generatedAt: briefing.generatedAt,
             });
             return { id: syntheticTaskId };
+          }
+          let preparedCouncilTask = null;
+          if (councilService) {
+            try {
+              preparedCouncilTask = await councilService.prepareTaskForTrigger(
+                params.prompt,
+                params.workspaceId,
+              );
+            } catch (err) {
+              console.error("[Council] Failed to prepare council task trigger:", err);
+            }
+          }
+          if (preparedCouncilTask) {
+            const task = await agentDaemon.createTask({
+              title: preparedCouncilTask.title,
+              prompt: preparedCouncilTask.prompt,
+              workspaceId: preparedCouncilTask.workspaceId,
+              agentConfig: preparedCouncilTask.agentConfig,
+              source: "cron",
+            });
+            councilService?.bindRunTask(preparedCouncilTask.runId, task.id);
+            return { id: task.id };
           }
           const allowUserInput = params.allowUserInput ?? false;
           const mergedAgentConfig = {
@@ -999,6 +1049,13 @@ if (!gotTheLock) {
           }
           console.log("[Cron] Event:", evt.action, evt.jobId);
 
+          if (evt.action === "finished" && evt.taskId && councilService?.isCouncilJob(evt.jobId)) {
+            await councilService.finalizeRunForTask(evt.taskId).catch((error) => {
+              console.error("[Council] Failed to finalize council run:", error);
+            });
+            return;
+          }
+
           // Show desktop notification when scheduled task finishes
           if (evt.action === "finished") {
             const statusEmoji =
@@ -1064,6 +1121,15 @@ if (!gotTheLock) {
       });
       setCronService(cronService);
       await cronService.start();
+      if (councilService) {
+        const db = dbManager.getDatabase();
+        const rows = db.prepare("SELECT id FROM council_configs").all() as Array<{ id: string }>;
+        for (const row of rows) {
+          await councilService.syncManagedJob(row.id).catch((error) => {
+            console.error(`[Council] Failed to sync managed cron job for council ${row.id}:`, error);
+          });
+        }
+      }
       logger.info("Cron Service initialized");
     } catch (error) {
       logger.error("Failed to initialize Cron Service:", error);
