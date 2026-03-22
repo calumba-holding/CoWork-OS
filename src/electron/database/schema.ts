@@ -1660,6 +1660,79 @@ export class DatabaseManager {
       // Table already exists, ignore
     }
 
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS council_configs (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+          name TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          schedule_json TEXT NOT NULL,
+          participants_json TEXT NOT NULL,
+          judge_seat_index INTEGER NOT NULL DEFAULT 0,
+          rotating_idea_seat_index INTEGER NOT NULL DEFAULT 0,
+          source_bundle_json TEXT NOT NULL,
+          delivery_config_json TEXT NOT NULL,
+          execution_policy_json TEXT NOT NULL,
+          managed_cron_job_id TEXT,
+          next_idea_seat_index INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_council_configs_workspace ON council_configs(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_council_configs_cron_job ON council_configs(managed_cron_job_id);
+      `);
+    } catch {
+      // Table already exists, ignore
+    }
+
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS council_runs (
+          id TEXT PRIMARY KEY,
+          council_config_id TEXT NOT NULL REFERENCES council_configs(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+          task_id TEXT REFERENCES tasks(id),
+          status TEXT NOT NULL,
+          proposer_seat_index INTEGER NOT NULL DEFAULT 0,
+          summary TEXT,
+          error TEXT,
+          memo_id TEXT,
+          source_snapshot_json TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          completed_at INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_council_runs_config ON council_runs(council_config_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_council_runs_task ON council_runs(task_id);
+      `);
+    } catch {
+      // Table already exists, ignore
+    }
+
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS council_memos (
+          id TEXT PRIMARY KEY,
+          council_run_id TEXT NOT NULL REFERENCES council_runs(id) ON DELETE CASCADE,
+          council_config_id TEXT NOT NULL REFERENCES council_configs(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+          task_id TEXT REFERENCES tasks(id),
+          proposer_seat_index INTEGER NOT NULL DEFAULT 0,
+          content TEXT NOT NULL,
+          delivered INTEGER NOT NULL DEFAULT 0,
+          delivery_error TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_council_memos_config ON council_memos(council_config_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_council_memos_run ON council_memos(council_run_id);
+      `);
+    } catch {
+      // Table already exists, ignore
+    }
+
     // ============ Agent Teams (Mission Control) ============
 
     // Migration: Create agent team tables (teams, members, runs, items)
