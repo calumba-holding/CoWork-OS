@@ -27,6 +27,7 @@ export interface ToolOverride {
 }
 
 export type RunCommandApprovalMode = "per_command" | "single_bundle";
+export type CodexRuntimeMode = "native" | "acpx";
 
 /**
  * Built-in tools settings structure
@@ -52,6 +53,8 @@ export interface BuiltinToolsSettings {
   toolAutoApprove: Record<string, boolean>;
   // Run-command approval behavior
   runCommandApprovalMode: RunCommandApprovalMode;
+  // Default runtime for explicit Codex child-task flows
+  codexRuntimeMode: CodexRuntimeMode;
   // Version for migrations
   version: string;
 }
@@ -111,6 +114,7 @@ const DEFAULT_SETTINGS: BuiltinToolsSettings = {
   toolTimeouts: {},
   toolAutoApprove: {},
   runCommandApprovalMode: "per_command",
+  codexRuntimeMode: "native",
   version: "1.0.0",
 };
 
@@ -341,6 +345,7 @@ export class BuiltinToolsSettingsManager {
       toolAutoApprove: settings.toolAutoApprove || {},
       runCommandApprovalMode:
         settings.runCommandApprovalMode === "single_bundle" ? "single_bundle" : "per_command",
+      codexRuntimeMode: settings.codexRuntimeMode === "acpx" ? "acpx" : "native",
       version: settings.version || defaults.version,
     };
   }
@@ -419,6 +424,14 @@ export class BuiltinToolsSettingsManager {
   static getRunCommandApprovalMode(): RunCommandApprovalMode {
     const settings = this.loadSettings();
     return settings.runCommandApprovalMode === "single_bundle" ? "single_bundle" : "per_command";
+  }
+
+  /**
+   * Get default runtime for explicit Codex child-task flows
+   */
+  static getCodexRuntimeMode(): CodexRuntimeMode {
+    const settings = this.loadSettings();
+    return settings.codexRuntimeMode === "acpx" ? "acpx" : "native";
   }
 
   /**
