@@ -113,14 +113,20 @@ export const AgentConfigSchema = z
               modelKey: z.string().max(200),
               displayName: z.string().max(200),
               isJudge: z.boolean(),
+              seatLabel: z.string().max(200).optional(),
+              roleInstruction: z.string().max(5000).optional(),
+              isIdeaProposer: z.boolean().optional(),
             }),
           )
           .min(2)
           .max(10),
         judgeProviderType: z.enum(LLM_PROVIDER_TYPES),
         judgeModelKey: z.string().max(200),
+        maxParallelParticipants: z.number().int().min(1).max(10).optional(),
       })
       .optional(),
+    councilMode: z.boolean().optional(),
+    councilRunId: z.string().uuid().optional(),
     verificationAgent: z.boolean().optional(),
     reviewPolicy: z.enum(["off", "balanced", "strict"]).optional(),
     autoContinueOnTurnLimit: z.boolean().optional(),
@@ -134,6 +140,17 @@ export const AgentConfigSchema = z
     globalNoProgressCircuitBreaker: z.number().int().min(1).max(1000).optional(),
     sideChannelDuringExecution: z.enum(["paused", "limited", "enabled"]).optional(),
     sideChannelMaxCallsPerWindow: z.number().int().min(0).max(100).optional(),
+    externalRuntime: z
+      .object({
+        kind: z.literal("acpx"),
+        agent: z.literal("codex"),
+        sessionMode: z.literal("persistent"),
+        outputMode: z.literal("json"),
+        permissionMode: z.enum(["approve-reads", "approve-all", "deny-all"]),
+        ttlSeconds: z.number().int().min(0).max(86_400).optional(),
+      })
+      .strict()
+      .optional(),
     videoGenerationMode: z.boolean().optional(),
   })
   .strict();
