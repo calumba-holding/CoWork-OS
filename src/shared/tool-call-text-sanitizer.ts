@@ -32,6 +32,21 @@ const TOOL_TEXT_MARKERS = [
   "[/TOOL_RESULT]",
 ];
 
+const PLAIN_TOOL_TRANSCRIPT_MARKERS = [
+  "to=run_command",
+  "assistant to=run_command",
+  "\"cwd\":",
+  "\"timeout_ms\":",
+];
+
+function looksLikePlainToolTranscript(input: string): boolean {
+  const lower = input.toLowerCase();
+  const hasTranscriptLead =
+    /\b(?:assistant\s+)?to=[a-z_][\w-]*\b/i.test(input) || lower.includes("to=run_command");
+  const markerHits = PLAIN_TOOL_TRANSCRIPT_MARKERS.filter((marker) => lower.includes(marker)).length;
+  return hasTranscriptLead && markerHits >= 2;
+}
+
 function stripFencedToolBlocks(input: string): { text: string; removed: number } {
   let removed = 0;
   const text = input.replace(/```[\s\S]*?```/g, (block) => {
@@ -65,6 +80,14 @@ export function sanitizeToolCallTextFromAssistant(raw: string): ToolCallTextSani
       }
       return "";
     });
+  }
+
+  if (looksLikePlainToolTranscript(text)) {
+    return {
+      text: "",
+      hadToolCallText: true,
+      removedSegments: Math.max(removedSegments, 1),
+    };
   }
 
   text = text
