@@ -16,9 +16,12 @@ import {
 } from "../database/repositories";
 import { ActivityRepository } from "../activity/ActivityRepository";
 import { AgentRoleRepository } from "../agents/AgentRoleRepository";
+import { AgentTeamRepository } from "../agents/AgentTeamRepository";
+import { AgentTeamMemberRepository } from "../agents/AgentTeamMemberRepository";
 import { MentionRepository } from "../agents/MentionRepository";
 import { buildAgentDispatchPrompt } from "../agents/agent-dispatch";
 import { extractMentionedRoles } from "../agents/mentions";
+import { selectAgentsForTask } from "../agents/capabilityMatcher";
 import {
   Task,
   TaskStatus,
@@ -63,6 +66,7 @@ import {
   IssueFilters,
   LLMProviderType,
 } from "../../shared/types";
+import { parseSpawnAgentCount } from "../../shared/spawn-intent-detection";
 import {
   extractTimelineEvidenceRefs,
   inferTimelineStageForLegacyType,
@@ -70,6 +74,7 @@ import {
   isTimelineEventType,
   normalizeTaskEventToTimelineV2,
 } from "../../shared/timeline-v2";
+import { deriveCanonicalTaskStatus } from "../../shared/task-status";
 import { createTimelineEmitter } from "./timeline-emitter";
 import { TaskExecutor } from "./executor";
 import { TaskQueueManager } from "./queue-manager";
@@ -706,6 +711,20 @@ export class AgentDaemon extends EventEmitter {
     for (const task of activeAndIncompleteTasks) {
       this.backfillTaskCompletionTelemetry(task.id);
       this.completionTelemetryBackfilledTaskIds.add(task.id);
+    }
+
+    const inconsistentPersistedTasks = activeAndIncompleteTasks.filter(
+      (task) => deriveCanonicalTaskStatus(task) !== task.status,
+    );
+    if (inconsistentPersistedTasks.length > 0) {
+      console.warn(
+        `[AgentDaemon] Reconciling ${inconsistentPersistedTasks.length} task(s) with stale persisted lifecycle state`,
+      );
+      for (const task of inconsistentPersistedTasks) {
+        this.taskRepo.update(task.id, {
+          status: deriveCanonicalTaskStatus(task),
+        });
+      }
     }
 
     // Recover stale retry tasks that were incorrectly persisted as executing.
@@ -1635,6 +1654,10 @@ export class AgentDaemon extends EventEmitter {
       signals: derived.route.signals,
     });
 
+    if (await this.maybeLaunchCollaborativeTask(task)) {
+      return this.taskRepo.findById(task.id) || task;
+    }
+
     // Start the task (will be queued if necessary)
     await this.startTask(task);
 
@@ -1912,6 +1935,125 @@ export class AgentDaemon extends EventEmitter {
         console.error("[AgentDaemon] Error sending mention IPC:", error);
       }
     });
+  }
+
+  private emitTeamRunEvent(event: Any): void {
+    const windows = getAllElectronWindows();
+    windows.forEach((window) => {
+      try {
+        if (!window.isDestroyed() && window.webContents && !window.webContents.isDestroyed()) {
+          window.webContents.send(IPC_CHANNELS.TEAM_RUN_EVENT, event);
+        }
+      } catch (error) {
+        console.error("[AgentDaemon] Error sending team run IPC:", error);
+      }
+    });
+  }
+
+  private async maybeLaunchCollaborativeTask(task: Task): Promise<boolean> {
+    if (!task.agentConfig?.collaborativeMode && !task.agentConfig?.multiLlmMode) {
+      return false;
+    }
+    if (!this.teamOrchestrator) {
+      throw new Error("Team orchestrator is not initialized");
+    }
+
+    this.taskRepo.update(task.id, { status: "executing", updatedAt: Date.now(), error: undefined });
+    this.logEvent(task.id, "log", {
+      message: task.agentConfig?.multiLlmMode
+        ? "Launching multi-LLM collaborative run."
+        : "Launching collaborative agent team run.",
+    });
+
+    const db = this.dbManager.getDatabase();
+    const teamRepo = new AgentTeamRepository(db);
+    const teamMemberRepo = new AgentTeamMemberRepository(db);
+    const teamRunRepo = new AgentTeamRunRepository(db);
+    const teamItemRepo = new AgentTeamItemRepository(db);
+
+    if (task.agentConfig.multiLlmMode && task.agentConfig.multiLlmConfig) {
+      const config = task.agentConfig.multiLlmConfig;
+      const participants = config.participants;
+      const allRoles = this.agentRoleRepo.findAll(false).filter((role) => role.isActive);
+      const sentinelRoleId = allRoles.length > 0 ? allRoles[0].id : undefined;
+      if (!sentinelRoleId) {
+        throw new Error("No agent role available to anchor multi-LLM run");
+      }
+      const maxParallelAgents =
+        typeof config.maxParallelParticipants === "number" && config.maxParallelParticipants > 0
+          ? Math.min(participants.length, Math.floor(config.maxParallelParticipants))
+          : participants.length;
+      const team = teamRepo.create({
+        workspaceId: task.workspaceId,
+        name: `MultiLLM-${Date.now()}`,
+        description: `Programmatic multi-LLM comparison for: ${task.title}`,
+        leadAgentRoleId: sentinelRoleId,
+        maxParallelAgents,
+      });
+      const run = teamRunRepo.create({
+        teamId: team.id,
+        rootTaskId: task.id,
+        status: "running",
+        collaborativeMode: true,
+        multiLlmMode: true,
+      });
+      for (let i = 0; i < participants.length; i++) {
+        const participant = participants[i];
+        teamItemRepo.create({
+          teamRunId: run.id,
+          title: participant.seatLabel || participant.displayName,
+          description: task.prompt,
+          ownerAgentRoleId: sentinelRoleId,
+          status: "todo",
+          sortOrder: (i + 1) * 10,
+        });
+      }
+      this.emitTeamRunEvent({ type: "team_run_created", timestamp: Date.now(), run });
+      void this.teamOrchestrator.tickRun(run.id, "daemon_programmatic_multi_llm");
+      return true;
+    }
+
+    const activeRoles = this.agentRoleRepo.findAll(false).filter((role) => role.isActive);
+    const fullText = `${task.title}\n${task.prompt}`;
+    const requestedCount = parseSpawnAgentCount(fullText);
+    const { members, leader } = await selectAgentsForTask(
+      fullText,
+      activeRoles,
+      requestedCount ?? undefined,
+    );
+    const team = teamRepo.create({
+      workspaceId: task.workspaceId,
+      name: `Collab-${Date.now()}`,
+      description: `Programmatic collaborative team for: ${task.title}`,
+      leadAgentRoleId: leader.id,
+      maxParallelAgents: members.length,
+    });
+    const run = teamRunRepo.create({
+      teamId: team.id,
+      rootTaskId: task.id,
+      status: "running",
+      collaborativeMode: true,
+    });
+    for (let i = 0; i < members.length; i++) {
+      teamMemberRepo.add({
+        teamId: team.id,
+        agentRoleId: members[i].id,
+        memberOrder: (i + 1) * 10,
+        isRequired: true,
+      });
+      if (members[i].displayName === "Synthesis") continue;
+      teamItemRepo.create({
+        teamRunId: run.id,
+        title: members[i].displayName,
+        description: task.prompt,
+        ownerAgentRoleId: members[i].id,
+        status: "todo",
+        sortOrder: (i + 1) * 10,
+      });
+    }
+    this.emitTeamRunEvent({ type: "team_run_created", timestamp: Date.now(), run });
+    void this.teamOrchestrator.tickRun(run.id, "daemon_programmatic_collab");
+    return true;
   }
 
   /**
