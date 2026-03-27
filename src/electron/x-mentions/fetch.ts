@@ -40,14 +40,17 @@ export function classifyXMentionFailure(error: unknown): XMentionFailure {
   const message =
     error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
 
+  // Auth check must precede timeout: bird error messages include the command string
+  // (e.g. "bird --timeout 20000 --cookie-timeout 20000 ...") which would otherwise
+  // match the timeout regex even when the real cause is missing credentials.
+  if (X_MENTION_AUTH_ERROR_RE.test(message)) {
+    return { code: "auth", message };
+  }
   if (X_MENTION_TIMEOUT_ERROR_RE.test(message)) {
     return { code: "timeout", message };
   }
   if (X_MENTION_UNSUPPORTED_JSON_ERROR_RE.test(message)) {
     return { code: "unsupported_json", message };
-  }
-  if (X_MENTION_AUTH_ERROR_RE.test(message)) {
-    return { code: "auth", message };
   }
   if (X_MENTION_CLI_ERROR_RE.test(message)) {
     return { code: "cli", message };
