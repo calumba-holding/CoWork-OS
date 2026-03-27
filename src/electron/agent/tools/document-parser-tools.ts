@@ -5,7 +5,7 @@
  * common document formats (PDF, DOCX, XLSX, PPTX, Markdown, CSV, JSON).
  *
  * Delegates to the same parsing utilities used by the IPC file-preview handlers
- * (mammoth, parsePdfBuffer, ExcelJS, extractPptxContentFromFile) — no new deps.
+ * (mammoth, pdf review extraction, ExcelJS, extractPptxContentFromFile) — no new deps.
  */
 
 import * as fsSync from "fs";
@@ -13,6 +13,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import type { Workspace } from "../../../shared/types";
 import type { LLMTool } from "../llm/types";
+import { extractPdfReviewData } from "../../utils/pdf-review";
 
 export interface ParseDocumentInput {
   path: string;
@@ -145,10 +146,13 @@ export class DocumentParserTools {
   }
 
   private async parsePdf(filePath: string): Promise<string> {
-    const { parsePdfBuffer } = await import("../../utils/pdf-parser");
-    const buffer = await fs.readFile(filePath);
-    const result = await parsePdfBuffer(buffer);
-    return result.text || "";
+    const review = await extractPdfReviewData(filePath, {
+      maxPages: 16,
+      maxCharsPerPage: 1600,
+      maxOcrPages: 4,
+      includeOcr: true,
+    });
+    return review.content || "";
   }
 
   private async parseDocx(filePath: string): Promise<string> {
