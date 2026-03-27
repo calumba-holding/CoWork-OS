@@ -256,7 +256,13 @@ export class WhatsAppAdapter implements ChannelAdapter {
 
     this.shouldReconnect = true;
     this.setStatus("connecting");
-    this.resetBackoff();
+    // Only reset the backoff counter when there is no active reconnection in progress.
+    // attemptReconnection() increments backoffAttempt before calling connect(), so
+    // backoffAttempt > 0 means we are inside the reconnection loop and must not reset —
+    // otherwise the delay would stay at the initial 2 s value no matter how many retries occur.
+    if (this.backoffAttempt === 0) {
+      this.resetBackoff();
+    }
 
     try {
       // Ensure auth directory exists
