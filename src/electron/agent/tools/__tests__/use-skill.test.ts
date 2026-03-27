@@ -87,7 +87,7 @@ vi.mock("../../custom-skill-loader", () => ({
     expandPrompt: vi.fn().mockImplementation((
       skill: CustomSkill,
       params: Record<string, Any>,
-      context: { artifactDir?: string } = {},
+      context: { artifactDir?: string; workspaceArtifactDir?: string } = {},
     ) => {
       let prompt = skill.prompt;
       const fileDir = skill.filePath ? path.dirname(skill.filePath) : "/mock/resources/skills";
@@ -95,6 +95,9 @@ vi.mock("../../custom-skill-loader", () => ({
       prompt = prompt.replace(/\{baseDir\}/g, scopedBaseDir);
       if (context.artifactDir) {
         prompt = prompt.replace(/\{artifactDir\}/g, context.artifactDir);
+      }
+      if (context.workspaceArtifactDir) {
+        prompt = prompt.replace(/\{workspaceArtifactDir\}/g, context.workspaceArtifactDir);
       }
       if (skill.parameters) {
         for (const param of skill.parameters) {
@@ -477,7 +480,8 @@ describe("use_skill tool", () => {
       const skill = createTestSkill({
         id: "script-skill",
         filePath: "/mock/resources/skills/script-skill.json",
-        prompt: "Run {baseDir}/scripts/run.sh > {artifactDir}/result.txt",
+        prompt:
+          "Run {baseDir}/scripts/run.sh > {artifactDir}/result.txt and sync into {workspaceArtifactDir}/result.txt",
         parameters: [],
       });
       mockSkills.set("script-skill", skill);
@@ -493,6 +497,7 @@ describe("use_skill tool", () => {
       expect(result.expanded_prompt).toContain(
         "/mock/workspace/artifacts/skills/test-task-123/script-skill/result.txt",
       );
+      expect(result.expanded_prompt).toContain("/mock/workspace/artifacts/result.txt");
     });
 
     it("should return skill metadata in response", async () => {
