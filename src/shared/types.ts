@@ -689,6 +689,7 @@ export type ToolType =
   // Google Workspace (Drive/Gmail/Calendar)
   | "google_drive_action"
   | "gmail_action"
+  | "mailbox_action"
   | "calendar_action"
   // Apple Calendar (macOS)
   | "apple_calendar_action"
@@ -717,6 +718,14 @@ export type ToolType =
   | "qa_check"
   | "qa_report"
   | "qa_cleanup"
+  // Computer use tools (CUA)
+  | "computer_screenshot"
+  | "computer_click"
+  | "computer_type"
+  | "computer_key"
+  | "computer_move_mouse"
+  // Batch image processing
+  | "batch_image_process"
   // Meta tools
   | "revise_plan"
   | "request_user_input"
@@ -730,7 +739,12 @@ export type ApprovalType =
   | "network_access"
   | "external_service"
   | "run_command"
-  | "risk_gate";
+  | "risk_gate"
+  | "computer_use"
+  | "computer_move_mouse"
+  | "computer_click"
+  | "computer_type"
+  | "computer_key";
 
 // ============ Security Tool Groups & Risk Levels ============
 
@@ -765,6 +779,7 @@ export const TOOL_GROUPS = {
     "channel_download_discord_attachment",
     // Session scratchpad (read)
     "scratchpad_read",
+    "batch_image_process",
   ],
   // Write operations - medium risk
   "group:write": [
@@ -782,6 +797,7 @@ export const TOOL_GROUPS = {
     "monty_transform_file",
     // Session scratchpad (write)
     "scratchpad_write",
+    "batch_image_process",
   ],
   // Destructive operations - high risk, requires approval
   "group:destructive": ["delete_file", "run_command"],
@@ -794,6 +810,12 @@ export const TOOL_GROUPS = {
     "open_url",
     "open_path",
     "show_in_folder",
+    "computer_screenshot",
+    "computer_click",
+    "computer_type",
+    "computer_key",
+    "computer_move_mouse",
+    "batch_image_process",
   ],
   // Network operations - requires network permission
   "group:network": [
@@ -805,6 +827,7 @@ export const TOOL_GROUPS = {
     "onedrive_action",
     "google_drive_action",
     "gmail_action",
+    "mailbox_action",
     "calendar_action",
     "apple_calendar_action",
     "dropbox_action",
@@ -896,6 +919,14 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   open_url: "system",
   open_path: "system",
   show_in_folder: "system",
+  // Computer use operations (CUA)
+  computer_screenshot: "system",
+  computer_click: "system",
+  computer_type: "system",
+  computer_key: "system",
+  computer_move_mouse: "system",
+  // Batch image processing
+  batch_image_process: "write",
   // Network operations
   generate_image: "network",
   analyze_image: "network",
@@ -924,6 +955,7 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   onedrive_action: "network",
   google_drive_action: "network",
   gmail_action: "network",
+  mailbox_action: "network",
   calendar_action: "network",
   apple_calendar_action: "network",
   dropbox_action: "network",
@@ -2086,6 +2118,22 @@ export interface DocumentVersionEntry {
   isCurrent?: boolean;
 }
 
+export interface PdfReviewPageSummary {
+  pageIndex: number;
+  text: string;
+  usedOcr: boolean;
+  truncated: boolean;
+}
+
+export interface PdfReviewSummary {
+  pageCount: number;
+  nativeTextPages: number;
+  ocrPages: number;
+  scannedPages: number;
+  truncatedPages: boolean;
+  pages: PdfReviewPageSummary[];
+}
+
 export interface DocumentEditorDocxBlock {
   id: string;
   type: "heading" | "paragraph" | "table";
@@ -2125,6 +2173,7 @@ export interface DocumentEditorSession {
   sourceTaskId?: string;
   versions: DocumentVersionEntry[];
   pdfDataBase64?: string;
+  pdfReviewSummary?: PdfReviewSummary;
   docxBlocks?: DocumentEditorDocxBlock[];
 }
 
@@ -3803,6 +3852,18 @@ export const IPC_CHANNELS = {
   DOCUMENT_OPEN_EDITOR_SESSION: "document:openEditorSession",
   DOCUMENT_LIST_VERSIONS: "document:listVersions",
   DOCUMENT_START_EDIT_TASK: "document:startEditTask",
+  MAILBOX_GET_SYNC_STATUS: "mailbox:getSyncStatus",
+  MAILBOX_SYNC: "mailbox:sync",
+  MAILBOX_LIST_THREADS: "mailbox:listThreads",
+  MAILBOX_GET_THREAD: "mailbox:getThread",
+  MAILBOX_SUMMARIZE_THREAD: "mailbox:summarizeThread",
+  MAILBOX_GENERATE_DRAFT: "mailbox:generateDraft",
+  MAILBOX_EXTRACT_COMMITMENTS: "mailbox:extractCommitments",
+  MAILBOX_REVIEW_BULK_ACTION: "mailbox:reviewBulkAction",
+  MAILBOX_SCHEDULE_REPLY: "mailbox:scheduleReply",
+  MAILBOX_RESEARCH_CONTACT: "mailbox:researchContact",
+  MAILBOX_APPLY_ACTION: "mailbox:applyAction",
+  MAILBOX_UPDATE_COMMITMENT_STATE: "mailbox:updateCommitmentState",
 
   // Sub-Agent / Parallel Agent operations
   AGENT_GET_CHILDREN: "agent:getChildren", // Get child tasks for a parent
@@ -3874,6 +3935,12 @@ export const IPC_CHANNELS = {
   MC_COMPANY_GET: "missionControl:companyGet",
   MC_COMPANY_CREATE: "missionControl:companyCreate",
   MC_COMPANY_UPDATE: "missionControl:companyUpdate",
+  MC_COMPANY_PACKAGE_SOURCE_LIST: "missionControl:companyPackageSourceList",
+  MC_COMPANY_PACKAGE_PREVIEW_IMPORT: "missionControl:companyPackagePreviewImport",
+  MC_COMPANY_PACKAGE_IMPORT: "missionControl:companyPackageImport",
+  MC_COMPANY_GRAPH_GET: "missionControl:companyGraphGet",
+  MC_COMPANY_SYNC_LIST: "missionControl:companySyncList",
+  MC_COMPANY_ORG_LINK_ROLE: "missionControl:companyOrgLinkRole",
   MC_COMMAND_CENTER_SUMMARY: "missionControl:commandCenterSummary",
   MC_GOAL_LIST: "missionControl:goalList",
   MC_GOAL_GET: "missionControl:goalGet",
@@ -7986,6 +8053,157 @@ export interface CompanyImportResult {
   goalCount: number;
   projectCount: number;
   issueCount: number;
+}
+
+export type CompanyPackageSourceKind = "local" | "git" | "github";
+export type CompanyPackageTrustLevel = "local" | "trusted" | "untrusted";
+export type CompanyPackageSourceStatus = "ready" | "needs_attention" | "imported";
+export type CompanyPackageManifestKind = "company" | "team" | "agent" | "project" | "task" | "skill";
+export type CompanyGraphNodeKind = CompanyPackageManifestKind;
+export type CompanyGraphEdgeKind =
+  | "contains"
+  | "belongs_to"
+  | "reports_to"
+  | "manages_team"
+  | "includes"
+  | "attaches_skill"
+  | "assigned_to"
+  | "related_to_project";
+export type CompanySyncStatus = "in_sync" | "diverged" | "local_override" | "unlinked";
+export type CompanyImportAction = "create" | "update" | "link" | "skip" | "conflict" | "warning";
+export type CompanyRuntimeEntityKind = "company" | "goal" | "project" | "issue" | "agent_role";
+
+export interface CompanyPackageSource {
+  id: string;
+  companyId?: string;
+  sourceKind: CompanyPackageSourceKind;
+  name: string;
+  rootUri: string;
+  localPath?: string;
+  ref?: string;
+  pin?: string;
+  trustLevel: CompanyPackageTrustLevel;
+  status: CompanyPackageSourceStatus;
+  notes?: string;
+  lastSyncedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CompanyPackageSourceInput {
+  companyId?: string | null;
+  sourceKind: CompanyPackageSourceKind;
+  name?: string;
+  rootUri: string;
+  localPath?: string | null;
+  ref?: string | null;
+  pin?: string | null;
+  trustLevel?: CompanyPackageTrustLevel;
+  status?: CompanyPackageSourceStatus;
+  notes?: string | null;
+}
+
+export interface CompanyPackageManifest {
+  id: string;
+  sourceId: string;
+  kind: CompanyPackageManifestKind;
+  slug: string;
+  name: string;
+  description?: string;
+  relativePath: string;
+  body: string;
+  bodyHash: string;
+  frontmatter: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CompanyGraphNode {
+  id: string;
+  companyId?: string;
+  sourceId?: string;
+  manifestId?: string;
+  kind: CompanyGraphNodeKind;
+  slug: string;
+  name: string;
+  description?: string;
+  relativePath?: string;
+  parentNodeId?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CompanyGraphEdge {
+  id: string;
+  companyId?: string;
+  sourceId?: string;
+  fromNodeId: string;
+  toNodeId: string;
+  kind: CompanyGraphEdgeKind;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CompanySyncState {
+  id: string;
+  companyId: string;
+  sourceId?: string;
+  manifestId?: string;
+  orgNodeId?: string;
+  runtimeEntityKind: CompanyRuntimeEntityKind;
+  runtimeEntityId: string;
+  syncStatus: CompanySyncStatus;
+  lastSyncedAt?: number;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ResolvedCompanyGraph {
+  packageName: string;
+  companyManifest: CompanyPackageManifest | null;
+  manifests: CompanyPackageManifest[];
+  nodes: CompanyGraphNode[];
+  edges: CompanyGraphEdge[];
+  warnings: string[];
+}
+
+export interface CompanyImportPreviewItem {
+  id: string;
+  manifestKind: CompanyPackageManifestKind;
+  action: CompanyImportAction;
+  label: string;
+  details?: string;
+  manifestId?: string;
+  orgNodeId?: string;
+  runtimeEntityKind?: CompanyRuntimeEntityKind;
+  runtimeEntityId?: string;
+}
+
+export interface CompanyImportPreview {
+  source: CompanyPackageSourceInput;
+  graph: ResolvedCompanyGraph;
+  targetCompany?: Company;
+  items: CompanyImportPreviewItem[];
+  warnings: string[];
+}
+
+export interface CompanyPackageImportRequest {
+  companyId?: string | null;
+  source: CompanyPackageSourceInput;
+}
+
+export interface CompanyPackageImportResult {
+  source: CompanyPackageSource;
+  company: Company;
+  graph: ResolvedCompanyGraph;
+  createdCount: number;
+  updatedCount: number;
+  linkedCount: number;
+  warningCount: number;
 }
 
 export type AutonomyPolicyPreset = "manual" | "safe_autonomy" | "founder_edge";
