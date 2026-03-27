@@ -9,7 +9,12 @@ type GmailAction =
   | "get_message"
   | "get_thread"
   | "list_labels"
+  | "create_draft"
   | "send_message"
+  | "reply_to_thread"
+  | "archive_thread"
+  | "modify_thread_labels"
+  | "batch_modify_messages"
   | "trash_message";
 
 interface GmailActionInput {
@@ -29,6 +34,9 @@ interface GmailActionInput {
   subject?: string;
   body?: string;
   raw?: string;
+  label_ids_add?: string[];
+  label_ids_remove?: string[];
+  message_ids?: string[];
 }
 
 function encodeMessage(raw: string): string {
@@ -195,6 +203,100 @@ export class GmailTools {
             method: "POST",
             path: "/users/me/messages/send",
             body: payload,
+          });
+          break;
+        }
+        case "create_draft": {
+          if (!input.raw && !input.to) {
+            throw new Error("Missing to for create_draft");
+          }
+          const raw = input.raw || buildRawEmail(input);
+          const payload: Record<string, Any> = {
+            message: {
+              raw,
+            },
+          };
+          if (input.thread_id) {
+            payload.message.threadId = input.thread_id;
+          }
+          result = await gmailRequest(settings, {
+            method: "POST",
+            path: "/users/me/drafts",
+            body: payload,
+          });
+          break;
+        }
+        case "reply_to_thread": {
+          if (!input.thread_id) throw new Error("Missing thread_id for reply_to_thread");
+          if (!input.raw && !input.to) throw new Error("Missing to for reply_to_thread");
+          await this.requireApproval("Reply to a Gmail thread", {
+            action: "reply_to_thread",
+            thread_id: input.thread_id,
+            to: input.to,
+            subject: input.subject,
+          });
+          const raw = input.raw || buildRawEmail(input);
+          result = await gmailRequest(settings, {
+            method: "POST",
+            path: "/users/me/messages/send",
+            body: {
+              raw,
+              threadId: input.thread_id,
+            },
+          });
+          break;
+        }
+        case "archive_thread": {
+          if (!input.thread_id) throw new Error("Missing thread_id for archive_thread");
+          await this.requireApproval("Archive a Gmail thread", {
+            action: "archive_thread",
+            thread_id: input.thread_id,
+          });
+          result = await gmailRequest(settings, {
+            method: "POST",
+            path: `/users/me/threads/${input.thread_id}/modify`,
+            body: {
+              removeLabelIds: ["INBOX"],
+            },
+          });
+          break;
+        }
+        case "modify_thread_labels": {
+          if (!input.thread_id) throw new Error("Missing thread_id for modify_thread_labels");
+          await this.requireApproval("Modify labels on a Gmail thread", {
+            action: "modify_thread_labels",
+            thread_id: input.thread_id,
+            add: input.label_ids_add,
+            remove: input.label_ids_remove,
+          });
+          result = await gmailRequest(settings, {
+            method: "POST",
+            path: `/users/me/threads/${input.thread_id}/modify`,
+            body: {
+              addLabelIds: input.label_ids_add,
+              removeLabelIds: input.label_ids_remove,
+            },
+          });
+          break;
+        }
+        case "batch_modify_messages": {
+          if (!input.message_ids?.length) {
+            throw new Error("Missing message_ids for batch_modify_messages");
+          }
+          await this.requireApproval("Batch modify Gmail messages", {
+            action: "batch_modify_messages",
+            message_ids: input.message_ids,
+            add: input.label_ids_add,
+            remove: input.label_ids_remove,
+          });
+          result = await gmailRequest(settings, {
+            method: "POST",
+            path: "/users/me/messages/batchModify",
+            body: {
+              ids: input.message_ids,
+              addLabelIds: input.label_ids_add,
+              removeLabelIds: input.label_ids_remove,
+            },
           });
           break;
         }
