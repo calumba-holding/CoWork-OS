@@ -49,6 +49,7 @@ import type {
   CouncilRun,
   CreateCouncilConfigRequest,
   UpdateCouncilConfigRequest,
+  PdfReviewSummary,
 } from "../shared/types";
 import type {
   HealthDashboard,
@@ -61,6 +62,21 @@ import type {
   HealthWritebackRequest,
   HealthSourceConnectionMode,
 } from "../shared/health";
+import type {
+  MailboxApplyActionInput,
+  MailboxBulkReviewResult,
+  MailboxCommitment,
+  MailboxCommitmentState,
+  MailboxDraftOptions,
+  MailboxDraftSuggestion,
+  MailboxListThreadsInput,
+  MailboxResearchResult,
+  MailboxSummaryCard,
+  MailboxSyncResult,
+  MailboxSyncStatus,
+  MailboxThreadDetail,
+  MailboxThreadListItem,
+} from "../shared/mailbox";
 
 const ALLOWED_MESSAGE_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
 const ALLOWED_IMAGE_FILE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
@@ -274,6 +290,18 @@ const IPC_CHANNELS = {
   DOCUMENT_OPEN_EDITOR_SESSION: "document:openEditorSession",
   DOCUMENT_LIST_VERSIONS: "document:listVersions",
   DOCUMENT_START_EDIT_TASK: "document:startEditTask",
+  MAILBOX_GET_SYNC_STATUS: "mailbox:getSyncStatus",
+  MAILBOX_SYNC: "mailbox:sync",
+  MAILBOX_LIST_THREADS: "mailbox:listThreads",
+  MAILBOX_GET_THREAD: "mailbox:getThread",
+  MAILBOX_SUMMARIZE_THREAD: "mailbox:summarizeThread",
+  MAILBOX_GENERATE_DRAFT: "mailbox:generateDraft",
+  MAILBOX_EXTRACT_COMMITMENTS: "mailbox:extractCommitments",
+  MAILBOX_REVIEW_BULK_ACTION: "mailbox:reviewBulkAction",
+  MAILBOX_SCHEDULE_REPLY: "mailbox:scheduleReply",
+  MAILBOX_RESEARCH_CONTACT: "mailbox:researchContact",
+  MAILBOX_APPLY_ACTION: "mailbox:applyAction",
+  MAILBOX_UPDATE_COMMITMENT_STATE: "mailbox:updateCommitmentState",
   TASK_EVENT: "task:event",
   TASK_EVENTS: "task:events",
   TASK_SEMANTIC_TIMELINE: "task:semanticTimeline",
@@ -866,6 +894,12 @@ const IPC_CHANNELS = {
   MC_COMPANY_GET: "missionControl:companyGet",
   MC_COMPANY_CREATE: "missionControl:companyCreate",
   MC_COMPANY_UPDATE: "missionControl:companyUpdate",
+  MC_COMPANY_PACKAGE_SOURCE_LIST: "missionControl:companyPackageSourceList",
+  MC_COMPANY_PACKAGE_PREVIEW_IMPORT: "missionControl:companyPackagePreviewImport",
+  MC_COMPANY_PACKAGE_IMPORT: "missionControl:companyPackageImport",
+  MC_COMPANY_GRAPH_GET: "missionControl:companyGraphGet",
+  MC_COMPANY_SYNC_LIST: "missionControl:companySyncList",
+  MC_COMPANY_ORG_LINK_ROLE: "missionControl:companyOrgLinkRole",
   MC_COMMAND_CENTER_SUMMARY: "missionControl:commandCenterSummary",
   MC_GOAL_LIST: "missionControl:goalList",
   MC_GOAL_GET: "missionControl:goalGet",
@@ -2369,6 +2403,7 @@ interface ReadFileForViewerOptions {
   enableImageOcr?: boolean;
   imageOcrMaxChars?: number;
   includeImageContent?: boolean;
+  includePdfBase64?: boolean;
 }
 
 // Expose protected methods that allow the renderer process to use ipcRenderer
@@ -2399,6 +2434,29 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.DOCUMENT_LIST_VERSIONS, data) as Promise<DocumentVersionEntry[]>,
   startDocumentEditTask: (data: DocumentEditRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.DOCUMENT_START_EDIT_TASK, data),
+  getMailboxSyncStatus: () => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GET_SYNC_STATUS),
+  syncMailbox: (limit?: number) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SYNC, { limit }),
+  listMailboxThreads: (query?: MailboxListThreadsInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_LIST_THREADS, query),
+  getMailboxThread: (threadId: string) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GET_THREAD, threadId),
+  summarizeMailboxThread: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SUMMARIZE_THREAD, { threadId }),
+  generateMailboxDraft: (threadId: string, options?: MailboxDraftOptions) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GENERATE_DRAFT, { threadId, ...options }),
+  extractMailboxCommitments: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_EXTRACT_COMMITMENTS, { threadId }),
+  reviewMailboxBulkAction: (input: { type: "cleanup" | "follow_up"; limit?: number }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_REVIEW_BULK_ACTION, input),
+  scheduleMailboxReply: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SCHEDULE_REPLY, { threadId }),
+  researchMailboxContact: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_RESEARCH_CONTACT, { threadId }),
+  applyMailboxAction: (input: MailboxApplyActionInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_APPLY_ACTION, input),
+  updateMailboxCommitmentState: (
+    commitmentId: string,
+    state: MailboxCommitmentState,
+  ) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_UPDATE_COMMITMENT_STATE, { commitmentId, state }),
 
   // Shell APIs
   openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
@@ -3429,6 +3487,31 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.MC_COMPANY_CREATE, input),
   updateCompany: (request: { companyId: string } & import("../shared/types").CompanyUpdate) =>
     ipcRenderer.invoke(IPC_CHANNELS.MC_COMPANY_UPDATE, request),
+  listCompanyPackageSources: (companyId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MC_COMPANY_PACKAGE_SOURCE_LIST, companyId),
+  previewCompanyPackageImport: (request: import("../shared/types").CompanyPackageImportRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MC_COMPANY_PACKAGE_PREVIEW_IMPORT, request) as Promise<
+      import("../shared/types").CompanyImportPreview
+    >,
+  importCompanyPackage: (request: import("../shared/types").CompanyPackageImportRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MC_COMPANY_PACKAGE_IMPORT, request) as Promise<
+      import("../shared/types").CompanyPackageImportResult
+    >,
+  getCompanyGraph: (companyId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MC_COMPANY_GRAPH_GET, companyId) as Promise<
+      import("../shared/types").ResolvedCompanyGraph
+    >,
+  listCompanySyncStates: (companyId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MC_COMPANY_SYNC_LIST, companyId) as Promise<
+      import("../shared/types").CompanySyncState[]
+    >,
+  linkCompanyOrgNodeToRole: (request: {
+    companyId: string;
+    orgNodeId: string;
+    agentRoleId: string | null;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.MC_COMPANY_ORG_LINK_ROLE, request) as Promise<
+    import("../shared/types").CompanySyncState | null
+  >,
   getCommandCenterSummary: (companyId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MC_COMMAND_CENTER_SUMMARY, companyId) as Promise<
       import("../shared/types").CompanyCommandCenterSummary
@@ -3865,6 +3948,8 @@ export interface FileViewerResult {
     htmlContent?: string;
     ocrText?: string;
     pdfThumbnailDataUrl?: string;
+    pdfDataBase64?: string;
+    pdfReviewSummary?: PdfReviewSummary;
     playbackUrl?: string;
     mimeType?: string;
     durationMs?: number;
@@ -3962,6 +4047,35 @@ export interface ElectronAPI {
     workspacePath?: string;
   }) => Promise<DocumentVersionEntry[]>;
   startDocumentEditTask: (data: DocumentEditRequest) => Promise<Any>;
+  getMailboxSyncStatus: () => Promise<MailboxSyncStatus>;
+  syncMailbox: (limit?: number) => Promise<MailboxSyncResult>;
+  listMailboxThreads: (query?: MailboxListThreadsInput) => Promise<MailboxThreadListItem[]>;
+  getMailboxThread: (threadId: string) => Promise<MailboxThreadDetail | null>;
+  summarizeMailboxThread: (threadId: string) => Promise<MailboxSummaryCard | null>;
+  generateMailboxDraft: (
+    threadId: string,
+    options?: MailboxDraftOptions,
+  ) => Promise<MailboxDraftSuggestion | null>;
+  extractMailboxCommitments: (threadId: string) => Promise<MailboxCommitment[]>;
+  reviewMailboxBulkAction: (input: {
+    type: "cleanup" | "follow_up";
+    limit?: number;
+  }) => Promise<MailboxBulkReviewResult>;
+  scheduleMailboxReply: (threadId: string) => Promise<{
+    threadId: string;
+    suggestions: string[];
+    summary: string;
+  }>;
+  researchMailboxContact: (threadId: string) => Promise<MailboxResearchResult | null>;
+  applyMailboxAction: (input: MailboxApplyActionInput) => Promise<{
+    success: boolean;
+    action: string;
+    threadId?: string;
+  }>;
+  updateMailboxCommitmentState: (
+    commitmentId: string,
+    state: MailboxCommitmentState,
+  ) => Promise<MailboxCommitment | null>;
   openExternal: (url: string) => Promise<void>;
   openSystemSettings: (
     target: "microphone" | "dictation",
@@ -5237,6 +5351,26 @@ export interface ElectronAPI {
   updateCompany: (
     request: { companyId: string } & import("../shared/types").CompanyUpdate,
   ) => Promise<import("../shared/types").Company | undefined>;
+  listCompanyPackageSources: (
+    companyId?: string,
+  ) => Promise<import("../shared/types").CompanyPackageSource[]>;
+  previewCompanyPackageImport: (
+    request: import("../shared/types").CompanyPackageImportRequest,
+  ) => Promise<import("../shared/types").CompanyImportPreview>;
+  importCompanyPackage: (
+    request: import("../shared/types").CompanyPackageImportRequest,
+  ) => Promise<import("../shared/types").CompanyPackageImportResult>;
+  getCompanyGraph: (
+    companyId: string,
+  ) => Promise<import("../shared/types").ResolvedCompanyGraph>;
+  listCompanySyncStates: (
+    companyId: string,
+  ) => Promise<import("../shared/types").CompanySyncState[]>;
+  linkCompanyOrgNodeToRole: (request: {
+    companyId: string;
+    orgNodeId: string;
+    agentRoleId: string | null;
+  }) => Promise<import("../shared/types").CompanySyncState | null>;
   getCommandCenterSummary: (
     companyId: string,
   ) => Promise<import("../shared/types").CompanyCommandCenterSummary>;
