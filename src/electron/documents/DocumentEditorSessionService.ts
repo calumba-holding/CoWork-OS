@@ -16,6 +16,7 @@ import type {
 } from "../../shared/types";
 import { parseDocxBlocksFromBuffer } from "./docx-blocks";
 import { editPdfRegion } from "./pdf-region-editor";
+import { extractPdfReviewData } from "../utils/pdf-review";
 
 type SessionRecord = {
   id: string;
@@ -337,6 +338,12 @@ export class DocumentEditorSessionService {
     if (fileType === "pdf") {
       const pdfBytes = await fs.readFile(currentPath);
       session.pdfDataBase64 = pdfBytes.toString("base64");
+      session.pdfReviewSummary = await extractPdfReviewData(currentPath, {
+        maxPages: 12,
+        maxCharsPerPage: 1600,
+        maxOcrPages: 4,
+        includeOcr: true,
+      });
     } else {
       const docxBytes = await fs.readFile(currentPath);
       const blocks = await parseDocxBlocksFromBuffer(docxBytes);
