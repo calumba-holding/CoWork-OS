@@ -207,7 +207,22 @@ const composeMessageWithAttachments = async (
         if (fileType === "unsupported") continue;
         if (fileType === "image" && !result.data.ocrText?.trim()) continue;
 
-        let content = fileType === "image" ? (result.data.ocrText ?? null) : result.data.content;
+        let content: string | null = null;
+        if (fileType === "image") {
+          content = result.data.ocrText ?? null;
+        } else if (fileType === "pdf" && result.data.pdfReviewSummary) {
+          const summary = result.data.pdfReviewSummary;
+          const lines = [
+            `PDF review summary: pages=${summary.pageCount}, native=${summary.nativeTextPages}, ocr=${summary.ocrPages}, scanned=${summary.scannedPages}`,
+          ];
+          for (const page of summary.pages) {
+            lines.push(`[Page ${page.pageIndex + 1}]${page.usedOcr ? " [OCR]" : ""}`);
+            lines.push(page.text);
+          }
+          content = lines.join("\n");
+        } else {
+          content = result.data.content;
+        }
         if (!content && result.data.htmlContent) {
           content = stripHtmlForText(result.data.htmlContent);
         }
