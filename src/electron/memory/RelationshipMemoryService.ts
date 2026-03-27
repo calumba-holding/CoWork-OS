@@ -249,6 +249,41 @@ export class RelationshipMemoryService {
     }
   }
 
+  static rememberMailboxInsights(params: {
+    facts?: string[];
+    commitments?: Array<{ text: string; dueAt?: number }>;
+    taskId?: string;
+  }): void {
+    const facts = Array.isArray(params.facts) ? params.facts : [];
+    const commitments = Array.isArray(params.commitments) ? params.commitments : [];
+
+    for (const fact of facts.slice(0, 4)) {
+      const text = this.normalizeText(fact);
+      if (!text) continue;
+      this.upsert({
+        layer: "context",
+        text,
+        confidence: 0.7,
+        source: "task",
+        lastTaskId: params.taskId,
+      });
+    }
+
+    for (const commitment of commitments.slice(0, 6)) {
+      const text = this.normalizeText(commitment.text);
+      if (!text) continue;
+      this.upsert({
+        layer: "commitments",
+        text,
+        confidence: 0.82,
+        source: "task",
+        lastTaskId: params.taskId,
+        status: "open",
+        dueAt: commitment.dueAt,
+      });
+    }
+  }
+
   static cleanupRecurringTaskHistory(): {
     collapsed: number;
     groupsCollapsed: number;
