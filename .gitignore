@@ -73,6 +73,10 @@ CLAUDE.md
 # CoWork local state
 .cowork/
 
+# Runtime-generated outputs
+artifacts/
+output/
+
 # VM artifacts
 vm-bundle/
 *.img
