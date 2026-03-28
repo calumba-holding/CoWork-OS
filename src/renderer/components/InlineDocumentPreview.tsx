@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -11,6 +11,14 @@ type InlineDocumentPreviewProps = {
 type SupportedDocumentType = "pdf" | "docx" | "markdown" | "text" | "code";
 
 const PREVIEW_MAX_CHARS = 1600;
+
+const markdownComponents = {
+  table: ({ children, ...props }: React.HTMLAttributes<HTMLTableElement>) => (
+    <div className="markdown-table-wrapper">
+      <table {...props}>{children}</table>
+    </div>
+  ),
+};
 
 function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "";
@@ -235,7 +243,7 @@ export function InlineDocumentPreview({
         </button>
       ) : fileType === "markdown" ? (
         <div className="inline-document-markdown markdown-content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{preview.text}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{preview.text}</ReactMarkdown>
         </div>
       ) : (
         <pre className="inline-document-content">{preview.text}</pre>

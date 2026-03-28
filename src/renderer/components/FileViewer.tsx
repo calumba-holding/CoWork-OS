@@ -183,9 +183,20 @@ export function FileViewer({ filePath, workspacePath, onClose }: FileViewerProps
                   <span>OCR</span>
                   <strong>{fileData.pdfReviewSummary.ocrPages}</strong>
                 </div>
+                {fileData.pdfReviewSummary.extractionMode && (
+                  <div className="file-viewer-pdf-summary-row">
+                    <span>Mode</span>
+                    <strong>{fileData.pdfReviewSummary.extractionMode}</strong>
+                  </div>
+                )}
                 {fileData.pdfReviewSummary.truncatedPages && (
                   <div className="file-viewer-pdf-summary-note">
                     Preview limited to the first extracted pages.
+                  </div>
+                )}
+                {fileData.pdfReviewSummary.imageHeavy && (
+                  <div className="file-viewer-pdf-summary-note">
+                    Image-heavy PDF detected. OCR-first extraction was used when available.
                   </div>
                 )}
               </div>

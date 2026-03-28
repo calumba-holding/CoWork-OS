@@ -292,6 +292,12 @@ export function DocumentEditorModal({
                     <span>OCR</span>
                     <strong>{session.pdfReviewSummary.ocrPages}</strong>
                   </div>
+                  {session.pdfReviewSummary.extractionMode && (
+                    <div>
+                      <span>Mode</span>
+                      <strong>{session.pdfReviewSummary.extractionMode}</strong>
+                    </div>
+                  )}
                 </div>
                 <div className="document-editor-pdf-pages">
                   {session.pdfReviewSummary.pages.slice(0, 4).map((page) => (
@@ -308,6 +314,11 @@ export function DocumentEditorModal({
                 {session.pdfReviewSummary.truncatedPages && (
                   <div className="document-editor-pdf-note">
                     Preview limited to the first extracted pages.
+                  </div>
+                )}
+                {session.pdfReviewSummary.imageHeavy && (
+                  <div className="document-editor-pdf-note">
+                    Image-heavy PDF detected. OCR-first extraction was used when available.
                   </div>
                 )}
               </div>
