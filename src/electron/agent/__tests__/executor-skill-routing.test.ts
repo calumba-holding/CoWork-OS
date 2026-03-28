@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const rankModelInvocableSkillsForQuery = vi.fn();
+const getSkill = vi.fn();
+const matchesSkillRoutingQuery = vi.fn();
 
 vi.mock("../custom-skill-loader", () => ({
   getCustomSkillLoader: () => ({
     rankModelInvocableSkillsForQuery,
+    getSkill,
+    matchesSkillRoutingQuery,
   }),
 }));
 
@@ -43,6 +47,10 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
 
   beforeEach(() => {
     rankModelInvocableSkillsForQuery.mockReset();
+    getSkill.mockReset();
+    matchesSkillRoutingQuery.mockReset();
+    getSkill.mockImplementation((skillId: string) => ({ id: skillId, parameters: [] }));
+    matchesSkillRoutingQuery.mockReturnValue(true);
   });
 
   it("deterministically expands the strongest matching skill for the PR review prompt", async () => {
@@ -84,24 +92,26 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
   });
 
   it("does not auto-route when the top skill still needs required parameters", async () => {
+    const repoReviewSkill = {
+      id: "repo-review",
+      name: "Repo Review",
+      description: "Review a repository with custom inputs.",
+      parameters: [
+        {
+          name: "repoPath",
+          type: "string",
+          description: "Repository path",
+          required: true,
+        },
+      ],
+    };
     rankModelInvocableSkillsForQuery.mockReturnValue([
       {
-        skill: {
-          id: "repo-review",
-          name: "Repo Review",
-          description: "Review a repository with custom inputs.",
-          parameters: [
-            {
-              name: "repoPath",
-              type: "string",
-              description: "Repository path",
-              required: true,
-            },
-          ],
-        },
+        skill: repoReviewSkill,
         score: 0.96,
       },
     ]);
+    getSkill.mockReturnValue(repoReviewSkill);
 
     const executor = createExecutor("Review this repo with the specialized reviewer.");
     const originalPrompt = executor.task.prompt;
@@ -251,5 +261,40 @@ describe("TaskExecutor high-confidence natural-language skill routing", () => {
     expect(handled).toBe(false);
     expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
     expect(executor.task.prompt).toBe(prompt);
+  });
+
+  it("skips stale auto-routed skills that no longer satisfy the current keyword gate", async () => {
+    const novelist = {
+      id: "novelist",
+      name: "Novelist",
+      description: "Run an autonomous fiction pipeline.",
+      parameters: [],
+      metadata: {
+        routing: {
+          keywords: ["novel", "fiction"],
+        },
+      },
+    };
+
+    rankModelInvocableSkillsForQuery.mockReturnValue([
+      {
+        skill: novelist,
+        score: 0.95,
+      },
+    ]);
+    getSkill.mockReturnValue(novelist);
+    matchesSkillRoutingQuery.mockReturnValue(false);
+
+    const executor = createExecutor(
+      "check this pdf to see how much of the concept is integrated to cowork os via the latest commits and whats still missing?",
+    );
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleHighConfidenceSkillRouting.call(
+      executor,
+    );
+
+    expect(handled).toBe(false);
+    expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
+    expect(executor.task.prompt).toContain("check this pdf");
   });
 });
