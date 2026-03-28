@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toOpenAICompatibleMessages } from "../openai-compatible";
+import { sanitizeToolCallHistory, toOpenAICompatibleMessages } from "../openai-compatible";
 
 describe("toOpenAICompatibleMessages", () => {
   it("keeps assistant text and tool calls in one ordered message block", () => {
@@ -280,6 +280,39 @@ describe("toOpenAICompatibleMessages", () => {
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ role: "user", content: "task context" });
     expect(result.some((m) => m.role === "tool")).toBe(false);
+  });
+
+  it("drops incomplete assistant tool batches before provider conversion", () => {
+    const input = [
+      {
+        role: "assistant" as const,
+        content: [
+          { type: "text" as const, text: "Fetching sources." },
+          {
+            type: "tool_use" as const,
+            id: "call_1",
+            name: "web_fetch",
+            input: { url: "https://example.com" },
+          },
+          {
+            type: "tool_use" as const,
+            id: "call_2",
+            name: "web_fetch",
+            input: { url: "https://example.org" },
+          },
+        ],
+      },
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "call_1", content: "only one result" }],
+      },
+      { role: "assistant" as const, content: "Recovered later." },
+    ];
+
+    expect(sanitizeToolCallHistory(input)).toEqual([{ role: "assistant", content: "Recovered later." }]);
+    expect(toOpenAICompatibleMessages(input)).toEqual([
+      { role: "assistant", content: "Recovered later." },
+    ]);
   });
 
   it("omits image payload when provider does not support images", () => {
