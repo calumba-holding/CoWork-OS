@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-03-28
+
+### Added
+- **Inbox Agent**: full AI-powered email workspace with LLM thread classification (category, needsReply, priorityScore, urgencyScore, staleFollowup, cleanupCandidate, confidence), SHA-256 fingerprinting to skip unchanged threads, backfill pipeline for existing threads, on-demand `reclassifyThread`/`reclassifyAccount` API, sandboxed HTML email rendering with form neutralization, sort/filter controls (priority/recent, inbox/sent/all, unread, needsReply, commitments, proposals), classification pending badge, draft style profiling, and structured calendar schedule options. See [Inbox Agent](docs/inbox-agent.md).
+- **R&D Council**: `CouncilService` manages multi-LLM research councils with CRUD, cron-scheduled runs, seat rotation by sort order, memo persistence, and file delivery. Includes `CouncilSettings` panel under Automations, IPC wiring, council synthesis prompt, and `council_configs`/`council_runs`/`council_memos` SQLite tables. `AgentConfigSchema` extended with `MultiLlm` participant fields and `ExternalRuntime` shape.
+- **AcpxRuntimeRunner**: spawns the `acpx` binary for Codex child tasks with session management, arg builders, and JSON line parser. Integrated into `TaskExecutor` with automatic `ENOENT` fallback to native execution. `codexRuntimeMode` setting (`native`/`acpx`) added to Built-in Tools settings.
+- **Task Replay**: `useReplayMode` hook steps through completed task event logs at 1×–10× speed. `ReplayControlsBar` provides play/pause/reset and speed controls. Wired into App root and MainContent.
+- **Computer Use**: `computer_use` tool wrapper, permission dialog, translucent safety overlay, window isolation, and keyboard shortcut guard for desktop automation sessions.
+- **Batch image processing**: `batch_image` tool supporting OCR, captioning, classification, and multi-image comparison in a single call.
+- **`ocrmypdf` PDF integration**: document-level OCR for image-heavy PDFs via `ocrmypdf --skip-text --deskew --rotate-pages`. `assessPdfCoverage()` detects image-heavy documents; `decidePdfExtractionMode()` selects `ocrmypdf`, `page-ocr`, or `native`. `extractionMode` and `imageHeavy` surfaced on `PdfReviewSummary`.
+- **Google Workspace copy-link OAuth**: `startGoogleWorkspaceOAuthGetLink()` returns the auth URL immediately for paste-into-browser flow; tokens saved automatically on callback. Concurrent-call guard prevents port 18766 conflicts. `loginHint` pre-selects the correct Google account. Step-by-step setup guide added to the settings panel.
+- **Prompt-cache cost accounting**: `cachedTokens` field on `LLMResponse.usage` extracted from Azure OpenAI and OpenAI-compatible responses; cache discounts applied in `calculateCost()`.
+- **Agent companies service**: company data service with companies panel UI and company preview service.
+- **Release notes for 0.5.13**: added detailed summary page. See [Release Notes 0.5.13](docs/release-notes-0.5.13.md).
+
+### Changed
+- **`sanitizeToolCallHistory()`**: strips assistant turns with no matching `tool_result` before serializing conversation history, preventing dangling tool-use errors on OpenAI-compatible providers. Logs missing IDs.
+- **Azure OpenAI structured errors**: `buildAzureApiError()` centralizes error construction with `status`, `requestId` (from `x-ms-request-id` / `apim-request-id`), `providerMessage`, `providerCode`, and raw error body. Logger replaces all `console.*` calls.
+- **Source-coverage guard**: Daily AI Agent Trends Research requires Reddit, X, and tech-news evidence before completion; missing categories block the run with a descriptive error.
+- **Skill routing gate**: `getAutoRoutableSkill()` validates the skill is still loaded and satisfies its keyword gate before auto-routing executes.
+- **Task lifecycle normalization**: stale terminal tasks reconciled on daemon startup; collaborative tasks in launching state re-launched. `task-status` utility extracts lifecycle derivation into a shared module.
+- **X Mentions**: retry errors in `fetchMentionsWithRetry` are now propagated instead of swallowed; bridge poll failures reset the status store immediately.
+- **Bird CLI errors**: `dedupeBirdOutputDetail()` deduplicates stderr/stdout lines against the base error message.
+- **Mac sidebars**: left and right sidebars are transparent for macOS vibrancy support.
+- **`extractGmailBody`**: `multipart/alternative` payloads now prefer the HTML part (reverse iteration per RFC 2822).
+- **Render scale**: default PDF render scale bumped from 1400 to 1800 px for better OCR quality.
+- **`CHANNEL_TYPES` constant**: `ChannelType` derived from a single exported const array, removing the hardcoded enum.
+- **Relationship memory**: mailbox sync captures contact insights into the relationship memory graph.
+- **Apple HealthKit bridge**: runtime and build script improvements.
+
+### Fixed
+- **Broken task FK**: fixed foreign key constraint on `tasks` after `heartbeat_runs` table rename; migration guard added for future renames.
+- **Stale terminal fields**: `completed_at`, `failed_at`, and related fields cleared when a task is patched back to an active status.
+- **Multi-LLM seat assignment**: council participant seats now assigned using the configured sort order; fixed off-by-one on first run.
+- **CLI child-task detection**: detector uses a pre-built event map, fixing missed child tasks on parents with large event counts.
+- **Quality-pass draft rejection**: quality-pass callback returns `QualityPassDraftResult`; rejected drafts are now correctly skipped.
+- **Tool transcript false positives**: removed the overly broad `"command":` marker from plain-tool-transcript detection.
+- **`mailbox_commitments` migration**: added missing `ALTER TABLE mailbox_commitments ADD COLUMN metadata_json TEXT` migration for existing databases.
+- **`CronSchedule` import boundary**: inlined in shared types to fix an `electron/` boundary import error in renderer-visible code.
+- **`BriefingPanel` TypeScript**: fixed implicit-any on workspace filter result.
+
 ## [0.5.12] - 2026-03-22
 
 ### Added
