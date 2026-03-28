@@ -30,10 +30,14 @@ function createOkResponse(data: Any) {
 }
 
 function createErrorResponse(status: number, statusText: string, data: Any) {
+  const headers = new Map<string, string>([["x-ms-request-id", "req-123"]]);
   return {
     ok: false,
     status,
     statusText,
+    headers: {
+      get: (name: string) => headers.get(name.toLowerCase()) || headers.get(name) || null,
+    },
     json: vi.fn().mockResolvedValue(data),
   };
 }
@@ -417,6 +421,27 @@ describe("AzureOpenAIProvider", () => {
     await expect(provider.createMessage(request)).rejects.toMatchObject({
       retryable: true,
       status: 400,
+      requestId: "req-123",
+      providerMessage: "The server had an error while processing your request. Sorry about that!",
+    });
+  });
+
+  it("marks ECONNRESET transport failures as retryable with a consistent structured shape", async () => {
+    const transportError = new TypeError("fetch failed");
+    (transportError as Any).cause = { code: "ECONNRESET" };
+    mockFetch.mockRejectedValue(transportError);
+
+    const provider = new AzureOpenAIProvider(baseConfig);
+    const request: LLMRequest = {
+      model: "gpt-5.4",
+      maxTokens: 100,
+      system: "system prompt",
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    await expect(provider.createMessage(request)).rejects.toMatchObject({
+      retryable: true,
+      code: "ECONNRESET",
     });
   });
 });
