@@ -351,34 +351,49 @@ export function RightPanel({
   const files = useMemo((): FileInfo[] => {
     const fileMap = new Map<string, FileInfo>();
 
+    // Normalize to a consistent relative path key for deduplication.
+    // Two events may emit the same file as an absolute path and a relative path.
+    const normalizePathKey = (p: string): string => {
+      const normalized = p.replace(/\\/g, "/");
+      if (workspace?.path) {
+        const base = workspace.path.replace(/\\/g, "/").replace(/\/$/, "");
+        if (normalized.startsWith(base + "/")) return normalized.slice(base.length + 1);
+      }
+      return normalized;
+    };
+
     events.forEach((event) => {
       const effectiveType = getEffectiveTaskEventType(event);
       if (effectiveType === "file_created" && event.payload.path) {
         if (event.payload.type === "directory") return;
-        fileMap.set(event.payload.path, {
-          path: event.payload.path,
+        const key = normalizePathKey(event.payload.path);
+        fileMap.set(key, {
+          path: key,
           action: "created",
           timestamp: event.timestamp,
         });
       }
       if (effectiveType === "file_modified" && (event.payload.path || event.payload.from)) {
-        const path = event.payload.path || event.payload.from;
-        fileMap.set(path, {
-          path,
+        const raw = event.payload.path || event.payload.from;
+        const key = normalizePathKey(raw);
+        fileMap.set(key, {
+          path: key,
           action: "modified",
           timestamp: event.timestamp,
         });
       }
       if (effectiveType === "file_deleted" && event.payload.path) {
-        fileMap.set(event.payload.path, {
-          path: event.payload.path,
+        const key = normalizePathKey(event.payload.path);
+        fileMap.set(key, {
+          path: key,
           action: "deleted",
           timestamp: event.timestamp,
         });
       }
       if (effectiveType === "artifact_created" && event.payload.path) {
-        fileMap.set(event.payload.path, {
-          path: event.payload.path,
+        const key = normalizePathKey(event.payload.path);
+        fileMap.set(key, {
+          path: key,
           action: "created",
           timestamp: event.timestamp,
         });
@@ -400,9 +415,10 @@ export function RightPanel({
           ? completionOutputSummary.created
           : completionOutputSummary.modifiedFallback || [];
       completionOutputPaths.forEach((outputPath, index) => {
-        if (fileMap.has(outputPath)) return;
-        fileMap.set(outputPath, {
-          path: outputPath,
+        const key = normalizePathKey(outputPath);
+        if (fileMap.has(key)) return;
+        fileMap.set(key, {
+          path: key,
           action: modifiedFallbackSet.has(outputPath) ? "modified" : "created",
           timestamp: (latestCompletionEvent?.timestamp || Date.now()) - index,
         });
@@ -412,7 +428,7 @@ export function RightPanel({
     return Array.from(fileMap.values())
       .filter((f) => !f.path.endsWith("/") && !f.path.endsWith("\\"))
       .sort((a, b) => b.timestamp - a.timestamp);
-  }, [events, task]);
+  }, [events, task, workspace]);
   const outputSummary = useMemo(() => {
     const latestCompletionEvent = [...events]
       .reverse()

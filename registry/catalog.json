@@ -610,6 +610,20 @@
       "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/financial-modeling.json"
     },
     {
+      "id": "frontend",
+      "name": "Frontend",
+      "description": "Design and build premium frontend interfaces when art direction, hierarchy, restraint, imagery, and motion matter more than component count.",
+      "version": "1.0.0",
+      "author": "CoWork OS",
+      "tags": [
+        "Development"
+      ],
+      "icon": "🖥️",
+      "category": "Development",
+      "updatedAt": "2026-03-28",
+      "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/frontend.json"
+    },
+    {
       "id": "frontend-design",
       "name": "frontend-design",
       "description": "Design and build production-grade frontends with bold, distinctive aesthetics.",
@@ -1446,6 +1460,20 @@
       "category": "Development",
       "updatedAt": "2026-03-18",
       "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/security-audit.json"
+    },
+    {
+      "id": "screenshot-capture",
+      "name": "Screenshot Capture",
+      "description": "Capture desktop screenshots with OS-aware save-location rules, app/window/region support, and bundled helpers.",
+      "version": "1.0.0",
+      "author": "CoWork OS",
+      "tags": [
+        "Tools"
+      ],
+      "icon": "📸",
+      "category": "Tools",
+      "updatedAt": "2026-03-28",
+      "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/screenshot-capture.json"
     },
     {
       "id": "session-logs",
