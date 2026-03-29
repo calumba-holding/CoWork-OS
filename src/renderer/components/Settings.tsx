@@ -110,6 +110,7 @@ import { ImprovementSettingsPanel } from "./ImprovementSettingsPanel";
 import { CompaniesPanel } from "./CompaniesPanel";
 import { HealthPanel } from "./HealthPanel";
 import { CouncilSettings } from "./CouncilSettings";
+import { ContactIdentitySettings } from "./ContactIdentitySettings";
 
 type SettingsTab =
   | "appearance"
@@ -137,6 +138,7 @@ type SettingsTab =
   | "skills"
   | "skillhub"
   | "connectors"
+  | "identity"
   | "infrastructure"
   | "mcp"
   | "tools"
@@ -615,10 +617,10 @@ export function Settings({
       : "queue",
   );
   const [activeIntegrationsSubTab, setActiveIntegrationsSubTab] = useState<
-    "git" | "connectors" | "infrastructure"
+    "git" | "connectors" | "identity" | "infrastructure"
   >(
-    ["git", "connectors", "infrastructure"].includes(initialTab as string)
-      ? (initialTab as "git" | "connectors" | "infrastructure")
+    ["git", "connectors", "identity", "infrastructure"].includes(initialTab as string)
+      ? (initialTab as "git" | "connectors" | "identity" | "infrastructure")
       : "connectors",
   );
   const [activeAccessSubTab, setActiveAccessSubTab] = useState<"controlplane" | "webaccess">(
@@ -5017,6 +5019,13 @@ export function Settings({
                     <span>Connectors</span>
                   </button>
                   <button
+                    className={`more-channels-tab ${activeIntegrationsSubTab === "identity" ? "active" : ""}`}
+                    onClick={() => setActiveIntegrationsSubTab("identity")}
+                  >
+                    <UsersRound {...S} />
+                    <span>Identity</span>
+                  </button>
+                  <button
                     className={`more-channels-tab ${activeIntegrationsSubTab === "infrastructure" ? "active" : ""}`}
                     onClick={() => setActiveIntegrationsSubTab("infrastructure")}
                   >
@@ -5027,6 +5036,9 @@ export function Settings({
                 <div className="more-channels-content">
                   {activeIntegrationsSubTab === "git" && <WorktreeSettings />}
                   {activeIntegrationsSubTab === "connectors" && <ConnectorsSettings />}
+                  {activeIntegrationsSubTab === "identity" && (
+                    <ContactIdentitySettings workspaceId={workspaceId} />
+                  )}
                   {activeIntegrationsSubTab === "infrastructure" && <InfraSettings />}
                 </div>
               </div>
