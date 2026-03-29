@@ -55,6 +55,19 @@
 
 **Key Insight**: OpenClaw has significant adoption and meaningful capability overlap, and its community momentum is real. The category emphasis differs: OpenClaw leans toward framework/operator workflows, while CoWork OS emphasizes governed day-to-day operations via desktop + channel runtime.
 
+### CoWork OS Positioning vs OpenClaw and Hermes
+
+Based on the comparison pattern in the screenshot, CoWork OS sits between the two:
+
+| Dimension | OpenClaw | Hermes | CoWork OS |
+|---|---|---|---|
+| Core motion | Build and run agent workflows | Learn from experience and improve over time | Operate governed workflows across desktop and channels |
+| Runtime shape | CLI-first self-hosted agent runtime | Python agent runtime with persistent memory | Electron desktop app plus headless daemon |
+| Main strength | Broad ecosystem and operator flexibility | Self-improvement loop and memory depth | Approvals, local-first governance, and multi-channel delivery |
+| Best fit | Developers and operators who want a framework/runtime | Users who want a learning agent that gets smarter over time | Teams that want a production-ready AI operating system |
+
+In short: OpenClaw is closer to a framework/operator layer, Hermes is closer to a learning-loop-first agent, and CoWork OS is the governed runtime that productizes both ideas for day-to-day operations.
+
 ---
 
 ## 3. FEATURE COMPARISON MATRIX — CoWork OS vs Key Competitors
