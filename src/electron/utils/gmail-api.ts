@@ -23,6 +23,9 @@ function parseJsonSafe(text: string): Any | undefined {
 
 function formatGmailError(status: number, data: Any, fallback?: string): string {
   const message = data?.error?.message || data?.message || fallback || "Gmail API error";
+  if (status === 403 && /insufficient authentication scopes/i.test(String(message))) {
+    return `Gmail API error 403: ${message} Reconnect Google Workspace in Settings > Integrations > Google Workspace and authorize the Gmail modify scope.`;
+  }
   return `Gmail API error ${status}: ${message}`;
 }
 
