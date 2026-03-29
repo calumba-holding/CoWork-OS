@@ -39,8 +39,9 @@ interface TriggerHistoryEntry {
 }
 
 const SOURCES = [
+  { value: "mailbox_event", label: "Mailbox Event" },
   { value: "channel_message", label: "Channel Message" },
-  { value: "email", label: "Email" },
+  { value: "email", label: "Legacy Email" },
   { value: "webhook", label: "Webhook" },
   { value: "connector_event", label: "Connector Event" },
 ];
@@ -57,13 +58,74 @@ const OPERATORS = [
 
 const FIELDS_BY_SOURCE: Record<string, string[]> = {
   channel_message: ["text", "senderName", "chatId", "channelType"],
-  email: ["subject", "from", "to", "body"],
+  mailbox_event: [
+    "eventType",
+    "subject",
+    "summary",
+    "workspaceId",
+    "accountId",
+    "provider",
+    "threadId",
+    "evidenceCount",
+    "needsReply",
+    "staleFollowup",
+    "cleanupCandidate",
+    "commitmentCount",
+    "confidence",
+    "primaryContactEmail",
+    "primaryContactName",
+    "company",
+    "domain",
+    "projectHint",
+    "actionType",
+    "draftId",
+    "tone",
+    "commitmentId",
+    "dueAt",
+    "ownerEmail",
+  ],
+  email: [
+    "eventType",
+    "subject",
+    "summary",
+    "workspaceId",
+    "accountId",
+    "provider",
+    "threadId",
+    "evidenceCount",
+    "needsReply",
+    "staleFollowup",
+    "cleanupCandidate",
+    "commitmentCount",
+    "confidence",
+    "primaryContactEmail",
+    "primaryContactName",
+    "company",
+    "domain",
+    "projectHint",
+    "actionType",
+    "draftId",
+    "tone",
+    "commitmentId",
+    "dueAt",
+    "ownerEmail",
+  ],
   webhook: ["path", "method", "body"],
   connector_event: ["type", "source", "data"],
 };
 
 /** Example triggers shown when empty; clicking one populates the form */
-const EXAMPLE_TRIGGERS = [
+type ExampleTrigger = {
+  name: string;
+  source: string;
+  conditions: TriggerCondition[];
+  actionTitle?: string;
+  actionPrompt: string;
+  actionType?: "create_task" | "wake_agent";
+  agentRoleId?: string;
+};
+
+const EXAMPLE_TRIGGERS: ExampleTrigger[] = [
   {
     name: "Urgent deploy alert",
     source: "channel_message" as const,
@@ -81,12 +143,39 @@ const EXAMPLE_TRIGGERS = [
       "Triage this bug report and create a task with priority and steps. Message: {{event.text}}",
   },
   {
-    name: "Meeting follow-up",
-    source: "email" as const,
-    conditions: [{ field: "subject", operator: "contains", value: "meeting" }],
-    actionTitle: "Meeting follow-up",
+    name: "Urgent reply needed",
+    source: "mailbox_event" as const,
+    conditions: [
+      { field: "eventType", operator: "equals", value: "thread_classified" },
+      { field: "needsReply", operator: "equals", value: "true" },
+      { field: "subject", operator: "contains", value: "urgent" },
+    ],
+    actionTitle: "Create follow-up task",
     actionPrompt:
-      "Create follow-up tasks from this meeting email. Extract action items and assign priorities.",
+      "Create a task for this inbox thread. Summarize the request, include the contact, and call out the next step.",
+  },
+  {
+    name: "Commitment follow-up",
+    source: "mailbox_event" as const,
+    conditions: [
+      { field: "eventType", operator: "equals", value: "commitments_extracted" },
+      { field: "commitmentCount", operator: "gt", value: "0" },
+    ],
+    actionTitle: "Review commitment",
+    actionPrompt:
+      "Create a follow-up review task for the extracted commitment and include the due date if present.",
+  },
+  {
+    name: "Stale follow-up wake",
+    source: "mailbox_event" as const,
+    conditions: [
+      { field: "eventType", operator: "equals", value: "thread_classified" },
+      { field: "staleFollowup", operator: "equals", value: "true" },
+    ],
+    actionType: "wake_agent",
+    agentRoleId: "agent-founder",
+    actionPrompt:
+      "Wake the responsible agent for this stale inbox follow-up and summarize the thread context.",
   },
   {
     name: "Webhook deploy",
@@ -105,13 +194,14 @@ export const EventTriggersPanel: React.FC<{ workspaceId?: string }> = ({ workspa
 
   // Form state
   const [name, setName] = useState("");
-  const [source, setSource] = useState("channel_message");
+  const [source, setSource] = useState("mailbox_event");
   const [conditions, setConditions] = useState<TriggerCondition[]>([
-    { field: "text", operator: "contains", value: "" },
+    { field: "eventType", operator: "equals", value: "thread_classified" },
   ]);
-  const [actionType] = useState("create_task");
+  const [actionType, setActionType] = useState<"create_task" | "wake_agent">("create_task");
   const [actionPrompt, setActionPrompt] = useState("");
   const [actionTitle, setActionTitle] = useState("");
+  const [actionAgentRoleId, setActionAgentRoleId] = useState("");
 
   const loadTriggers = useCallback(async () => {
     try {
@@ -150,19 +240,27 @@ export const EventTriggersPanel: React.FC<{ workspaceId?: string }> = ({ workspa
         conditionLogic: "all",
         action: {
           type: actionType,
-          config: {
-            prompt: actionPrompt,
-            title: actionTitle || `Trigger: ${name.trim()}`,
-            workspaceId,
-          },
+          config:
+            actionType === "wake_agent"
+              ? {
+                  prompt: actionPrompt,
+                  agentRoleId: actionAgentRoleId.trim(),
+                }
+              : {
+                  prompt: actionPrompt,
+                  title: actionTitle || `Trigger: ${name.trim()}`,
+                  workspaceId,
+                },
         },
         workspaceId: workspaceId || "",
       });
       setShowForm(false);
       setName("");
       setConditions([{ field: "text", operator: "contains", value: "" }]);
+      setActionType("create_task");
       setActionPrompt("");
       setActionTitle("");
+      setActionAgentRoleId("");
       loadTriggers();
     } catch (err) {
       console.error("Failed to add trigger:", err);
@@ -191,8 +289,10 @@ export const EventTriggersPanel: React.FC<{ workspaceId?: string }> = ({ workspa
     setName(ex.name);
     setSource(ex.source);
     setConditions(ex.conditions.map((c) => ({ ...c })));
-    setActionTitle(ex.actionTitle);
+    setActionType(ex.actionType || "create_task");
+    setActionTitle(ex.actionTitle || "");
     setActionPrompt(ex.actionPrompt);
+    setActionAgentRoleId(ex.agentRoleId || "");
     setShowForm(true);
   };
 
@@ -430,6 +530,24 @@ export const EventTriggersPanel: React.FC<{ workspaceId?: string }> = ({ workspa
             >
               Then (action)
             </label>
+            <select
+              value={actionType}
+              onChange={(e) => setActionType(e.target.value === "wake_agent" ? "wake_agent" : "create_task")}
+              className="event-triggers-select"
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--color-border)",
+                background: "var(--color-bg-input)",
+                color: "var(--color-text)",
+                fontSize: 13,
+                marginBottom: 6,
+              }}
+            >
+              <option value="create_task">Create task</option>
+              <option value="wake_agent">Wake agent</option>
+            </select>
             <input
               type="text"
               className="settings-input"
@@ -437,12 +555,23 @@ export const EventTriggersPanel: React.FC<{ workspaceId?: string }> = ({ workspa
               onChange={(e) => setActionTitle(e.target.value)}
               placeholder="Task title"
               style={{ marginBottom: 6 }}
+              disabled={actionType === "wake_agent"}
             />
+            {actionType === "wake_agent" && (
+              <input
+                type="text"
+                className="settings-input"
+                value={actionAgentRoleId}
+                onChange={(e) => setActionAgentRoleId(e.target.value)}
+                placeholder="Agent role ID"
+                style={{ marginBottom: 6 }}
+              />
+            )}
             <textarea
               className="settings-input"
               value={actionPrompt}
               onChange={(e) => setActionPrompt(e.target.value)}
-              placeholder="Task prompt (use {{event.text}}, {{event.senderName}} for variables)"
+              placeholder="Task prompt (use {{event.subject}}, {{event.threadId}}, {{event.primaryContactEmail}} for variables)"
               rows={3}
               style={{
                 resize: "vertical",
@@ -468,7 +597,7 @@ export const EventTriggersPanel: React.FC<{ workspaceId?: string }> = ({ workspa
             </button>
             <button
               onClick={handleAdd}
-              disabled={!name.trim()}
+              disabled={!name.trim() || (actionType === "wake_agent" && !actionAgentRoleId.trim())}
               style={{
                 padding: "6px 12px",
                 borderRadius: 6,
@@ -477,7 +606,7 @@ export const EventTriggersPanel: React.FC<{ workspaceId?: string }> = ({ workspa
                 color: "#fff",
                 cursor: "pointer",
                 fontSize: 12,
-                opacity: name.trim() ? 1 : 0.5,
+                opacity: name.trim() && (actionType !== "wake_agent" || actionAgentRoleId.trim()) ? 1 : 0.5,
               }}
             >
               Create Trigger
