@@ -15,6 +15,9 @@ Use cases:
 - Booking + forms (find availability, fill forms, stop before final submit)
 - Visibility for others (daily digest to family)
 - Inbox autopilot / Inbox Agent (triage, drafts, cleanup suggestions, commitment tracking)
+- Inbox sent-mail review and follow-up capture
+- Contact intelligence enrichment from email threads
+- Inbox-aware briefing and Heartbeat follow-up
 - Chief-of-staff briefing (morning executive brief)
 - Dev task queue management (agent-ready backlog execution)
 - Founder-directed autonomous company operations ("zero-human company" loop)
@@ -147,6 +150,60 @@ Ask me what to execute.
 Command shortcut:
 ```
 /inbox autopilot 180
+```
+
+### 7A) Inbox Sent-Mail Review
+
+Prompt:
+```
+Open Inbox Agent and switch to Sent view.
+Inspect the selected sent thread, show the email body, summarize what was sent, and list any implied follow-ups or commitments.
+If the thread references a person or project, suggest what should be updated in contact memory or the Knowledge Graph.
+Do not send, archive, or delete anything. Ask me what action to take next.
+```
+
+### 7B) Inbox Commitments And Follow-Ups
+
+Prompt:
+```
+Open Inbox Agent and find the threads with open commitments or overdue follow-ups.
+For each one, extract the commitment, due date, owner, and source email.
+Return a short table with:
+- thread
+- commitment
+- due date
+- status
+- next action
+STOP before changing any commitment state. Ask me which commitments to update.
+```
+
+### 7C) Inbox Knowledge Graph Enrichment
+
+Prompt:
+```
+Open Inbox Agent and review the current thread and its related contact info.
+Extract people, companies, and projects mentioned in the thread and suggest what should be linked or updated in the Knowledge Graph.
+Include related threads, recent subjects, and any relationship signals that would help future replies.
+Do not make graph changes automatically. Ask me to confirm any updates.
+```
+
+### 7D) Inbox Briefing And Heartbeat
+
+Prompt:
+```
+Open Inbox Agent and build an inbox-first briefing for today.
+Include unread mail, action-needed mail, overdue commitments, drafts in progress, and sensitive threads.
+Also note which threads should be escalated into follow-ups or cleanup.
+Do not send anything externally. Use the result as a briefing item only.
+```
+
+### 7E) Inbox Cleanup And Bulk Triage
+
+Prompt:
+```
+Open Inbox Agent and identify low-value threads that are safe to bulk archive or trash.
+Group them by sender or type, explain why each group is a cleanup candidate, and recommend the safest bulk action.
+STOP before applying changes. Ask me which groups to execute.
 ```
 
 ### 8) Morning Briefing Agent (Chief Of Staff)
