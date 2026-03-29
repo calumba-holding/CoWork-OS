@@ -289,7 +289,9 @@ button:focus-visible,
 }
 
 .modern-logo-text {
-  height: 48px;
+  height: 90px;
+  width: auto;
+  max-width: min(94vw, 780px);
   object-fit: contain;
 }
 
@@ -8900,6 +8902,20 @@ a,
   filter: drop-shadow(0 0 12px rgba(34, 211, 238, 0.4));
 }
 
+.cli-brand-wordmark {
+  width: auto;
+  height: 90px;
+  max-width: min(94vw, 700px);
+  object-fit: contain;
+  margin: 0 auto 12px;
+  display: block;
+  filter: drop-shadow(0 0 12px rgba(34, 211, 238, 0.4));
+}
+
+.theme-light .cli-brand-wordmark {
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.12));
+}
+
 .cli-logo-section .cli-ascii-logo {
   font-size: 10px;
   line-height: 1.2;
@@ -9770,6 +9786,14 @@ button {
   width: 80px;
   height: auto;
   filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.4));
+}
+
+.welcome-logo-img.welcome-brand-wordmark {
+  width: auto;
+  max-width: min(94vw, 700px);
+  height: auto;
+  max-height: 118px;
+  object-fit: contain;
 }
 
 .cli-header {
@@ -31371,7 +31395,8 @@ button {
 }
 
 .welcome-header-focused .modern-logo-text {
-  height: 56px;
+  height: 128px;
+  max-width: min(96vw, 840px);
   margin-bottom: 8px;
   filter: drop-shadow(0 2px 8px var(--color-accent-subtle));
 }
