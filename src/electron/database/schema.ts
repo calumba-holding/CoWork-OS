@@ -944,6 +944,7 @@ export class DatabaseManager {
         classification_updated_at INTEGER,
         classification_error TEXT,
         classification_json TEXT,
+        sensitive_content_json TEXT,
         metadata_json TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -977,7 +978,6 @@ export class DatabaseManager {
         key_asks_json TEXT,
         extracted_questions_json TEXT,
         suggested_next_action TEXT NOT NULL,
-        confidence REAL NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY (thread_id) REFERENCES mailbox_threads(id)
       );
@@ -1017,6 +1017,8 @@ export class DatabaseManager {
         name TEXT,
         company TEXT,
         role TEXT,
+        encryption_preference TEXT,
+        policy_flags_json TEXT,
         crm_links_json TEXT,
         learned_facts_json TEXT,
         response_tendency TEXT,
@@ -1042,6 +1044,135 @@ export class DatabaseManager {
         FOREIGN KEY (thread_id) REFERENCES mailbox_threads(id)
       );
 
+      CREATE TABLE IF NOT EXISTS mailbox_events (
+        id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL UNIQUE,
+        workspace_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        account_id TEXT,
+        thread_id TEXT,
+        provider TEXT,
+        subject TEXT,
+        summary_text TEXT,
+        evidence_refs_json TEXT,
+        payload_json TEXT NOT NULL,
+        duplicate_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS contact_identities (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        primary_email TEXT,
+        company_hint TEXT,
+        kg_entity_id TEXT,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        metadata_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS contact_identity_handles (
+        id TEXT PRIMARY KEY,
+        contact_identity_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        handle_type TEXT NOT NULL,
+        normalized_value TEXT NOT NULL,
+        display_value TEXT NOT NULL,
+        source TEXT NOT NULL,
+        channel_id TEXT,
+        channel_type TEXT,
+        channel_user_id TEXT,
+        metadata_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (contact_identity_id) REFERENCES contact_identities(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS contact_identity_suggestions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        contact_identity_id TEXT NOT NULL,
+        handle_type TEXT NOT NULL,
+        normalized_value TEXT NOT NULL,
+        display_value TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_label TEXT NOT NULL,
+        channel_id TEXT,
+        channel_type TEXT,
+        channel_user_id TEXT,
+        confidence REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'suggested',
+        reason_codes_json TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (contact_identity_id) REFERENCES contact_identities(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS contact_identity_audit (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        contact_identity_id TEXT,
+        handle_id TEXT,
+        suggestion_id TEXT,
+        action TEXT NOT NULL,
+        detail_json TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (contact_identity_id) REFERENCES contact_identities(id),
+        FOREIGN KEY (handle_id) REFERENCES contact_identity_handles(id),
+        FOREIGN KEY (suggestion_id) REFERENCES contact_identity_suggestions(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS mailbox_automations (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        thread_id TEXT,
+        source TEXT NOT NULL,
+        recipe_json TEXT NOT NULL,
+        backing_trigger_id TEXT,
+        backing_cron_job_id TEXT,
+        latest_outcome TEXT,
+        latest_fire_at INTEGER,
+        latest_run_at INTEGER,
+        next_run_at INTEGER,
+        latest_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mailbox_automation_audit (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        detail_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mailbox_mission_control_handoffs (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        company_id TEXT NOT NULL,
+        company_name TEXT NOT NULL,
+        operator_role_id TEXT NOT NULL,
+        operator_display_name TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        issue_title TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'mailbox_handoff',
+        latest_outcome TEXT,
+        latest_wake_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_mailbox_threads_account ON mailbox_threads(account_id);
       CREATE INDEX IF NOT EXISTS idx_mailbox_threads_priority ON mailbox_threads(priority_score DESC, urgency_score DESC, last_message_at DESC);
       CREATE INDEX IF NOT EXISTS idx_mailbox_threads_flags ON mailbox_threads(needs_reply, cleanup_candidate, stale_followup);
@@ -1050,6 +1181,35 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_mailbox_proposals_thread ON mailbox_action_proposals(thread_id, status, proposal_type);
       CREATE INDEX IF NOT EXISTS idx_mailbox_commitments_thread ON mailbox_commitments(thread_id, state, due_at);
       CREATE INDEX IF NOT EXISTS idx_mailbox_contacts_email ON mailbox_contacts(email);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_events_workspace ON mailbox_events(workspace_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_events_thread ON mailbox_events(thread_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_contact_identities_workspace ON contact_identities(workspace_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_contact_identities_email ON contact_identities(primary_email);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_identity_handles_unique
+        ON contact_identity_handles(workspace_id, handle_type, normalized_value);
+      CREATE INDEX IF NOT EXISTS idx_contact_identity_handles_identity
+        ON contact_identity_handles(contact_identity_id, handle_type);
+      CREATE INDEX IF NOT EXISTS idx_contact_identity_handles_channel
+        ON contact_identity_handles(channel_type, channel_user_id);
+      CREATE INDEX IF NOT EXISTS idx_contact_identity_suggestions_workspace
+        ON contact_identity_suggestions(workspace_id, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_contact_identity_suggestions_identity
+        ON contact_identity_suggestions(contact_identity_id, status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_contact_identity_audit_identity
+        ON contact_identity_audit(contact_identity_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_automations_workspace ON mailbox_automations(workspace_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_automations_thread ON mailbox_automations(thread_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_automations_kind ON mailbox_automations(kind, status);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_automations_trigger ON mailbox_automations(backing_trigger_id);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_automations_cron ON mailbox_automations(backing_cron_job_id);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_automation_audit_automation
+        ON mailbox_automation_audit(automation_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_mc_handoffs_thread
+        ON mailbox_mission_control_handoffs(thread_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_mc_handoffs_issue
+        ON mailbox_mission_control_handoffs(issue_id);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_mc_handoffs_company_operator
+        ON mailbox_mission_control_handoffs(company_id, operator_role_id, updated_at DESC);
     `);
 
     // Initialize FTS5 for memory search (separate exec to handle if not supported)
@@ -2761,6 +2921,190 @@ export class DatabaseManager {
       this.db.exec("ALTER TABLE mailbox_commitments ADD COLUMN metadata_json TEXT");
     } catch {
       // Column already exists, ignore
+    }
+
+    // Migration: drop mailbox_summaries.confidence (no longer used)
+    try {
+      this.db.exec("ALTER TABLE mailbox_summaries DROP COLUMN confidence");
+    } catch {
+      // Column absent or SQLite without DROP COLUMN — ignore
+    }
+
+    // Mailbox rollout migrations: sensitive-content flags, contact preferences, and event log
+    for (const sql of [
+      "ALTER TABLE mailbox_threads ADD COLUMN sensitive_content_json TEXT",
+      "ALTER TABLE mailbox_contacts ADD COLUMN encryption_preference TEXT",
+      "ALTER TABLE mailbox_contacts ADD COLUMN policy_flags_json TEXT",
+    ]) {
+      try {
+        this.db.exec(sql);
+      } catch {
+        // Column already exists, ignore
+      }
+    }
+
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS mailbox_events (
+          id TEXT PRIMARY KEY,
+          fingerprint TEXT NOT NULL UNIQUE,
+          workspace_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          account_id TEXT,
+          thread_id TEXT,
+          provider TEXT,
+          subject TEXT,
+          summary_text TEXT,
+          evidence_refs_json TEXT,
+          payload_json TEXT NOT NULL,
+          duplicate_count INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mailbox_events_workspace ON mailbox_events(workspace_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_mailbox_events_thread ON mailbox_events(thread_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS mailbox_automations (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT,
+          thread_id TEXT,
+          source TEXT NOT NULL,
+          recipe_json TEXT NOT NULL,
+          backing_trigger_id TEXT,
+          backing_cron_job_id TEXT,
+          latest_outcome TEXT,
+          latest_fire_at INTEGER,
+          latest_run_at INTEGER,
+          next_run_at INTEGER,
+          latest_error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mailbox_automations_workspace ON mailbox_automations(workspace_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_mailbox_automations_thread ON mailbox_automations(thread_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_mailbox_automations_kind ON mailbox_automations(kind, status);
+        CREATE INDEX IF NOT EXISTS idx_mailbox_automations_trigger ON mailbox_automations(backing_trigger_id);
+        CREATE INDEX IF NOT EXISTS idx_mailbox_automations_cron ON mailbox_automations(backing_cron_job_id);
+
+        CREATE TABLE IF NOT EXISTS mailbox_automation_audit (
+          id TEXT PRIMARY KEY,
+          automation_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          detail_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mailbox_automation_audit_automation
+          ON mailbox_automation_audit(automation_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS mailbox_mission_control_handoffs (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          company_id TEXT NOT NULL,
+          company_name TEXT NOT NULL,
+          operator_role_id TEXT NOT NULL,
+          operator_display_name TEXT NOT NULL,
+          issue_id TEXT NOT NULL,
+          issue_title TEXT NOT NULL,
+          source TEXT NOT NULL DEFAULT 'mailbox_handoff',
+          latest_outcome TEXT,
+          latest_wake_at INTEGER,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mailbox_mc_handoffs_thread
+          ON mailbox_mission_control_handoffs(thread_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_mailbox_mc_handoffs_issue
+          ON mailbox_mission_control_handoffs(issue_id);
+        CREATE INDEX IF NOT EXISTS idx_mailbox_mc_handoffs_company_operator
+          ON mailbox_mission_control_handoffs(company_id, operator_role_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS contact_identities (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          primary_email TEXT,
+          company_hint TEXT,
+          kg_entity_id TEXT,
+          confidence REAL NOT NULL DEFAULT 0.5,
+          metadata_json TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_contact_identities_workspace ON contact_identities(workspace_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_contact_identities_email ON contact_identities(primary_email);
+
+        CREATE TABLE IF NOT EXISTS contact_identity_handles (
+          id TEXT PRIMARY KEY,
+          contact_identity_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          handle_type TEXT NOT NULL,
+          normalized_value TEXT NOT NULL,
+          display_value TEXT NOT NULL,
+          source TEXT NOT NULL,
+          channel_id TEXT,
+          channel_type TEXT,
+          channel_user_id TEXT,
+          metadata_json TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (contact_identity_id) REFERENCES contact_identities(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_identity_handles_unique
+          ON contact_identity_handles(workspace_id, handle_type, normalized_value);
+        CREATE INDEX IF NOT EXISTS idx_contact_identity_handles_identity
+          ON contact_identity_handles(contact_identity_id, handle_type);
+        CREATE INDEX IF NOT EXISTS idx_contact_identity_handles_channel
+          ON contact_identity_handles(channel_type, channel_user_id);
+
+        CREATE TABLE IF NOT EXISTS contact_identity_suggestions (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          contact_identity_id TEXT NOT NULL,
+          handle_type TEXT NOT NULL,
+          normalized_value TEXT NOT NULL,
+          display_value TEXT NOT NULL,
+          source TEXT NOT NULL,
+          source_label TEXT NOT NULL,
+          channel_id TEXT,
+          channel_type TEXT,
+          channel_user_id TEXT,
+          confidence REAL NOT NULL,
+          status TEXT NOT NULL DEFAULT 'suggested',
+          reason_codes_json TEXT NOT NULL,
+          metadata_json TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (contact_identity_id) REFERENCES contact_identities(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_contact_identity_suggestions_workspace
+          ON contact_identity_suggestions(workspace_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_contact_identity_suggestions_identity
+          ON contact_identity_suggestions(contact_identity_id, status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS contact_identity_audit (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          contact_identity_id TEXT,
+          handle_id TEXT,
+          suggestion_id TEXT,
+          action TEXT NOT NULL,
+          detail_json TEXT,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (contact_identity_id) REFERENCES contact_identities(id),
+          FOREIGN KEY (handle_id) REFERENCES contact_identity_handles(id),
+          FOREIGN KEY (suggestion_id) REFERENCES contact_identity_suggestions(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_contact_identity_audit_identity
+          ON contact_identity_audit(contact_identity_id, created_at DESC);
+      `);
+    } catch {
+      // Table already exists or SQLite build lacks support; best effort only.
     }
 
     // Seed built-in entity types for all workspaces that don't have them yet
