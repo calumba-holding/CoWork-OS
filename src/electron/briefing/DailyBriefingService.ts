@@ -15,6 +15,7 @@ import {
   DailyBriefingServiceDeps,
   DEFAULT_BRIEFING_CONFIG,
 } from "./types";
+import type { MailboxDigestSnapshot } from "../../shared/mailbox";
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
@@ -52,6 +53,7 @@ export class DailyBriefingService {
       priority_review: () => this.buildPriorities(workspaceId),
       upcoming_jobs: () => this.buildUpcomingJobs(workspaceId),
       open_loops: () => this.buildOpenLoops(workspaceId),
+      mailbox_summary: () => this.buildMailboxSummary(workspaceId),
       awareness_digest: () => this.buildAwarenessDigest(workspaceId),
       evolution_metrics: () => this.buildEvolutionMetrics(workspaceId),
     };
@@ -356,6 +358,48 @@ export class DailyBriefingService {
       status: "pending" as const,
     }));
     return { type: "open_loops", title: "Open Loops", items, enabled: true };
+  }
+
+  private async buildMailboxSummary(workspaceId: string): Promise<BriefingSection> {
+    const digest = this.deps.getMailboxDigest ? await this.deps.getMailboxDigest(workspaceId) : null;
+    if (!digest) {
+      return { type: "mailbox_summary", title: "Inbox Summary", items: [], enabled: true };
+    }
+
+    const items: BriefingItem[] = [
+      {
+        label: `${digest.unreadCount} unread thread${digest.unreadCount === 1 ? "" : "s"}`,
+        status: digest.unreadCount > 0 ? "pending" : "completed",
+      },
+      {
+        label: `${digest.needsReplyCount} need${digest.needsReplyCount === 1 ? "s" : ""} reply`,
+        status: digest.needsReplyCount > 0 ? "pending" : "completed",
+      },
+      {
+        label: `${digest.overdueCommitmentCount} overdue commitment${digest.overdueCommitmentCount === 1 ? "" : "s"}`,
+        status: digest.overdueCommitmentCount > 0 ? "failed" : "completed",
+      },
+      {
+        label: `${digest.draftCount} draft${digest.draftCount === 1 ? "" : "s"} in progress`,
+        status: digest.draftCount > 0 ? "info" : "completed",
+      },
+      {
+        label: `${digest.sensitiveThreadCount} sensitive thread${digest.sensitiveThreadCount === 1 ? "" : "s"}`,
+        status: digest.sensitiveThreadCount > 0 ? "info" : "completed",
+      },
+    ];
+
+    if (digest.recentEventTypes.length) {
+      items.push({
+        label: `${digest.eventCount} mailbox event${digest.eventCount === 1 ? "" : "s"} captured`,
+        detail: digest.recentEventTypes
+          .map((event: MailboxDigestSnapshot["recentEventTypes"][number]) => `${event.type}: ${event.count}`)
+          .join(" · "),
+        status: "info",
+      });
+    }
+
+    return { type: "mailbox_summary", title: "Inbox Summary", items, enabled: true };
   }
 
   private async buildAwarenessDigest(workspaceId: string): Promise<BriefingSection> {
