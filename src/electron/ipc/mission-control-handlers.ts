@@ -122,6 +122,24 @@ function getCompletionNextStep(metadata: unknown): string | undefined {
   return `Next: ${doneWhen[0]}`;
 }
 
+function getIssueOrigin(metadata: unknown): {
+  origin: "planner" | "inbox" | "manual";
+  label?: string;
+} {
+  if (!metadata || typeof metadata !== "object") {
+    return { origin: "manual" };
+  }
+  const raw = metadata as Record<string, unknown>;
+  const source = typeof raw.source === "string" ? raw.source : "";
+  if (source === "mailbox_handoff") {
+    return { origin: "inbox", label: "Inbox" };
+  }
+  if (source === "strategic_planner") {
+    return { origin: "planner", label: "Planner" };
+  }
+  return { origin: "manual" };
+}
+
 function getLatestLoopForOperator(
   outputs: CompanyOutputFeedItem[],
   operatorRoleId: string,
@@ -482,6 +500,8 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
           title: item.title,
           createdAt: item.createdAt,
           sourceType: item.sourceType,
+          origin: item.origin,
+          originLabel: item.originLabel,
           reviewReason: item.reviewReason,
           outputType: item.outputType,
           companyPriority: item.companyPriority,
@@ -500,6 +520,8 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
       pushOutput({
         id: `planner:${run.id}`,
         sourceType: "planner_run",
+        origin: "planner",
+        originLabel: "Planner",
         title: run.summary || "Planner cycle",
         summary: Array.isArray((run.metadata as Any)?.suppressedOutputs)
           ? ((run.metadata as Any).suppressedOutputs as Array<{ summary?: string }>)
@@ -526,9 +548,12 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
     for (const issue of issues) {
       const contract = getOutputContract(issue.metadata);
       if (!contract) continue;
+      const origin = getIssueOrigin(issue.metadata);
       pushOutput({
         id: `issue:${issue.id}`,
         sourceType: "issue",
+        origin: origin.origin,
+        originLabel: origin.label,
         title: issue.title,
         summary: issue.description,
         status: issue.status,
@@ -556,6 +581,7 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
       pushOutput({
         id: `activity:${activity.id}`,
         sourceType: "activity",
+        origin: "activity",
         title: activity.title,
         summary: activity.description,
         createdAt: activity.createdAt,
@@ -612,10 +638,13 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
         const run = issue.activeRunId ? runs.find((entry) => entry.id === issue.activeRunId) : undefined;
         const task = issue.taskId ? tasks.find((entry) => entry?.id === issue.taskId) : undefined;
         const contract = getOutputContract(issue.metadata);
+        const origin = getIssueOrigin(issue.metadata);
         return {
           issueId: issue.id,
           issueTitle: issue.title,
           issueStatus: issue.status,
+          origin: origin.origin,
+          originLabel: origin.label,
           goalId: issue.goalId,
           goalTitle: goals.find((goal) => goal.id === issue.goalId)?.title,
           projectId: issue.projectId,
