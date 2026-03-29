@@ -358,4 +358,68 @@ describeWithSqlite("StrategicPlannerService", () => {
     const repaired = planner.getConfig(company.id);
     expect(repaired.plannerAgentRoleId).toBeUndefined();
   });
+
+  it("creates a linked planner follow-up for stale inbox-originated issues without taking ownership of the original", async () => {
+    const workspace = insertWorkspace("handoff");
+    const company = core.getDefaultCompany();
+    const project = core.createProject({
+      companyId: company.id,
+      name: "Customer Escalations",
+    });
+    core.linkProjectWorkspace({
+      projectId: project.id,
+      workspaceId: workspace.id,
+      isPrimary: true,
+    });
+
+    const operator =
+      agentRoleRepo.findByCompanyId(company.id, false).find((role) =>
+        /customer ops|founder office|growth|planner/i.test(role.displayName),
+      ) || agentRoleRepo.findByCompanyId(company.id, false)[0];
+
+    const inboxIssue = core.createIssue({
+      companyId: company.id,
+      projectId: project.id,
+      workspaceId: workspace.id,
+      title: "Client escalation from inbox",
+      description: "Follow up on the client escalation thread.",
+      status: "backlog",
+      priority: 2,
+      assigneeAgentRoleId: operator?.id,
+      metadata: {
+        source: "mailbox_handoff",
+        plannerManaged: false,
+      },
+    });
+
+    db.prepare("UPDATE issues SET updated_at = ? WHERE id = ?").run(
+      Date.now() - 5 * 24 * 60 * 60 * 1000,
+      inboxIssue.id,
+    );
+
+    planner.updateConfig(company.id, {
+      enabled: true,
+      maxIssuesPerRun: 5,
+      autoDispatch: false,
+      staleIssueDays: 3,
+    });
+
+    await planner.runNow({ companyId: company.id, trigger: "manual" });
+
+    const issues = core.listIssues({ companyId: company.id, limit: 20 });
+    const followUp = issues.find(
+      (issue) =>
+        issue.parentIssueId === inboxIssue.id &&
+        issue.metadata?.plannerManaged === true &&
+        issue.metadata?.source === "strategic_planner",
+    );
+
+    expect(followUp).toBeTruthy();
+    expect(followUp?.title).toContain("Planner follow-up for inbox issue");
+
+    const reloadedOriginal = core.getIssue(inboxIssue.id);
+    expect(reloadedOriginal?.metadata?.source).toBe("mailbox_handoff");
+    expect(reloadedOriginal?.metadata?.plannerManaged).toBe(false);
+    expect(reloadedOriginal?.parentIssueId).toBeUndefined();
+  });
 });
