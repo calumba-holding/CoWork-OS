@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { KnowledgeGraphRepository } from "./KnowledgeGraphRepository";
+import type { MailboxEvent } from "../../shared/mailbox";
 import type {
   KGEntity,
   KGEdge,
@@ -17,6 +18,25 @@ import type {
 const MAX_CONTEXT_ENTITIES = 5;
 const MAX_CONTEXT_CHARS = 1500;
 const DECAY_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function asString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((entry) => asString(entry)).filter((entry): entry is string => Boolean(entry))
+    : [];
+}
+
+function compactText(text: string, max = 240): string {
+  const normalized = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized;
+}
 
 export class KnowledgeGraphService {
   private static repo: KnowledgeGraphRepository | null = null;
@@ -201,6 +221,181 @@ export class KnowledgeGraphService {
 
   static getObservations(entityId: string, limit = 20): KGObservation[] {
     return this.getRepo().getObservations(entityId, limit);
+  }
+
+  static ingestMailboxEvent(workspaceId: string, event: MailboxEvent): void {
+    if (!this.initialized) return;
+    try {
+      const payload = event.payload || {};
+      const primaryEmail =
+        asString(payload.primaryContactEmail) ||
+        asString(payload.contactEmail) ||
+        asString(payload.senderEmail);
+      const primaryName =
+        asString(payload.primaryContactName) ||
+        asString(payload.contactName) ||
+        asString(payload.senderName);
+      const company =
+        asString(payload.company) ||
+        asString(payload.organization) ||
+        (primaryEmail?.includes("@") ? primaryEmail.split("@")[1]?.split(".")[0] : undefined);
+      const projectHints = [
+        asString(payload.projectHint),
+        ...asStringArray(payload.projectHints),
+        ...asStringArray(payload.projectNames),
+        ...asStringArray(payload.relatedProjects),
+      ];
+      const commitmentTitles = asStringArray(payload.commitmentTitles);
+      const summary = compactText(
+        [event.subject, event.summary, asString(payload.summary), asString(payload.reason)]
+          .filter(Boolean)
+          .join(" "),
+        280,
+      );
+
+      const person =
+        primaryEmail || primaryName
+          ? this.createEntity(
+              workspaceId,
+              {
+                entityType: "person",
+                name: primaryName || primaryEmail || "Mailbox contact",
+                description: primaryEmail ? `Email contact ${primaryEmail}` : primaryName,
+                properties: {
+                  email: primaryEmail,
+                  source: "mailbox",
+                  threadId: event.threadId,
+                },
+                confidence: 0.82,
+              },
+              "auto",
+              event.threadId,
+            )
+          : undefined;
+
+      const org =
+        company && company.length > 1
+          ? this.createEntity(
+              workspaceId,
+              {
+                entityType: "organization",
+                name: company.charAt(0).toUpperCase() + company.slice(1),
+                description: `Mailbox contact organization ${company}`,
+                properties: {
+                  source: "mailbox",
+                  domain: primaryEmail?.split("@")[1],
+                },
+                confidence: 0.72,
+              },
+              "auto",
+              event.threadId,
+            )
+          : undefined;
+
+      const projectName = projectHints[0];
+      const project =
+        projectName && projectName.length > 2
+          ? this.createEntity(
+              workspaceId,
+              {
+                entityType: "project",
+                name: projectName,
+                description: `Mailbox thread context for ${projectName}`,
+                properties: {
+                  source: "mailbox",
+                  threadId: event.threadId,
+                  subject: event.subject,
+                },
+                confidence: 0.68,
+              },
+              "auto",
+              event.threadId,
+            )
+          : undefined;
+
+      if (person && org) {
+        try {
+          this.createEdge(
+            workspaceId,
+            {
+              sourceEntityId: person.id,
+              targetEntityId: org.id,
+              edgeType: "works_at",
+              properties: { source: "mailbox" },
+              confidence: 0.72,
+            },
+            "auto",
+            event.threadId,
+          );
+        } catch {
+          // best effort
+        }
+      }
+
+      if (person && project) {
+        try {
+          this.createEdge(
+            workspaceId,
+            {
+              sourceEntityId: person.id,
+              targetEntityId: project.id,
+              edgeType: "related_to",
+              properties: { source: "mailbox", threadId: event.threadId },
+              confidence: 0.7,
+            },
+            "auto",
+            event.threadId,
+          );
+        } catch {
+          // best effort
+        }
+      }
+
+      const observationContent = compactText(
+        [
+          `Mailbox event: ${event.type}`,
+          summary || null,
+          event.evidenceRefs.length > 0 ? `Evidence: ${event.evidenceRefs.join(", ")}` : null,
+          commitmentTitles.length > 0 ? `Commitments: ${commitmentTitles.join(" | ")}` : null,
+        ]
+          .filter((entry): entry is string => Boolean(entry))
+          .join(" · "),
+        500,
+      );
+
+      if (person && observationContent) {
+        this.addObservation(
+          {
+            entityId: person.id,
+            content: observationContent,
+          },
+          "auto",
+          event.threadId,
+        );
+      }
+      if (org && observationContent) {
+        this.addObservation(
+          {
+            entityId: org.id,
+            content: observationContent,
+          },
+          "auto",
+          event.threadId,
+        );
+      }
+      if (project && observationContent) {
+        this.addObservation(
+          {
+            entityId: project.id,
+            content: observationContent,
+          },
+          "auto",
+          event.threadId,
+        );
+      }
+    } catch {
+      // best-effort mailbox enrichment
+    }
   }
 
   // ─── Context Injection ────────────────────────────────────────────
