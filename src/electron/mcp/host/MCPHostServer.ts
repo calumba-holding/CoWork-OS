@@ -6,17 +6,23 @@
  */
 
 import { EventEmitter } from "events";
+import * as http from "http";
 import * as readline from "readline";
+import { createLogger } from "../../utils/logger";
 import {
   JSONRPCRequest,
   JSONRPCResponse,
   JSONRPCNotification,
   MCPTool,
+  MCPResource,
+  MCPResourceReadResult,
   MCPServerInfo,
   MCPServerCapabilities,
   MCP_METHODS,
   MCP_ERROR_CODES,
 } from "../types";
+
+const logger = createLogger("MCPHostServer");
 
 // Protocol version we support
 const PROTOCOL_VERSION = "2024-11-05";
@@ -30,6 +36,10 @@ const SERVER_INFO: MCPServerInfo = {
     tools: {
       listChanged: false,
     },
+    resources: {
+      subscribe: false,
+      listChanged: false,
+    },
   },
 };
 
@@ -37,6 +47,8 @@ const SERVER_INFO: MCPServerInfo = {
 export interface ToolProvider {
   getTools(): MCPTool[];
   executeTool(name: string, args: Record<string, Any>): Promise<Any>;
+  getResources?(): MCPResource[];
+  readResource?(uri: string): Promise<MCPResourceReadResult>;
 }
 
 export class MCPHostServer extends EventEmitter {
@@ -45,6 +57,9 @@ export class MCPHostServer extends EventEmitter {
   private initialized = false;
   private toolProvider: ToolProvider | null = null;
   private rl: readline.Interface | null = null;
+  private httpServer: http.Server | null = null;
+  private transportMode: "stdio" | "http" | null = null;
+  private httpPort: number | null = null;
 
   private constructor() {
     super();
@@ -72,7 +87,7 @@ export class MCPHostServer extends EventEmitter {
    */
   async startStdio(): Promise<void> {
     if (this.running) {
-      console.log("[MCPHostServer] Already running");
+      logger.info("Already running");
       return;
     }
 
@@ -80,10 +95,12 @@ export class MCPHostServer extends EventEmitter {
       throw new Error("Tool provider not set");
     }
 
-    console.log("[MCPHostServer] Starting stdio server...");
+    logger.info("Starting stdio server...");
 
     this.running = true;
     this.initialized = false;
+    this.transportMode = "stdio";
+    this.httpPort = null;
 
     // Create readline interface for reading from stdin
     this.rl = readline.createInterface({
@@ -98,11 +115,74 @@ export class MCPHostServer extends EventEmitter {
     });
 
     this.rl.on("close", () => {
-      console.log("[MCPHostServer] Stdin closed");
+      logger.info("Stdin closed");
       this.stop();
     });
 
-    console.log("[MCPHostServer] Listening on stdio");
+    logger.info("Listening on stdio");
+    this.emit("started");
+  }
+
+  async startHttp(port: number): Promise<void> {
+    if (this.running) {
+      logger.info("Already running");
+      return;
+    }
+    if (!this.toolProvider) {
+      throw new Error("Tool provider not set");
+    }
+
+    this.running = true;
+    this.initialized = true;
+    this.transportMode = "http";
+
+    this.httpServer = http.createServer(async (req, res) => {
+      try {
+        if (req.method === "GET" && req.url === "/health") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, transport: "http", port: this.httpPort }));
+          return;
+        }
+
+        if (req.method !== "POST" || req.url !== "/mcp") {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "Not found" }));
+          return;
+        }
+
+        const body = await this.readHttpBody(req);
+        const message = JSON.parse(body);
+        const response = await this.processMessage(message);
+        if (!response) {
+          res.writeHead(202).end();
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(response));
+      } catch (error: Any) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 0,
+            error: {
+              code: MCP_ERROR_CODES.INTERNAL_ERROR,
+              message: error?.message || "Internal error",
+            },
+          }),
+        );
+      }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      this.httpServer?.once("error", reject);
+      this.httpServer?.listen(port, "127.0.0.1", () => {
+        this.httpServer?.off("error", reject);
+        resolve();
+      });
+    });
+    this.httpPort = port;
+    logger.info(`Listening on http://127.0.0.1:${port}/mcp`);
     this.emit("started");
   }
 
@@ -114,18 +194,26 @@ export class MCPHostServer extends EventEmitter {
       return;
     }
 
-    console.log("[MCPHostServer] Stopping...");
+    logger.info("Stopping...");
 
     if (this.rl) {
       this.rl.close();
       this.rl = null;
     }
+    if (this.httpServer) {
+      await new Promise<void>((resolve) => {
+        this.httpServer?.close(() => resolve());
+      });
+      this.httpServer = null;
+    }
 
     this.running = false;
     this.initialized = false;
+    this.transportMode = null;
+    this.httpPort = null;
     this.emit("stopped");
 
-    console.log("[MCPHostServer] Stopped");
+    logger.info("Stopped");
   }
 
   /**
@@ -133,6 +221,14 @@ export class MCPHostServer extends EventEmitter {
    */
   isRunning(): boolean {
     return this.running;
+  }
+
+  getTransportMode(): "stdio" | "http" | null {
+    return this.transportMode;
+  }
+
+  getHttpPort(): number | null {
+    return this.httpPort;
   }
 
   /**
@@ -151,9 +247,13 @@ export class MCPHostServer extends EventEmitter {
 
     try {
       const message = JSON.parse(trimmed);
-      this.handleMessage(message);
+      void this.processMessage(message).then((response) => {
+        if (response) {
+          this.sendMessage(response);
+        }
+      });
     } catch (error) {
-      console.error("[MCPHostServer] Failed to parse message:", error);
+      logger.error("Failed to parse message:", error);
       this.sendError(null, MCP_ERROR_CODES.PARSE_ERROR, "Parse error");
     }
   }
@@ -161,19 +261,20 @@ export class MCPHostServer extends EventEmitter {
   /**
    * Handle a parsed JSON-RPC message
    */
-  private async handleMessage(message: Any): Promise<void> {
+  private async processMessage(message: Any): Promise<JSONRPCResponse | null> {
     // Check if it's a request (has id) or notification (no id)
     if ("id" in message && message.id !== null) {
-      await this.handleRequest(message as JSONRPCRequest);
+      return this.handleRequest(message as JSONRPCRequest);
     } else if ("method" in message) {
       await this.handleNotification(message as JSONRPCNotification);
     }
+    return null;
   }
 
   /**
    * Handle a JSON-RPC request
    */
-  private async handleRequest(request: JSONRPCRequest): Promise<void> {
+  private async handleRequest(request: JSONRPCRequest): Promise<JSONRPCResponse> {
     const { id, method, params } = request;
 
     try {
@@ -194,6 +295,16 @@ export class MCPHostServer extends EventEmitter {
           result = await this.handleToolsCall(params);
           break;
 
+        case MCP_METHODS.RESOURCES_LIST:
+          this.requireInitialized();
+          result = this.handleResourcesList();
+          break;
+
+        case MCP_METHODS.RESOURCES_READ:
+          this.requireInitialized();
+          result = await this.handleResourcesRead(params);
+          break;
+
         case MCP_METHODS.SHUTDOWN:
           result = this.handleShutdown();
           break;
@@ -202,12 +313,12 @@ export class MCPHostServer extends EventEmitter {
           throw this.createError(MCP_ERROR_CODES.METHOD_NOT_FOUND, `Method not found: ${method}`);
       }
 
-      this.sendResult(id, result);
+      return this.buildResult(id, result);
     } catch (error: Any) {
       if (error.code !== undefined) {
-        this.sendError(id, error.code, error.message, error.data);
+        return this.buildError(id, error.code, error.message, error.data);
       } else {
-        this.sendError(id, MCP_ERROR_CODES.INTERNAL_ERROR, error.message);
+        return this.buildError(id, MCP_ERROR_CODES.INTERNAL_ERROR, error.message);
       }
     }
   }
@@ -224,7 +335,7 @@ export class MCPHostServer extends EventEmitter {
         break;
 
       default:
-        console.log(`[MCPHostServer] Unhandled notification: ${method}`);
+        logger.debug(`Unhandled notification: ${method}`);
     }
   }
 
@@ -240,7 +351,7 @@ export class MCPHostServer extends EventEmitter {
       throw this.createError(MCP_ERROR_CODES.INVALID_REQUEST, "Already initialized");
     }
 
-    console.log("[MCPHostServer] Initialize request from client:", params?.clientInfo);
+    logger.info("Initialize request from client:", params?.clientInfo);
 
     return {
       protocolVersion: PROTOCOL_VERSION,
@@ -253,7 +364,7 @@ export class MCPHostServer extends EventEmitter {
    * Handle the initialized notification
    */
   private handleInitialized(): void {
-    console.log("[MCPHostServer] Client sent initialized notification");
+    logger.info("Client sent initialized notification");
     this.initialized = true;
     this.emit("initialized");
   }
@@ -267,9 +378,29 @@ export class MCPHostServer extends EventEmitter {
     }
 
     const tools = this.toolProvider.getTools();
-    console.log(`[MCPHostServer] Listing ${tools.length} tools`);
+    logger.debug(`Listing ${tools.length} tools`);
 
     return { tools };
+  }
+
+  private handleResourcesList(): { resources: MCPResource[] } {
+    if (!this.toolProvider?.getResources) {
+      return { resources: [] };
+    }
+    const resources = this.toolProvider.getResources();
+    logger.debug(`Listing ${resources.length} resources`);
+    return { resources };
+  }
+
+  private async handleResourcesRead(params: Any): Promise<MCPResourceReadResult> {
+    if (!this.toolProvider?.readResource) {
+      throw this.createError(MCP_ERROR_CODES.METHOD_NOT_FOUND, "Resource provider not available");
+    }
+    const uri = typeof params?.uri === "string" ? params.uri.trim() : "";
+    if (!uri) {
+      throw this.createError(MCP_ERROR_CODES.INVALID_PARAMS, "Resource uri is required");
+    }
+    return this.toolProvider.readResource(uri);
   }
 
   /**
@@ -286,7 +417,7 @@ export class MCPHostServer extends EventEmitter {
       throw this.createError(MCP_ERROR_CODES.INVALID_PARAMS, "Tool name is required");
     }
 
-    console.log(`[MCPHostServer] Calling tool: ${name}`);
+    logger.debug(`Calling tool: ${name}`);
 
     try {
       const result = await this.toolProvider.executeTool(name, args || {});
@@ -311,7 +442,7 @@ export class MCPHostServer extends EventEmitter {
         };
       }
     } catch (error: Any) {
-      console.error(`[MCPHostServer] Tool call failed:`, error);
+      logger.error("Tool call failed:", error);
       return {
         content: [{ type: "text", text: `Error: ${error.message}` }],
         isError: true,
@@ -323,7 +454,7 @@ export class MCPHostServer extends EventEmitter {
    * Handle shutdown request
    */
   private handleShutdown(): Record<string, never> {
-    console.log("[MCPHostServer] Shutdown request received");
+    logger.info("Shutdown request received");
     // Schedule stop after response is sent
     setImmediate(() => this.stop());
     return {};
@@ -332,20 +463,19 @@ export class MCPHostServer extends EventEmitter {
   /**
    * Send a successful result
    */
-  private sendResult(id: string | number, result: Any): void {
-    const response: JSONRPCResponse = {
+  private buildResult(id: string | number, result: Any): JSONRPCResponse {
+    return {
       jsonrpc: "2.0",
       id,
       result,
     };
-    this.sendMessage(response);
   }
 
   /**
    * Send an error response
    */
-  private sendError(id: string | number | null, code: number, message: string, data?: Any): void {
-    const response: JSONRPCResponse = {
+  private buildError(id: string | number | null, code: number, message: string, data?: Any): JSONRPCResponse {
+    return {
       jsonrpc: "2.0",
       id: id ?? 0,
       error: {
@@ -354,7 +484,14 @@ export class MCPHostServer extends EventEmitter {
         data,
       },
     };
-    this.sendMessage(response);
+  }
+
+  private sendResult(id: string | number, result: Any): void {
+    this.sendMessage(this.buildResult(id, result));
+  }
+
+  private sendError(id: string | number | null, code: number, message: string, data?: Any): void {
+    this.sendMessage(this.buildError(id, code, message, data));
   }
 
   /**
@@ -363,6 +500,15 @@ export class MCPHostServer extends EventEmitter {
   private sendMessage(message: JSONRPCResponse | JSONRPCNotification): void {
     const json = JSON.stringify(message);
     process.stdout.write(json + "\n");
+  }
+
+  private async readHttpBody(req: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      req.on("error", reject);
+    });
   }
 
   /**
