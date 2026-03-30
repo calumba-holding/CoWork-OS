@@ -174,6 +174,7 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] Workspace selector with folder picker
 - [x] Task list with status indicators and task pinning
 - [x] Task detail view with timeline and scroll-to-bottom button
+- [x] Task learning progression surface with memory, playbook, and skill proposal visibility
 - [x] Approval dialog system
 - [x] Real-time event streaming
 - [x] Quick Task FAB (floating action button)
@@ -183,6 +184,9 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] Collaborative Thoughts Panel - Real-time agent thinking display
 - [x] Comparison View - Side-by-side agent/model output comparison
 - [x] Multi-LLM Selection Panel - Configure multi-provider runs
+- [x] Live router visibility - active provider, active model, and fallback state surfaced in the task UI
+- [x] Unified recall search across tasks, messages, files, memory, and knowledge-graph context
+- [x] Persistent shell session status and retained-state controls for long-running operator workflows
 - [x] Worktree Settings - Git worktree configuration UI
 - [x] Devices tab - saved remote devices, remote task feed, remote workspace browser, remote file picker
 - [x] Companies tab - company shell setup, goals, projects, issues, linked operators
