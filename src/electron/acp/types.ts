@@ -114,6 +114,8 @@ export interface ACPTask {
   error?: string;
   /** Associated CoWork task ID (if delegated to a local agent) */
   coworkTaskId?: string;
+  /** Remote task ID returned by an external agent endpoint */
+  remoteTaskId?: string;
   /** Associated workspace ID */
   workspaceId?: string;
   /** Creation timestamp */
@@ -191,6 +193,38 @@ export interface ACPTaskCreateParams {
   prompt: string;
   /** Workspace ID to execute in */
   workspaceId?: string;
+}
+
+export interface A2AJsonRpcRequest {
+  jsonrpc: "2.0";
+  id: string;
+  method: "tasks/send" | "tasks/create" | "tasks/get" | "tasks/cancel";
+  params: Record<string, unknown>;
+}
+
+export interface A2AJsonRpcSuccessResponse<T = unknown> {
+  jsonrpc: "2.0";
+  id: string;
+  result: T;
+}
+
+export interface A2AJsonRpcErrorResponse {
+  jsonrpc: "2.0";
+  id: string;
+  error: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+}
+
+export interface A2ARemoteTaskResult {
+  id?: string;
+  taskId?: string;
+  status?: "pending" | "running" | "completed" | "failed" | "cancelled";
+  result?: string;
+  output?: string;
+  error?: string;
 }
 
 /**
