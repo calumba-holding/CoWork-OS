@@ -1,19 +1,23 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type {
   AgentRoleData,
-  HeartbeatEvent,
   HeartbeatStatus,
   AgentCapability,
   ActivityData,
   MentionData,
+  TaskLabelData,
   TaskBoardEvent,
 } from "../../../electron/preload";
 import type {
   Company,
   CompanyCommandCenterSummary,
   Goal,
+  HeartbeatEvent,
+  HeartbeatDispatchKind,
   HeartbeatRun,
   HeartbeatRunEvent,
+  HeartbeatSignal,
+  HeartbeatSignalFamily,
   Issue,
   IssueComment,
   Project,
@@ -28,7 +32,7 @@ import { useAgentContext } from "../../hooks/useAgentContext";
 import { getEffectiveTaskEventType } from "../../utils/task-event-compat";
 
 type AgentRole = AgentRoleData;
-type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
+type Any = any; // oxlint-disable-line typescript-eslint(no-explicit-any)
 
 export const ALL_WORKSPACES_ID = "__all__";
 
@@ -37,6 +41,20 @@ export type MissionColumn = {
   label: string;
   color: string;
   boardColumn: NonNullable<Task["boardColumn"]>;
+};
+
+export type TaskPriorityMeta = {
+  value: number;
+  label: string;
+  color: string;
+  shortLabel: string;
+};
+
+export type TaskDueInfo = {
+  label: string;
+  tone: "muted" | "soon" | "overdue";
+  isOverdue: boolean;
+  isDueSoon: boolean;
 };
 
 export interface HeartbeatStatusInfo {
@@ -65,6 +83,23 @@ export const BOARD_COLUMNS: MissionColumn[] = [
   { id: "done", label: "DONE", color: "#22c55e", boardColumn: "done" },
 ];
 
+export const TERMINAL_TASK_STATUSES = new Set<Task["status"]>([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+export const TASK_PRIORITY_OPTIONS: TaskPriorityMeta[] = [
+  { value: 0, label: "None", color: "#6b7280", shortLabel: "P0" },
+  { value: 1, label: "Low", color: "#22c55e", shortLabel: "P1" },
+  { value: 2, label: "Medium", color: "#f59e0b", shortLabel: "P2" },
+  { value: 3, label: "High", color: "#ef4444", shortLabel: "P3" },
+  { value: 4, label: "Urgent", color: "#b91c1c", shortLabel: "P4" },
+];
+
+const STALE_TASK_AGE_MS = 6 * 60 * 60 * 1000;
+
 export const AUTONOMY_BADGES: Record<string, { label: string; color: string }> = {
   lead: { label: "LEAD", color: "#f59e0b" },
   specialist: { label: "SPC", color: "#3b82f6" },
@@ -91,14 +126,158 @@ export type DetailPanelView =
   | { kind: "issue"; issueId: string }
   | null;
 
+const DISPLAY_NAME_ALIASES: Record<string, string> = {
+  "QA / System Test Engineer Twin": "System QA Twin",
+};
+
+function normalizeMissionControlAgentDisplayName(displayName: string): string {
+  return DISPLAY_NAME_ALIASES[displayName] || displayName;
+}
+
+function normalizeMissionControlAgent(agent: AgentRole): AgentRole {
+  return {
+    ...agent,
+    displayName: normalizeMissionControlAgentDisplayName(agent.displayName),
+  };
+}
+
+function formatHeartbeatSignalFamily(signalFamily?: HeartbeatSignalFamily): string {
+  switch (signalFamily) {
+    case "urgent_interrupt":
+      return "urgent interrupt";
+    case "focus_state":
+      return "focus state";
+    case "open_loop_pressure":
+      return "open loop";
+    case "correction_learning":
+      return "correction";
+    case "memory_drift":
+      return "memory";
+    case "cross_workspace_patterns":
+      return "cross-workspace";
+    case "suggestion_aging":
+      return "stale suggestion";
+    case "awareness_signal":
+      return "awareness";
+    case "maintenance":
+      return "maintenance";
+    case "mentions":
+      return "mention";
+    case "assigned_tasks":
+      return "assigned task";
+    default:
+      return "heartbeat";
+  }
+}
+
+function formatHeartbeatDispatchKind(dispatchKind?: HeartbeatDispatchKind): string {
+  switch (dispatchKind) {
+    case "task":
+      return "task";
+    case "suggestion":
+      return "suggestion";
+    case "runbook":
+      return "runbook";
+    case "cron_handoff":
+      return "handoff";
+    default:
+      return "dispatch";
+  }
+}
+
+function formatHeartbeatSignalText(signal?: HeartbeatSignal): string {
+  if (!signal) return "heartbeat signal";
+  const reason = signal.reason?.trim();
+  if (reason) return reason;
+  return `${formatHeartbeatSignalFamily(signal.signalFamily)} signal`;
+}
+
+export function getTaskPriorityMeta(priority?: number): TaskPriorityMeta {
+  return TASK_PRIORITY_OPTIONS.find((option) => option.value === (priority ?? 0)) || TASK_PRIORITY_OPTIONS[0];
+}
+
+export function getTaskDueInfo(dueDate?: number, now = Date.now()): TaskDueInfo | null {
+  if (!dueDate) return null;
+  const diffMs = dueDate - now;
+  const diffMinutes = Math.ceil(diffMs / 60000);
+  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+  if (diffMinutes < 0) {
+    if (Math.abs(diffMinutes) < 60) {
+      return { label: `${Math.abs(diffMinutes)}m overdue`, tone: "overdue", isOverdue: true, isDueSoon: false };
+    }
+    if (Math.abs(diffMinutes) < 24 * 60) {
+      return {
+        label: `${Math.ceil(Math.abs(diffMinutes) / 60)}h overdue`,
+        tone: "overdue",
+        isOverdue: true,
+        isDueSoon: false,
+      };
+    }
+    return { label: `${Math.abs(diffDays)}d overdue`, tone: "overdue", isOverdue: true, isDueSoon: false };
+  }
+  if (diffMinutes <= 24 * 60) {
+    if (diffMinutes <= 60) {
+      return { label: `Due in ${Math.max(diffMinutes, 1)}m`, tone: "soon", isOverdue: false, isDueSoon: true };
+    }
+    return {
+      label: `Due in ${Math.ceil(diffMinutes / 60)}h`,
+      tone: "soon",
+      isOverdue: false,
+      isDueSoon: true,
+    };
+  }
+  if (diffDays <= 7) {
+    return { label: `Due in ${diffDays}d`, tone: "muted", isOverdue: false, isDueSoon: false };
+  }
+  return {
+    label: new Date(dueDate).toLocaleDateString(),
+    tone: "muted",
+    isOverdue: false,
+    isDueSoon: false,
+  };
+}
+
+export function formatTaskEstimate(minutes?: number): string | null {
+  if (!minutes || minutes <= 0) return null;
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 24 * 60) return `${Math.round(minutes / 60)}h`;
+  return `${Math.round(minutes / (60 * 24))}d`;
+}
+
+export function isTerminalTaskStatus(status: Task["status"]): boolean {
+  return TERMINAL_TASK_STATUSES.has(status);
+}
+
+export function resolveMissionColumnForTask(task: Pick<Task, "status" | "boardColumn" | "assignedAgentRoleId">): MissionColumn["id"] {
+  if (isTerminalTaskStatus(task.status)) return "done";
+  const col = task.boardColumn;
+  if (col === "done") return "done";
+  if (col === "review") return "review";
+  if (col === "in_progress") return "in_progress";
+  if (col === "todo") return "assigned";
+  if (col === "backlog") return task.assignedAgentRoleId ? "assigned" : "inbox";
+  if (col === "assigned" || col === "inbox") return col;
+  return task.assignedAgentRoleId ? "assigned" : "inbox";
+}
+
+export function isTaskStaleForUi(
+  task: Pick<Task, "status" | "updatedAt" | "createdAt">,
+  now = Date.now(),
+): boolean {
+  if (isTerminalTaskStatus(task.status)) return false;
+  const lastTouchedAt = task.updatedAt || task.createdAt;
+  return now - lastTouchedAt >= STALE_TASK_AGE_MS;
+}
+
 export function useMissionControlData(initialCompanyId: string | null = null) {
   // ── Core state ──
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(ALL_WORKSPACES_ID);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [agents, setAgents] = useState<AgentRole[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskLabels, setTaskLabels] = useState<TaskLabelData[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [issues, setIssues] = useState<Issue[]>([]);
@@ -280,6 +459,7 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
       window.electronAPI.getAllHeartbeatStatus(),
       window.electronAPI.listTasks().catch(() => []),
     ]);
+    const normalizedAgents = loadedAgents.map(normalizeMissionControlAgent);
 
     if (workspaceId === ALL_WORKSPACES_ID) {
       const workspaceIds = workspaceList.map((workspace) => workspace.id);
@@ -297,9 +477,16 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
         ),
       ]);
       return {
-        loadedAgents,
+        loadedAgents: normalizedAgents,
         statuses,
         loadedTasks: loadedTasks.filter((task: Task) => workspaceIdSet.has(task.workspaceId)),
+        loadedTaskLabels: (
+          await Promise.all(
+            workspaceIds.map((id) => window.electronAPI.listTaskLabels({ workspaceId: id }).catch(() => [])),
+          )
+        )
+          .flat()
+          .filter((label, index, array) => array.findIndex((item) => item.id === label.id) === index),
         loadedActivities: activityGroups.flat().sort((a, b) => b.createdAt - a.createdAt).slice(0, 200),
         loadedMentions: mentionGroups.flat().sort((a, b) => b.createdAt - a.createdAt).slice(0, 200),
       };
@@ -310,9 +497,10 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
       window.electronAPI.listMentions({ workspaceId, limit: 200 }).catch(() => []),
     ]);
     return {
-      loadedAgents,
+      loadedAgents: normalizedAgents,
       statuses,
       loadedTasks: loadedTasks.filter((task: Task) => task.workspaceId === workspaceId),
+      loadedTaskLabels: await window.electronAPI.listTaskLabels({ workspaceId }).catch(() => []),
       loadedActivities,
       loadedMentions,
     };
@@ -325,6 +513,7 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
       setAgents(result.loadedAgents);
       setHeartbeatStatuses(result.statuses);
       setTasks(result.loadedTasks);
+      setTaskLabels(result.loadedTaskLabels);
       setActivities(result.loadedActivities);
       setMentions(result.loadedMentions);
     } catch (err) { console.error("Failed to load mission control data:", err); }
@@ -339,6 +528,7 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
         const result = await loadWorkspaceScopedData(selectedWorkspaceId, workspaces);
         setHeartbeatStatuses(result.statuses);
         setTasks(result.loadedTasks);
+        setTaskLabels(result.loadedTaskLabels);
         setActivities(result.loadedActivities);
         setMentions(result.loadedMentions);
       }
@@ -474,7 +664,13 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
         ? event.payload?.status
         : TASK_EVENT_STATUS_MAP[effectiveType as keyof typeof TASK_EVENT_STATUS_MAP];
       if (newStatus && !isAutoApproval) {
-        setTasks((prev) => prev.map((t) => t.id === event.taskId ? { ...t, status: newStatus, updatedAt: Date.now() } : t));
+        setTasks((prev) => prev.map((t) => {
+          if (t.id !== event.taskId) return t;
+          // Never downgrade a terminal status — post-completion events (e.g. verification_passed)
+          // must not flip a completed task back to "executing".
+          if (isTerminalTaskStatus(t.status) && !isTerminalTaskStatus(newStatus)) return t;
+          return { ...t, status: newStatus, updatedAt: Date.now() };
+        }));
       }
     });
 
@@ -526,7 +722,7 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
           heartbeatEnabled: agent.heartbeatEnabled, heartbeatIntervalMinutes: agent.heartbeatIntervalMinutes,
           heartbeatStaggerOffset: agent.heartbeatStaggerOffset,
         });
-        setAgents((prev) => [...prev, created]);
+        setAgents((prev) => [...prev, normalizeMissionControlAgent(created)]);
       } else {
         const updated = await window.electronAPI.updateAgentRole({
           id: agent.id, displayName: agent.displayName, description: agent.description,
@@ -538,7 +734,10 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
           heartbeatEnabled: agent.heartbeatEnabled, heartbeatIntervalMinutes: agent.heartbeatIntervalMinutes,
           heartbeatStaggerOffset: agent.heartbeatStaggerOffset,
         });
-        if (updated) setAgents((prev) => prev.map((a) => a.id === updated.id ? updated : a));
+        if (updated) {
+          const normalized = normalizeMissionControlAgent(updated);
+          setAgents((prev) => prev.map((a) => a.id === normalized.id ? normalized : a));
+        }
       }
       setEditingAgent(null); setIsCreatingAgent(false);
       const statuses = await window.electronAPI.getAllHeartbeatStatus();
@@ -548,15 +747,7 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
 
   // ── Task actions ──
   const getMissionColumnForTask = useCallback((task: Task) => {
-    if (task.status === "completed") return "done";
-    const col = task.boardColumn;
-    if (col === "done") return "done";
-    if (col === "review") return "review";
-    if (col === "in_progress") return "in_progress";
-    if (col === "todo") return "assigned";
-    if (col === "backlog") return task.assignedAgentRoleId ? "assigned" : "inbox";
-    if (col === "assigned" || col === "inbox") return col;
-    return task.assignedAgentRoleId ? "assigned" : "inbox";
+    return resolveMissionColumnForTask(task);
   }, []);
 
   const getBoardColumnForMission = useCallback((missionColumnId: string): NonNullable<Task["boardColumn"]> => {
@@ -579,9 +770,110 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
     } catch (err) { console.error("Failed to assign agent:", err); }
   }, []);
 
+  const handleSetTaskPriority = useCallback(async (taskId: string, priority: number) => {
+    try {
+      await window.electronAPI.setTaskPriority(taskId, priority);
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, priority, updatedAt: Date.now() } : t)));
+    } catch (err) {
+      console.error("Failed to set task priority:", err);
+    }
+  }, []);
+
+  const handleSetTaskDueDate = useCallback(async (taskId: string, dueDate: number | null) => {
+    try {
+      await window.electronAPI.setTaskDueDate(taskId, dueDate);
+      setTasks((prev) =>
+        prev.map((t) => (t.id === taskId ? { ...t, dueDate: dueDate ?? undefined, updatedAt: Date.now() } : t)),
+      );
+    } catch (err) {
+      console.error("Failed to set task due date:", err);
+    }
+  }, []);
+
+  const handleSetTaskEstimate = useCallback(async (taskId: string, estimatedMinutes: number | null) => {
+    try {
+      await window.electronAPI.setTaskEstimate(taskId, estimatedMinutes);
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId ? { ...t, estimatedMinutes: estimatedMinutes ?? undefined, updatedAt: Date.now() } : t,
+        ),
+      );
+    } catch (err) {
+      console.error("Failed to set task estimate:", err);
+    }
+  }, []);
+
+  const handleAddTaskLabel = useCallback(async (taskId: string, labelId: string) => {
+    try {
+      await window.electronAPI.addTaskLabel(taskId, labelId);
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId ? { ...t, labels: [...new Set([...(t.labels || []), labelId])], updatedAt: Date.now() } : t,
+        ),
+      );
+    } catch (err) {
+      console.error("Failed to add task label:", err);
+    }
+  }, []);
+
+  const handleRemoveTaskLabel = useCallback(async (taskId: string, labelId: string) => {
+    try {
+      await window.electronAPI.removeTaskLabel(taskId, labelId);
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId
+            ? { ...t, labels: (t.labels || []).filter((current) => current !== labelId), updatedAt: Date.now() }
+            : t,
+        ),
+      );
+    } catch (err) {
+      console.error("Failed to remove task label:", err);
+    }
+  }, []);
+
+  const getTaskLabels = useCallback((task: Task) => {
+    if (!task.labels?.length) return [];
+    const labelIdSet = new Set(task.labels);
+    return taskLabels.filter((label) => labelIdSet.has(label.id));
+  }, [taskLabels]);
+
+  const isTaskTerminal = useCallback((task: Task) => isTerminalTaskStatus(task.status), []);
+
+  const isTaskStale = useCallback((task: Task) => {
+    return isTaskStaleForUi(task);
+  }, []);
+
+  const getTaskAttentionReason = useCallback((task: Task) => {
+    if (task.terminalStatus === "awaiting_approval") return "Awaiting approval";
+    if (task.terminalStatus === "needs_user_action" || task.awaitingUserInputReasonCode) return "Waiting on you";
+    if (task.status === "blocked") return "Blocked";
+    if (task.status === "paused") return "Paused";
+    if (task.status === "failed") return "Run failed";
+    if (task.status === "interrupted") return "Interrupted";
+    if (task.failureClass === "dependency_unavailable") return "Dependency unavailable";
+    if (task.failureClass === "provider_quota") return "Provider quota issue";
+    if (task.failureClass === "user_blocker") return "Needs decision";
+    if (!task.assignedAgentRoleId) return "Needs owner";
+    const due = getTaskDueInfo(task.dueDate);
+    if (due?.isOverdue) return "Overdue";
+    if (getMissionColumnForTask(task) === "review") return "Needs review";
+    if (isTaskStale(task)) return "Stale";
+    return null;
+  }, [getMissionColumnForTask, isTaskStale]);
+
+  const isTaskAttentionRequired = useCallback((task: Task) => Boolean(getTaskAttentionReason(task)), [getTaskAttentionReason]);
+
+  const getTaskNextMissionColumn = useCallback((task: Task): MissionColumn["id"] => {
+    const columnOrder: MissionColumn["id"][] = ["inbox", "assigned", "in_progress", "review", "done"];
+    const currentColumn = getMissionColumnForTask(task);
+    const currentIndex = columnOrder.indexOf(currentColumn);
+    if (currentIndex === -1 || currentIndex === columnOrder.length - 1) return "done";
+    return columnOrder[currentIndex + 1];
+  }, [getMissionColumnForTask]);
+
   const handleTriggerHeartbeat = useCallback(async (agentRoleId: string) => {
     try { await window.electronAPI.triggerHeartbeat(agentRoleId); }
-    catch (err) { console.error("Failed to trigger heartbeat:", err); }
+    catch (err) { console.error("Failed to trigger background review:", err); }
   }, []);
 
   // ── Planner actions ──
@@ -758,6 +1050,64 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
 
   // ── Feed items ──
   const feedItems = useMemo(() => {
+    const formatHeartbeatEventContent = (event: HeartbeatEvent): string => {
+      switch (event.type) {
+        case "work_found":
+          return agentContext.getUiCopy("mcHeartbeatFound", {
+            mentions: event.result?.pendingMentions || 0,
+            tasks: event.result?.assignedTasks || 0,
+          });
+        case "signal_received":
+          return `received signal: ${formatHeartbeatSignalText(event.signal)}`;
+        case "signal_merged": {
+          const mergeCount = event.signal?.mergedCount && event.signal.mergedCount > 1
+            ? ` (${event.signal.mergedCount}x)`
+            : "";
+          return `merged repeated signal: ${formatHeartbeatSignalText(event.signal)}${mergeCount}`;
+        }
+        case "pulse_started":
+          return "started background review";
+        case "pulse_completed":
+          return event.result?.triggerReason
+            ? `completed background review: ${event.result.triggerReason}`
+            : "completed background review";
+        case "pulse_deferred":
+          return event.result?.deferredReason || event.deferred?.reason
+            ? `deferred background review: ${event.result?.deferredReason || event.deferred?.reason}`
+            : "deferred background review";
+        case "dispatch_started":
+          return `started ${formatHeartbeatDispatchKind(event.dispatchKind)} dispatch`;
+        case "dispatch_completed":
+          return event.result?.taskCreated
+            ? `completed ${formatHeartbeatDispatchKind(event.dispatchKind)} dispatch and created a task`
+            : `completed ${formatHeartbeatDispatchKind(event.dispatchKind)} dispatch`;
+        case "dispatch_skipped":
+          return event.result?.triggerReason
+            ? `skipped ${formatHeartbeatDispatchKind(event.dispatchKind)} dispatch: ${event.result.triggerReason}`
+            : `skipped ${formatHeartbeatDispatchKind(event.dispatchKind)} dispatch`;
+        case "wake_queued":
+          return event.wake?.text ? `queued wake: ${event.wake.text}` : "queued background review wake";
+        case "wake_coalesced":
+          return event.wake?.text ? `coalesced wake: ${event.wake.text}` : "coalesced repeated wake";
+        case "wake_queue_saturated":
+          return "dropped wake because the queue was saturated";
+        case "wake_immediate_deferred":
+          return "deferred immediate wake until the next review";
+        case "no_work":
+          return event.result?.triggerReason
+            ? `no action needed: ${event.result.triggerReason}`
+            : "no action needed";
+        case "started":
+          return "background review started";
+        case "completed":
+          return "background review completed";
+        case "error":
+          return event.error ? `background review error: ${event.error}` : "background review error";
+        default:
+          return event.type;
+      }
+    };
+
     const activityItems = activities.map((activity) => {
       const mappedType =
         activity.activityType === "comment" || activity.activityType === "mention" ? "comments"
@@ -786,10 +1136,8 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
         id: `event-${e.timestamp}`,
         type: "status",
         agentId: e.agentRoleId,
-        agentName: e.agentName,
-        content: e.type === "work_found"
-          ? agentContext.getUiCopy("mcHeartbeatFound", { mentions: e.result?.pendingMentions || 0, tasks: e.result?.assignedTasks || 0 })
-          : e.type,
+        agentName: normalizeMissionControlAgentDisplayName(e.agentName),
+        content: formatHeartbeatEventContent(e),
         timestamp: e.timestamp,
         taskId: undefined,
         workspaceId: undefined,
@@ -863,6 +1211,7 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
     selectedWorkspace, selectedCompany, selectedTask,
     isAllWorkspacesSelected, getWorkspaceName,
     tasksByAgent, feedItems,
+    taskLabels,
     commandCenterOutputs, commandCenterReviewQueue,
     commandCenterOperators, commandCenterExecutionMap,
     selectedPlannerRun, plannerManagedIssues,
@@ -871,10 +1220,14 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
 
     // Callbacks
     getTasksByColumn, getAgent, getAgentStatus, getMissionColumnForTask,
+    getTaskLabels, getTaskAttentionReason, getTaskNextMissionColumn,
+    isTaskTerminal, isTaskStale, isTaskAttentionRequired,
     handleManualRefresh, handleMoveTask, handleAssignTask, handleTriggerHeartbeat,
+    handleSetTaskPriority, handleSetTaskDueDate, handleSetTaskEstimate,
+    handleAddTaskLabel, handleRemoveTaskLabel,
     handlePlannerConfigChange, handleRunPlanner, handlePostComment,
     handleCreateAgent, handleEditAgent, handleSaveAgent,
-    formatRelativeTime,
+    formatRelativeTime, formatTaskEstimate, getTaskDueInfo, getTaskPriorityMeta,
     agentContext,
   };
 }
