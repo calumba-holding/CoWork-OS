@@ -4,6 +4,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+type Any = any;
+
 const nativeSqliteAvailable = await import("better-sqlite3")
   .then((module) => {
     try {
@@ -159,9 +161,19 @@ describeWithSqlite("MailboxService", () => {
     expect(summary?.summary).toContain("Can you send the revised launch plan");
     expect(summary?.suggestedNextAction).toBe("Draft a reply");
 
+    const summaryRow = db
+      .prepare("SELECT summary_text FROM mailbox_summaries WHERE thread_id = ?")
+      .get("gmail-thread:alpha") as { summary_text: string };
+    expect(summaryRow.summary_text.startsWith("mbox:")).toBe(true);
+
     const commitments = await service.extractCommitments("gmail-thread:alpha");
     expect(commitments.length).toBeGreaterThan(0);
     expect(commitments[0]?.title.toLowerCase()).toContain("revised launch plan");
+
+    const commitmentRow = db
+      .prepare("SELECT source_excerpt FROM mailbox_commitments WHERE thread_id = ? LIMIT 1")
+      .get("gmail-thread:alpha") as { source_excerpt: string };
+    expect(commitmentRow.source_excerpt.startsWith("mbox:")).toBe(true);
 
     const followups = await service.reviewBulkAction({ type: "follow_up", limit: 10 });
     expect(followups.count).toBeGreaterThan(0);
@@ -198,6 +210,11 @@ describeWithSqlite("MailboxService", () => {
     const draft = await service.generateDraft("gmail-thread:alpha");
     expect(draft).toBeTruthy();
 
+    const storedDraft = db
+      .prepare("SELECT body_text FROM mailbox_drafts WHERE id = ?")
+      .get(draft?.id) as { body_text: string };
+    expect(storedDraft.body_text.startsWith("mbox:")).toBe(true);
+
     await service.applyAction({
       threadId: "gmail-thread:alpha",
       draftId: draft?.id,
@@ -207,6 +224,217 @@ describeWithSqlite("MailboxService", () => {
     const detail = await service.getThread("gmail-thread:alpha");
     expect(detail?.drafts.map((entry) => entry.id)).not.toContain(draft?.id);
     expect(detail?.proposals.some((proposal) => proposal.type === "reply" && proposal.status === "suggested")).toBe(false);
+  });
+
+  it("applies cleanup locally without mutating the mail server and restores the thread when new activity arrives", async () => {
+    db.prepare(
+      `INSERT INTO mailbox_threads
+        (id, account_id, provider_thread_id, provider, subject, snippet, participants_json, labels_json, category, priority_score, urgency_score, needs_reply, stale_followup, cleanup_candidate, handled, unread_count, message_count, last_message_at, last_synced_at, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "gmail-thread:cleanup",
+      "gmail:test@example.com",
+      "cleanup",
+      "gmail",
+      "Welcome to your Google Cloud Free Trial",
+      "Low-priority promotional onboarding email.",
+      JSON.stringify([{ email: "noreply@google.com", name: "Google Cloud" }]),
+      JSON.stringify(["CATEGORY_PROMOTIONS"]),
+      "promotions",
+      8,
+      3,
+      0,
+      0,
+      1,
+      1,
+      0,
+      1,
+      now - 60 * 60 * 1000,
+      now,
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    db.prepare(
+      `INSERT INTO mailbox_messages
+        (id, thread_id, provider_message_id, direction, from_name, from_email, to_json, cc_json, bcc_json, subject, snippet, body_text, received_at, is_unread, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(),
+      "gmail-thread:cleanup",
+      "m-cleanup-1",
+      "incoming",
+      "Google Cloud",
+      "noreply@google.com",
+      JSON.stringify([{ email: "test@example.com", name: "Test User" }]),
+      JSON.stringify([]),
+      JSON.stringify([]),
+      "Welcome to your Google Cloud Free Trial",
+      "Free trial onboarding",
+      "This is a low-priority onboarding email.",
+      now - 60 * 60 * 1000,
+      0,
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    const gmailApi = await import("../../utils/gmail-api");
+    const gmailRequestSpy = vi.spyOn(gmailApi, "gmailRequest").mockResolvedValue({ data: {} } as never);
+
+    try {
+      const cleanupQueue = await service.reviewBulkAction({ type: "cleanup", limit: 10 });
+      const cleanupProposal = cleanupQueue.proposals.find((proposal) => proposal.threadId === "gmail-thread:cleanup");
+
+      expect(cleanupProposal).toBeTruthy();
+
+      await service.applyAction({
+        proposalId: cleanupProposal?.id,
+        threadId: "gmail-thread:cleanup",
+        type: "cleanup_local",
+      });
+
+      expect(gmailRequestSpy).not.toHaveBeenCalled();
+
+      const hiddenRow = db
+        .prepare("SELECT handled, cleanup_candidate, local_inbox_hidden FROM mailbox_threads WHERE id = ?")
+        .get("gmail-thread:cleanup") as {
+        handled: number;
+        cleanup_candidate: number;
+        local_inbox_hidden: number;
+      };
+
+      expect(hiddenRow.handled).toBe(1);
+      expect(hiddenRow.cleanup_candidate).toBe(0);
+      expect(hiddenRow.local_inbox_hidden).toBe(1);
+
+      const inboxAfterCleanup = await service.listThreads({ mailboxView: "inbox", limit: 20 });
+      expect(inboxAfterCleanup.map((thread) => thread.id)).not.toContain("gmail-thread:cleanup");
+
+      const cleanupQueueAfterApply = await service.reviewBulkAction({ type: "cleanup", limit: 10 });
+      expect(cleanupQueueAfterApply.proposals.map((proposal) => proposal.threadId)).not.toContain("gmail-thread:cleanup");
+
+      await (service as Any).upsertThread({
+        id: "gmail-thread:cleanup",
+        accountId: "gmail:test@example.com",
+        provider: "gmail",
+        providerThreadId: "cleanup",
+        subject: "Re: Welcome to your Google Cloud Free Trial",
+        snippet: "A new reply came in.",
+        participants: [{ email: "support@google.com", name: "Google Cloud Support" }],
+        labels: ["CATEGORY_UPDATES"],
+        category: "updates",
+        priorityScore: 24,
+        urgencyScore: 18,
+        needsReply: false,
+        staleFollowup: false,
+        cleanupCandidate: false,
+        handled: false,
+        unreadCount: 1,
+        lastMessageAt: now + 5 * 60 * 1000,
+        messages: [
+          {
+            id: "cleanup-new-message",
+            providerMessageId: "cleanup-new-message",
+            direction: "incoming",
+            from: { email: "support@google.com", name: "Google Cloud Support" },
+            to: [{ email: "test@example.com", name: "Test User" }],
+            cc: [],
+            bcc: [],
+            subject: "Re: Welcome to your Google Cloud Free Trial",
+            snippet: "A new reply came in.",
+            body: "A new reply came in.",
+            receivedAt: now + 5 * 60 * 1000,
+            unread: true,
+          },
+        ],
+      });
+
+      const storedMessage = db
+        .prepare(
+          "SELECT body_text, body_html FROM mailbox_messages WHERE thread_id = ? ORDER BY received_at DESC LIMIT 1",
+        )
+        .get("gmail-thread:cleanup") as { body_text: string; body_html: string | null };
+      expect(storedMessage.body_text.startsWith("mbox:")).toBe(true);
+
+      const inboxAfterNewActivity = await service.listThreads({ mailboxView: "inbox", limit: 20 });
+      expect(inboxAfterNewActivity.map((thread) => thread.id)).toContain("gmail-thread:cleanup");
+
+      const restoredRow = db
+        .prepare("SELECT local_inbox_hidden FROM mailbox_threads WHERE id = ?")
+        .get("gmail-thread:cleanup") as { local_inbox_hidden: number };
+      expect(restoredRow.local_inbox_hidden).toBe(0);
+    } finally {
+      gmailRequestSpy.mockRestore();
+    }
+  });
+
+  it("blocks noreply drafts unless the manual override is confirmed", async () => {
+    db.prepare(
+      `INSERT INTO mailbox_threads
+        (id, account_id, provider_thread_id, provider, subject, snippet, participants_json, labels_json, category, priority_score, urgency_score, needs_reply, stale_followup, cleanup_candidate, handled, unread_count, message_count, last_message_at, last_synced_at, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "gmail-thread:noreply",
+      "gmail:test@example.com",
+      "noreply",
+      "gmail",
+      "Your Apple receipt",
+      "This is an automated message. Do not reply.",
+      JSON.stringify([{ email: "no-reply@apple.com", name: "Apple" }]),
+      JSON.stringify(["CATEGORY_UPDATES"]),
+      "updates",
+      18,
+      12,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      now - 30 * 60 * 1000,
+      now,
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    db.prepare(
+      `INSERT INTO mailbox_messages
+        (id, thread_id, provider_message_id, direction, from_name, from_email, to_json, cc_json, bcc_json, subject, snippet, body_text, received_at, is_unread, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(),
+      "gmail-thread:noreply",
+      "m-noreply-1",
+      "incoming",
+      "Apple",
+      "no-reply@apple.com",
+      JSON.stringify([{ email: "test@example.com", name: "Test User" }]),
+      JSON.stringify([]),
+      JSON.stringify([]),
+      "Your Apple receipt",
+      "Automated receipt",
+      "This is an automated message about your purchase. Do not reply to this email.",
+      now - 30 * 60 * 1000,
+      1,
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    const summary = await service.summarizeThread("gmail-thread:noreply");
+    expect(summary?.suggestedNextAction).toBe("Keep as reference");
+
+    await expect(service.generateDraft("gmail-thread:noreply")).rejects.toThrow(/no-reply sender/i);
+
+    const draft = await service.generateDraft("gmail-thread:noreply", {
+      tone: "concise",
+      allowNoreplySender: true,
+    });
+    expect(draft).toBeTruthy();
+    expect(draft?.subject).toBe("Re: Your Apple receipt");
   });
 
   it("searches sender and body content and computes contact intelligence", async () => {
@@ -390,6 +618,125 @@ describeWithSqlite("MailboxService", () => {
   it("applies the unread filter when requested", async () => {
     const unreadThreads = await service.listThreads({ unreadOnly: true });
     expect(unreadThreads.every((thread) => thread.unreadCount > 0)).toBe(true);
+  });
+
+  it("filters threads by mailbox account when requested", async () => {
+    db.prepare(
+      `INSERT INTO mailbox_accounts
+        (id, provider, address, display_name, status, capabilities_json, sync_cursor, last_synced_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "imap:user@msn.com",
+      "imap",
+      "user@msn.com",
+      "MSN Mail",
+      "connected",
+      JSON.stringify(["send", "mark_read"]),
+      null,
+      now,
+      now,
+      now,
+    );
+
+    db.prepare(
+      `INSERT INTO mailbox_threads
+        (id, account_id, provider_thread_id, provider, subject, snippet, participants_json, labels_json, category, priority_score, urgency_score, needs_reply, stale_followup, cleanup_candidate, handled, unread_count, message_count, last_message_at, last_synced_at, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "imap-thread:msn-alpha",
+      "imap:user@msn.com",
+      "msn-alpha",
+      "imap",
+      "MSN follow-up",
+      "Need a reply from Outlook inbox",
+      JSON.stringify([{ email: "owner@contoso.com", name: "Owner" }]),
+      JSON.stringify([]),
+      "follow_up",
+      60,
+      55,
+      1,
+      0,
+      0,
+      0,
+      1,
+      1,
+      now - 30 * 60 * 1000,
+      now,
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    db.prepare(
+      `INSERT INTO mailbox_messages
+        (id, thread_id, provider_message_id, direction, from_name, from_email, to_json, cc_json, bcc_json, subject, snippet, body_text, received_at, is_unread, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(),
+      "imap-thread:msn-alpha",
+      "901",
+      "incoming",
+      "Owner",
+      "owner@contoso.com",
+      JSON.stringify([{ email: "user@msn.com", name: "MSN Mail" }]),
+      JSON.stringify([]),
+      JSON.stringify([]),
+      "MSN follow-up",
+      "Need a reply from Outlook inbox",
+      "Can you respond from the MSN account?",
+      now - 30 * 60 * 1000,
+      1,
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    const gmailThreads = await service.listThreads({ accountId: "gmail:test@example.com" });
+    expect(gmailThreads.map((thread) => thread.id)).toEqual(["gmail-thread:alpha"]);
+
+    const imapThreads = await service.listThreads({ accountId: "imap:user@msn.com" });
+    expect(imapThreads.map((thread) => thread.id)).toEqual(["imap-thread:msn-alpha"]);
+  });
+
+  it("normalizes structured IMAP addresses and html content from the email client", () => {
+    const normalized = (service as any).normalizeImapThreads("imap:user@msn.com", "user@msn.com", [
+      {
+        uid: 901,
+        messageId: "msg-901@example.com",
+        from: {
+          name: "Microsoft account team",
+          address: "account-security-noreply@accountprotection.microsoft.com",
+        },
+        to: [{ name: "Recipient", address: "user@msn.com" }],
+        subject: "Microsoft hesabınıza yeni uygulamalar bağlandı",
+        html: "<p>MSN Mail App, test</p><p>Review this sign-in.</p>",
+        date: new Date(now).toISOString(),
+        isRead: false,
+      },
+    ]);
+
+    expect(normalized).toHaveLength(1);
+    expect(normalized[0]?.id).toBe(
+      "imap-thread:microsoft hesabınıza yeni uygulamalar bağlandı::account-security-noreply@accountprotection.microsoft.com",
+    );
+    expect(normalized[0]?.participants).toEqual([
+      {
+        email: "account-security-noreply@accountprotection.microsoft.com",
+        name: "Microsoft account team",
+      },
+    ]);
+    expect(normalized[0]?.messages[0]?.from).toEqual({
+      email: "account-security-noreply@accountprotection.microsoft.com",
+      name: "Microsoft account team",
+    });
+    expect(normalized[0]?.messages[0]?.to).toEqual([
+      {
+        email: "user@msn.com",
+        name: "Recipient",
+      },
+    ]);
+    expect(normalized[0]?.messages[0]?.body).toBe("MSN Mail App, test\n\nReview this sign-in.");
+    expect(normalized[0]?.messages[0]?.bodyHtml).toContain("<p>MSN Mail App, test</p>");
   });
 
   it("does not treat onboarding or automated mail as priority follow-up", async () => {
@@ -803,6 +1150,58 @@ describeWithSqlite("MailboxService", () => {
       expect(row.category).toBe("updates");
       expect(row.needs_reply).toBe(0);
     } finally {
+      loadSettingsSpy.mockRestore();
+    }
+  });
+
+  it("syncs Gmail and Email channel accounts in the same run", async () => {
+    const { GoogleWorkspaceSettingsManager } = await import("../../settings/google-workspace-manager");
+    const loadSettingsSpy = vi.spyOn(GoogleWorkspaceSettingsManager, "loadSettings").mockReturnValue({
+      enabled: true,
+      timeoutMs: 20_000,
+    } as never);
+    const syncGmailSpy = vi.spyOn(service as Any, "syncGmail").mockResolvedValue({
+      account: {
+        id: "gmail:test@example.com",
+        provider: "gmail",
+        address: "test@example.com",
+        displayName: "Test User",
+        status: "connected",
+        capabilities: ["threads"],
+        lastSyncedAt: now,
+      },
+      syncedThreads: 2,
+      syncedMessages: 4,
+    });
+    const hasEmailChannelSpy = vi.spyOn(service as Any, "hasEmailChannel").mockReturnValue(true);
+    const syncImapSpy = vi.spyOn(service as Any, "syncImap").mockResolvedValue({
+      account: {
+        id: "imap:user@msn.com",
+        provider: "imap",
+        address: "user@msn.com",
+        displayName: "MSN Mail",
+        status: "connected",
+        capabilities: ["send", "mark_read"],
+        lastSyncedAt: now,
+      },
+      syncedThreads: 3,
+      syncedMessages: 6,
+    });
+
+    try {
+      const result = await service.sync(25);
+      expect(syncGmailSpy).toHaveBeenCalledWith(25);
+      expect(syncImapSpy).toHaveBeenCalledWith(25);
+      expect(result.accounts.map((account) => account.id)).toEqual([
+        "gmail:test@example.com",
+        "imap:user@msn.com",
+      ]);
+      expect(result.syncedThreads).toBe(5);
+      expect(result.syncedMessages).toBe(10);
+    } finally {
+      syncImapSpy.mockRestore();
+      hasEmailChannelSpy.mockRestore();
+      syncGmailSpy.mockRestore();
       loadSettingsSpy.mockRestore();
     }
   });
