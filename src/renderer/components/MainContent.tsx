@@ -4973,6 +4973,7 @@ export function MainContent({
           exitCode={session.exitCode}
           cwd={session.cwd}
           taskId={task?.id}
+          workspaceId={task?.workspaceId}
           onClose={() => handleDismissCommandOutput(session.id)}
         />
       ));
