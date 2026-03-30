@@ -3,6 +3,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { SecureSettingsRepository } from "../database/SecureSettingsRepository";
 import { LLMProviderFactory } from "../agent/llm/provider-factory";
+import { recordLlmCallError, recordLlmCallSuccess } from "../agent/llm/usage-telemetry";
 import type { LLMMessage } from "../agent/llm/types";
 import {
   HEALTH_SOURCE_TEMPLATES,
@@ -922,12 +923,23 @@ async function generateWorkflowFromLLM(
       },
     ];
 
+    const modelId = LLMProviderFactory.loadSettings().modelKey || "sonnet-4-5";
     const response = await provider.createMessage({
-      model: LLMProviderFactory.loadSettings().modelKey || "sonnet-4-5",
+      model: modelId,
       maxTokens: 800,
       system,
       messages,
     });
+    recordLlmCallSuccess(
+      {
+        sourceKind: "health_workflow",
+        sourceId: request.workflowType,
+        providerType: provider.type,
+        modelKey: modelId,
+        modelId,
+      },
+      response.usage,
+    );
     const text = response.content
       .map((block) => (block.type === "text" ? block.text : ""))
       .join("\n")
@@ -962,6 +974,13 @@ async function generateWorkflowFromLLM(
       createdAt: now(),
     };
   } catch (err) {
+    recordLlmCallError(
+      {
+        sourceKind: "health_workflow",
+        sourceId: request.workflowType,
+      },
+      err,
+    );
     console.warn("[HealthManager] LLM workflow generation failed:", err);
     return null;
   }
