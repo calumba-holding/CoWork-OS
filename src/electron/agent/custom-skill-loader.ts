@@ -3,7 +3,8 @@
  *
  * Loads skills from multiple sources with precedence:
  * - Bundled skills (resources/skills/) - lowest precedence
- * - Managed skills (~/Library/Application Support/cowork-os/skills/) - medium precedence
+ * - Optional external skill directories - medium precedence
+ * - Managed skills (~/Library/Application Support/cowork-os/skills/) - medium-high precedence
  * - Workspace skills (workspace/skills/) - highest precedence
  *
  * Skills with the same ID from higher precedence sources override lower ones.
@@ -38,6 +39,42 @@ export interface SkillLoaderConfig {
   managedSkillsDir?: string;
   workspaceSkillsDir?: string;
   skillsConfig?: SkillsConfig;
+}
+
+function normalizeExternalSkillDirectories(input: string[] | undefined): string[] {
+  if (!Array.isArray(input)) return [];
+  const normalized = new Set<string>();
+  for (const value of input) {
+    if (typeof value !== "string" || value.trim().length === 0) continue;
+    const resolved = path.resolve(value.trim());
+    if (!path.isAbsolute(resolved)) continue;
+    if (!fs.existsSync(resolved)) continue;
+    try {
+      if (!fs.statSync(resolved).isDirectory()) continue;
+      normalized.add(resolved);
+    } catch {
+      // Ignore unreadable paths.
+    }
+  }
+  return Array.from(normalized.values());
+}
+
+function validateExternalSkillDirectories(input: string[]): void {
+  for (const value of input) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new Error("External skill directories must be non-empty absolute paths");
+    }
+    const resolved = path.resolve(value.trim());
+    if (!path.isAbsolute(resolved)) {
+      throw new Error(`External skill directory must be absolute: ${value}`);
+    }
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`External skill directory does not exist: ${resolved}`);
+    }
+    if (!fs.statSync(resolved).isDirectory()) {
+      throw new Error(`External skill directory must be a directory: ${resolved}`);
+    }
+  }
 }
 
 interface ModelSkillDescriptionOptions {
@@ -104,6 +141,7 @@ export class CustomSkillLoader {
 
   private bundledSkillsDir: string;
   private managedSkillsDir: string;
+  private externalSkillDirs: string[] = [];
   private workspaceSkillsDir: string | null = null;
   private skills: Map<string, CustomSkill> = new Map();
   private initialized: boolean = false;
@@ -117,12 +155,14 @@ export class CustomSkillLoader {
   private isReloading: boolean = false;
   private lastLoadStats: {
     bundled: number;
+    external: number;
     managed: number;
     workspace: number;
     total: number;
     overridden: number;
   } = {
     bundled: 0,
+    external: 0,
     managed: 0,
     workspace: 0,
     total: 0,
@@ -148,6 +188,9 @@ export class CustomSkillLoader {
 
     // Skills config
     this.skillsConfig = config?.skillsConfig;
+    this.externalSkillDirs = normalizeExternalSkillDirectories(
+      config?.skillsConfig?.externalSkillDirectories,
+    );
 
     // Initialize eligibility checker
     this.eligibilityChecker = getSkillEligibilityChecker(this.skillsConfig);
@@ -173,6 +216,9 @@ export class CustomSkillLoader {
       logger.info(`Initialized with ${this.skills.size} skills`);
       logger.debug(`Bundled: ${this.bundledSkillsDir}`);
       logger.debug(`Managed: ${this.managedSkillsDir}`);
+      for (const externalDir of this.externalSkillDirs) {
+        logger.debug(`External: ${externalDir}`);
+      }
       if (this.workspaceSkillsDir) {
         logger.debug(`Workspace: ${this.workspaceSkillsDir}`);
       }
@@ -199,6 +245,10 @@ export class CustomSkillLoader {
 
   getManagedSkillsDir(): string {
     return this.managedSkillsDir;
+  }
+
+  getExternalSkillDirs(): string[] {
+    return [...this.externalSkillDirs];
   }
 
   getWorkspaceSkillsDir(): string | null {
@@ -300,13 +350,19 @@ export class CustomSkillLoader {
 
     // Load from all sources
     const bundledSkills = this.loadSkillsFromDir(this.bundledSkillsDir, "bundled");
+    const externalSkills = this.externalSkillDirs.flatMap((dir) =>
+      this.loadSkillsFromDir(dir, "external"),
+    );
     const managedSkills = this.loadSkillsFromDir(this.managedSkillsDir, "managed");
     const workspaceSkills = this.workspaceSkillsDir
       ? this.loadSkillsFromDir(this.workspaceSkillsDir, "workspace")
       : [];
 
-    // Merge with precedence: bundled < managed < workspace
+    // Merge with precedence: bundled < external < managed < workspace
     for (const skill of bundledSkills) {
+      this.skills.set(skill.id, skill);
+    }
+    for (const skill of externalSkills) {
       this.skills.set(skill.id, skill);
     }
     for (const skill of managedSkills) {
@@ -318,19 +374,20 @@ export class CustomSkillLoader {
 
     const counts = {
       bundled: bundledSkills.length,
+      external: externalSkills.length,
       managed: managedSkills.length,
       workspace: workspaceSkills.length,
       total: this.skills.size,
     };
 
-    const rawTotal = counts.bundled + counts.managed + counts.workspace;
+    const rawTotal = counts.bundled + counts.external + counts.managed + counts.workspace;
     const overridden = rawTotal - counts.total;
     this.lastLoadStats = {
       ...counts,
       overridden,
     };
     logger.info(
-      `Loaded ${counts.total} skills (bundled: ${counts.bundled}, managed: ${counts.managed}, workspace: ${counts.workspace}, overridden: ${overridden})`,
+      `Loaded ${counts.total} skills (bundled: ${counts.bundled}, external: ${counts.external}, managed: ${counts.managed}, workspace: ${counts.workspace}, overridden: ${overridden})`,
     );
 
     return this.listSkills();
@@ -374,6 +431,7 @@ export class CustomSkillLoader {
 
   getLoadStats(): {
     bundled: number;
+    external: number;
     managed: number;
     workspace: number;
     total: number;
@@ -950,6 +1008,7 @@ export class CustomSkillLoader {
     const candidates = [
       fileDir,
       this.bundledSkillsDir,
+      ...this.externalSkillDirs,
       this.managedSkillsDir,
       this.workspaceSkillsDir || "",
     ].filter(Boolean) as string[];
@@ -1026,6 +1085,7 @@ export class CustomSkillLoader {
       workspaceDir: this.workspaceSkillsDir || "",
       managedSkillsDir: this.managedSkillsDir,
       bundledSkillsDir: this.bundledSkillsDir,
+      externalSkillDirs: [...this.externalSkillDirs],
       skills: statusEntries,
       summary,
     };
@@ -1046,7 +1106,20 @@ export class CustomSkillLoader {
    */
   updateConfig(config: SkillsConfig): void {
     this.skillsConfig = config;
+    this.externalSkillDirs = normalizeExternalSkillDirectories(config.externalSkillDirectories);
     this.eligibilityChecker.updateConfig(config);
+  }
+
+  setExternalSkillDirs(directories: string[]): string[] {
+    validateExternalSkillDirectories(directories);
+    this.externalSkillDirs = normalizeExternalSkillDirectories(directories);
+    this.skillsConfig = {
+      skillsDirectory: this.managedSkillsDir,
+      enabledSkillIds: this.skillsConfig?.enabledSkillIds || [],
+      ...this.skillsConfig,
+      externalSkillDirectories: [...this.externalSkillDirs],
+    };
+    return this.getExternalSkillDirs();
   }
 
   /**
@@ -1101,6 +1174,9 @@ export class CustomSkillLoader {
     // Only allow updating workspace and managed skills
     if (skill.source === "bundled") {
       throw new Error("Cannot update bundled skills");
+    }
+    if (skill.source === "external") {
+      throw new Error("Cannot update external read-only skills");
     }
 
     const updatedSkill: CustomSkill = {
@@ -1164,6 +1240,16 @@ export class CustomSkillLoader {
     }
 
     await shell.openPath(this.managedSkillsDir);
+  }
+
+  async openExternalSkillsFolder(dir: string): Promise<void> {
+    const { shell } = await import("electron");
+    validateExternalSkillDirectories([dir]);
+    const normalized = normalizeExternalSkillDirectories([dir])[0];
+    if (!normalized) {
+      throw new Error("External skill directory must exist and be a readable absolute path");
+    }
+    await shell.openPath(normalized);
   }
 
   // === Backward compatibility aliases ===
