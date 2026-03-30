@@ -140,6 +140,15 @@ export class DiscordAdapter implements ChannelAdapter {
         const shouldForwardBotMessage = this.shouldForwardBotMessage(message);
         if (message.author.bot && !shouldForwardBotMessage) return;
 
+        if (
+          message.guildId &&
+          this.config.guildIds &&
+          this.config.guildIds.length > 0 &&
+          !this.config.guildIds.includes(message.guildId)
+        ) {
+          return;
+        }
+
         // Handle DMs and mentions in guilds
         const isDM = message.channel.type === DiscordChannelType.DM;
         const isMentioned = message.mentions.has(this.client!.user!);
@@ -169,6 +178,15 @@ export class DiscordAdapter implements ChannelAdapter {
 
       // Handle slash command, button, and select menu interactions
       this.client.on(Events.InteractionCreate, async (interaction) => {
+        if (
+          interaction.guildId &&
+          this.config.guildIds &&
+          this.config.guildIds.length > 0 &&
+          !this.config.guildIds.includes(interaction.guildId)
+        ) {
+          return;
+        }
+
         // Handle button interactions
         if (interaction.isButton()) {
           await this.handleButtonInteraction(interaction);
