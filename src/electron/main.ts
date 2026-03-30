@@ -21,6 +21,7 @@ import {
   setupIpcHandlers,
   getNotificationService,
   setHeartbeatWakeSubmitter,
+  setHookTriggerEmitter,
 } from "./ipc/handlers";
 import { setupMissionControlHandlers } from "./ipc/mission-control-handlers";
 import { setupPersonaTemplateHandlers } from "./ipc/persona-template-handlers";
@@ -107,7 +108,7 @@ import {
   shouldImportEnvSettingsFromArgsOrEnv,
   shouldPrintControlPlaneTokenFromArgsOrEnv,
 } from "./utils/runtime-mode";
-import { getUserDataDir } from "./utils/user-data-dir";
+import { getActiveProfileId, getUserDataDir, hasNonDefaultProfile } from "./utils/user-data-dir";
 // Live Canvas feature
 import { registerCanvasScheme, registerCanvasProtocol, CanvasManager } from "./canvas";
 import { setupCanvasHandlers, cleanupCanvasHandlers } from "./ipc/canvas-handlers";
@@ -420,21 +421,20 @@ if (!gotTheLock) {
     let mcpStartupSummary = { enabled: 0, attempted: 0, connected: 0, failed: 0 };
     let pluginStartupSummary = { loaded: 0, enabled: 0 };
 
-    // Allow overriding userData path for headless/VPS deployments (e.g., mount a persistent volume).
-    const userDataOverride = process.env.COWORK_USER_DATA_DIR || getArgValue("--user-data-dir");
-    if (
-      userDataOverride &&
-      typeof userDataOverride === "string" &&
-      userDataOverride.trim().length > 0
-    ) {
-      const resolved = path.resolve(userDataOverride.trim());
+    const resolvedUserDataDir = getUserDataDir();
+    const activeProfileId = getActiveProfileId();
+    const defaultUserDataDir = app.getPath("userData");
+    if (path.resolve(defaultUserDataDir) !== path.resolve(resolvedUserDataDir)) {
       try {
-        await fs.mkdir(resolved, { recursive: true });
-        app.setPath("userData", resolved);
-        logger.info(`Using userData directory override: ${resolved}`);
+        await fs.mkdir(resolvedUserDataDir, { recursive: true });
+        app.setPath("userData", resolvedUserDataDir);
+        logger.info(`Using userData directory: ${resolvedUserDataDir}`);
       } catch (error) {
-        logger.warn("Failed to apply userData directory override:", error);
+        logger.warn("Failed to apply userData directory:", error);
       }
+    }
+    if (hasNonDefaultProfile()) {
+      logger.info(`Active profile: ${activeProfileId}`);
     }
 
     // Set up Content Security Policy for production builds
@@ -1190,7 +1190,7 @@ if (!gotTheLock) {
       .then(() => {
         const skills = getCustomSkillLoader().getLoadStats();
         logger.info(
-          `Skills summary: total=${skills.total}, bundled=${skills.bundled}, managed=${skills.managed}, workspace=${skills.workspace}, overrides=${skills.overridden}`,
+          `Skills summary: total=${skills.total}, bundled=${skills.bundled}, external=${skills.external}, managed=${skills.managed}, workspace=${skills.workspace}, overrides=${skills.overridden}`,
         );
       })
       .catch((error) => {
@@ -1633,6 +1633,28 @@ if (!gotTheLock) {
           workspaces[0]
         );
       };
+      const extractConnectorTriggerSubscription = (trigger: {
+        source: string;
+        conditions: Array<{ field: string; value: string }>;
+      }): { serverId?: string; connectorId?: string; resourceUri?: string } | null => {
+        if (trigger.source !== "connector_event") {
+          return null;
+        }
+        const getConditionValue = (...fields: string[]): string | undefined => {
+          for (const field of fields) {
+            const match = trigger.conditions.find((condition) => condition.field === field);
+            if (match?.value) {
+              return match.value;
+            }
+          }
+          return undefined;
+        };
+        return {
+          serverId: getConditionValue("serverId"),
+          connectorId: getConditionValue("connectorId", "source"),
+          resourceUri: getConditionValue("resourceUri"),
+        };
+      };
 
       // Event Triggers
       const triggerService = new EventTriggerService(
@@ -1671,6 +1693,14 @@ if (!gotTheLock) {
         },
         db,
       );
+      const mcpClientManager = MCPClientManager.getInstance();
+      const syncMcpTriggerSubscriptions = async (): Promise<void> => {
+        const subscriptions = triggerService
+          .listTriggers()
+          .map(extractConnectorTriggerSubscription)
+          .filter((value): value is NonNullable<typeof value> => Boolean(value));
+        await mcpClientManager.syncTriggerResourceSubscriptions(subscriptions);
+      };
       MailboxAutomationRegistry.configure({
         db,
         triggerService,
@@ -1678,7 +1708,28 @@ if (!gotTheLock) {
         log: (...args: unknown[]) => logger.debug("[MailboxAutomationRegistry]", ...args),
       });
       triggerService.start();
-      setupTriggerHandlers(triggerService);
+      setHookTriggerEmitter((event) => {
+        void triggerService.evaluateEvent(event);
+      });
+      mcpClientManager.on("connector_event", (event) => {
+        void triggerService.evaluateEvent({
+          source: "connector_event",
+          timestamp: event.timestamp,
+          fields: {
+            type: event.type,
+            changeType: event.type,
+            serverId: event.serverId,
+            connectorId: event.connectorId || "",
+            serverName: event.serverName,
+            source: event.connectorId || event.serverName,
+            resourceUri: event.resourceUri || "",
+            data: JSON.stringify(event.payload || {}),
+            payload: JSON.stringify(event.payload || {}),
+          },
+        });
+      });
+      void syncMcpTriggerSubscriptions();
+      setupTriggerHandlers(triggerService, syncMcpTriggerSubscriptions);
       MailboxAutomationHub.configure({
         triggerService,
         heartbeatService,
