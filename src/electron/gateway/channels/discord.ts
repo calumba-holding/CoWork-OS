@@ -137,8 +137,8 @@ export class DiscordAdapter implements ChannelAdapter {
 
       // Handle regular messages (for conversations)
       this.client.on(Events.MessageCreate, async (message) => {
-        // Ignore bot messages
-        if (message.author.bot) return;
+        const shouldForwardBotMessage = this.shouldForwardBotMessage(message);
+        if (message.author.bot && !shouldForwardBotMessage) return;
 
         // Handle DMs and mentions in guilds
         const isDM = message.channel.type === DiscordChannelType.DM;
@@ -149,8 +149,17 @@ export class DiscordAdapter implements ChannelAdapter {
           `Discord message received: isDM=${isDM}, isMentioned=${isMentioned}, isThread=${isThread}, content="${message.content.slice(0, 50)}"`,
         );
 
-        if (isDM || isMentioned) {
+        const isSupervisorBotMessage = message.author.bot && shouldForwardBotMessage;
+        if (isDM || isMentioned || isSupervisorBotMessage) {
           const incomingMessage = this.mapMessageToIncoming(message);
+          if (isSupervisorBotMessage) {
+            incomingMessage.ingestOnly = true;
+            incomingMessage.metadata = {
+              ...(incomingMessage.metadata || {}),
+              discordSupervisorCandidate: true,
+              authorIsBot: true,
+            };
+          }
           console.log(
             `Processing Discord message from ${message.author.username}: ${incomingMessage.text.slice(0, 50)}`,
           );
@@ -436,6 +445,16 @@ export class DiscordAdapter implements ChannelAdapter {
     }
 
     return lastMessageId;
+  }
+
+  async sendDirectMessageToUser(userId: string, text: string): Promise<string> {
+    if (!this.client || this._status !== "connected") {
+      throw new Error("Discord bot is not connected");
+    }
+    const user = await this.client.users.fetch(userId);
+    const dm = await user.createDM();
+    const sent = await dm.send({ content: text });
+    return sent.id;
   }
 
   /**
@@ -740,6 +759,10 @@ export class DiscordAdapter implements ChannelAdapter {
    */
   onMessage(handler: MessageHandler): void {
     this.messageHandlers.push(handler);
+  }
+
+  updateConfig(config: DiscordConfig): void {
+    this.config = config;
   }
 
   /**
@@ -1249,6 +1272,10 @@ export class DiscordAdapter implements ChannelAdapter {
       replyTo: message.reference?.messageId,
       threadId,
       isForumTopic: isThread,
+      metadata: {
+        discordChannelId: message.channelId,
+        discordAuthorIsBot: message.author.bot,
+      },
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
       raw: message,
     };
@@ -1338,6 +1365,20 @@ export class DiscordAdapter implements ChannelAdapter {
         );
       }
     }
+  }
+
+  private shouldForwardBotMessage(message: Message): boolean {
+    const supervisor = this.config.supervisor;
+    if (!supervisor?.enabled) return false;
+
+    const peerIds = new Set((supervisor.peerBotUserIds || []).filter(Boolean));
+    if (!peerIds.has(message.author.id)) return false;
+
+    const watched = new Set([
+      supervisor.coordinationChannelId,
+      ...(supervisor.watchedChannelIds || []),
+    ].filter(Boolean));
+    return watched.has(message.channelId);
   }
 
   private handleError(error: Error, context?: string): void {
