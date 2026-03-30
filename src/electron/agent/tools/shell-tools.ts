@@ -5,6 +5,10 @@ import { Workspace, CommandTerminationReason } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { GuardrailManager } from "../../guardrails/guardrail-manager";
 import { BuiltinToolsSettingsManager, type RunCommandApprovalMode } from "./builtin-settings";
+import {
+  ShellSessionManager,
+  isLikelyInteractiveCommand,
+} from "./shell-session-manager";
 
 /**
  * Strip ANSI/VT control sequences and normalize line endings produced by the
@@ -761,6 +765,69 @@ export class ShellTools {
       command,
       cwd: options?.cwd || this.workspace.path,
     });
+
+    const persistentShellAllowed =
+      process.platform !== "win32" &&
+      !isLikelyInteractiveCommand(command) &&
+      !/^(?:\s*)(?:script|apply_patch)\b/i.test(command);
+    if (persistentShellAllowed) {
+      try {
+        const persistentResult = await ShellSessionManager.getInstance().runCommand({
+          taskId: this.taskId,
+          workspaceId: this.workspace.id,
+          workspacePath: this.workspace.path,
+          command,
+          cwd: options?.cwd,
+          timeoutMs: Math.min(options?.timeout || DEFAULT_TIMEOUT, MAX_TIMEOUT),
+          fallbackRunner: async () => ({
+            success: false,
+            stdout: "",
+            stderr: "Persistent shell fallback requested.",
+            exitCode: null,
+            terminationReason: "error",
+            truncated: false,
+          }),
+        });
+        if (persistentResult.sessionEvent) {
+          this.daemon.logEvent(
+            this.taskId,
+            `shell_session_${persistentResult.sessionEvent.action}`,
+            persistentResult.sessionEvent,
+          );
+        }
+        if (persistentResult.usedPersistentSession) {
+          return {
+            success: persistentResult.success,
+            stdout: this.sanitizeCommandOutput(persistentResult.stdout),
+            stderr: this.sanitizeCommandOutput(persistentResult.stderr),
+            exitCode: persistentResult.exitCode,
+            truncated: persistentResult.truncated,
+            terminationReason: persistentResult.terminationReason,
+          };
+        }
+      } catch (error) {
+        // Log a fallback event using real session info if available, otherwise skip.
+        const realSession = ShellSessionManager.getInstance().getSessionInfo(
+          this.taskId,
+          this.workspace.id,
+        );
+        if (realSession) {
+          this.daemon.logEvent(this.taskId, "shell_session_updated", {
+            action: "updated",
+            taskId: this.taskId,
+            workspaceId: this.workspace.id,
+            session: {
+              ...realSession,
+              status: "fallback" as const,
+              lastError: error instanceof Error ? error.message : String(error),
+              updatedAt: Date.now(),
+            },
+            reason: "persistent_shell_fallback",
+            timestamp: Date.now(),
+          });
+        }
+      }
+    }
 
     const timeout = Math.min(options?.timeout || DEFAULT_TIMEOUT, MAX_TIMEOUT);
 
