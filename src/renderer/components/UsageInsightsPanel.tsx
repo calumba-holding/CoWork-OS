@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Workspace } from "../../shared/types";
+import { UsageInsightsLlmSection } from "./UsageInsightsLlmSection";
 
 interface TaskMetrics {
   totalCreated: number;
@@ -9,11 +10,49 @@ interface TaskMetrics {
   avgCompletionTimeMs: number | null;
 }
 
+interface CostByModelRow {
+  model: string;
+  cost: number;
+  calls: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedTokens?: number;
+  distinctTasks?: number;
+}
+
 interface CostMetrics {
   totalCost: number;
   totalInputTokens: number;
   totalOutputTokens: number;
-  costByModel: Array<{ model: string; cost: number; calls: number }>;
+  costByModel: CostByModelRow[];
+}
+
+interface LlmSummary {
+  totalLlmCalls: number;
+  totalCost: number;
+  chargeableCallRate: number | null;
+  avgTokensPerCall: number | null;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedTokens: number;
+  cacheReadRate: number | null;
+  distinctTaskCount: number;
+}
+
+interface RequestDayRow {
+  dateKey: string;
+  llmCalls: number;
+  cost: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+}
+
+interface ProviderSlice {
+  provider: string;
+  calls: number;
+  cost: number;
+  percent: number;
 }
 
 interface ExecutionMetrics {
@@ -69,6 +108,35 @@ interface UsageInsightsData {
   topSkills: Array<{ skill: string; count: number }>;
   awuMetrics: AwuMetrics;
   formatted: string;
+  llmSuccessRate?: number | null;
+  llmSummary?: LlmSummary;
+  requestsByDay?: RequestDayRow[];
+  providerBreakdown?: ProviderSlice[];
+  personaMetrics?: Array<{
+    personaId: string;
+    personaName: string;
+    total: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    successRate: number;
+    avgCompletionTimeMs: number | null;
+    avgAttempts: number | null;
+    totalCost: number;
+  }>;
+  feedbackMetrics?: {
+    totalFeedback: number;
+    accepted: number;
+    rejected: number;
+    satisfactionRate: number | null;
+    topRejectionReasons: Array<{ reason: string; count: number }>;
+  };
+  retryMetrics?: {
+    avgAttempts: number | null;
+    retriedTasks: number;
+    retriedRate: number | null;
+    maxAttempts: number;
+  };
 }
 
 interface UsageInsightsPanelProps {
@@ -109,19 +177,65 @@ interface PackSkillMap {
 
 const ALL_WORKSPACES = "__all__";
 
+type PeriodPreset = 7 | 14 | 30 | 90 | 180 | 365 | "custom";
+const PERIOD_PRESETS: { value: PeriodPreset; label: string }[] = [
+  { value: 7, label: "7d" },
+  { value: 14, label: "14d" },
+  { value: 30, label: "30d" },
+  { value: 90, label: "90d" },
+  { value: 180, label: "6mo" },
+  { value: 365, label: "1y" },
+  { value: "custom", label: "Custom" },
+];
+
+function toISODate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function daysBetween(start: string, end: string): number {
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  return Math.max(1, Math.round(ms / 86_400_000));
+}
+
 function isValidWorkspaceId(id: string | undefined): id is string {
   return !!id && (id === ALL_WORKSPACES || !id.startsWith("__temp_workspace__"));
 }
 
 export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageInsightsPanelProps) {
   const [data, setData] = useState<UsageInsightsData | null>(null);
-  const [periodDays, setPeriodDays] = useState(7);
+  const [selectedPreset, setSelectedPreset] = useState<PeriodPreset>(7);
+  const [customStart, setCustomStart] = useState(() => toISODate(new Date(Date.now() - 30 * 86_400_000)));
+  const [customEnd, setCustomEnd] = useState(() => toISODate(new Date()));
+  const [showCustomPicker, setShowCustomPicker] = useState(false);
+  const customPickerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [packAnalytics, setPackAnalytics] = useState<PackSkillMap[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>(ALL_WORKSPACES);
   const [workspacesLoading, setWorkspacesLoading] = useState(true);
+  const [dataAgeDays, setDataAgeDays] = useState<number | null>(null);
+
+  const periodDays = useMemo(
+    () => (selectedPreset === "custom" ? daysBetween(customStart, customEnd) : selectedPreset),
+    [selectedPreset, customStart, customEnd],
+  );
+
+  const visiblePresets = useMemo(() => {
+    if (dataAgeDays === null) return PERIOD_PRESETS;
+    return PERIOD_PRESETS.filter(
+      ({ value }) => value === "custom" || value <= Math.max(dataAgeDays, 7),
+    );
+  }, [dataAgeDays]);
+
+  useEffect(() => {
+    if (selectedPreset === "custom") return;
+    const stillVisible = visiblePresets.some(({ value }) => value === selectedPreset);
+    if (!stillVisible) {
+      const largest = visiblePresets.filter(({ value }) => value !== "custom").pop();
+      if (largest) setSelectedPreset(largest.value as Exclude<PeriodPreset, "custom">);
+    }
+  }, [visiblePresets, selectedPreset]);
 
   const workspaceId = selectedWorkspaceId;
 
@@ -159,12 +273,40 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
   }, [workspaceId, periodDays]);
 
   useEffect(() => {
+    if (!showCustomPicker) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (customPickerRef.current && !customPickerRef.current.contains(e.target as Node)) {
+        setShowCustomPicker(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showCustomPicker]);
+
+  useEffect(() => {
     void loadWorkspaces();
   }, [loadWorkspaces]);
 
   useEffect(() => {
     setData(null);
     setPackAnalytics([]);
+    if (!isValidWorkspaceId(workspaceId)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const earliest = await window.electronAPI.getUsageInsightsEarliest(workspaceId);
+        if (cancelled) return;
+        if (earliest !== null) {
+          const age = Math.ceil((Date.now() - earliest) / 86_400_000);
+          setDataAgeDays(age);
+        } else {
+          setDataAgeDays(null);
+        }
+      } catch {
+        setDataAgeDays(null);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [workspaceId]);
 
   useEffect(() => {
@@ -227,7 +369,7 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
 
   if (workspacesLoading) {
     return (
-      <div className="settings-panel">
+      <div className="settings-panel insights-panel">
         <h2>Usage Insights</h2>
         <p className="settings-description">Loading workspaces\u2026</p>
       </div>
@@ -236,7 +378,7 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
 
   if (workspaces.length === 0) {
     return (
-      <div className="settings-panel">
+      <div className="settings-panel insights-panel">
         <h2>Usage Insights</h2>
         <p className="settings-description">No workspaces found. Create a workspace first.</p>
       </div>
@@ -245,7 +387,7 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
 
   if (!isValidWorkspaceId(workspaceId)) {
     return (
-      <div className="settings-panel">
+      <div className="settings-panel insights-panel">
         <h2>Usage Insights</h2>
         <p className="settings-description">Select a workspace to view usage insights.</p>
       </div>
@@ -254,7 +396,7 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
 
   if (loading && !data) {
     return (
-      <div className="settings-panel">
+      <div className="settings-panel insights-panel">
         <h2>Usage Insights</h2>
         <p className="settings-description">Loading\u2026</p>
       </div>
@@ -263,7 +405,7 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
 
   if (error) {
     return (
-      <div className="settings-panel">
+      <div className="settings-panel insights-panel">
         <h2>Usage Insights</h2>
         <p className="settings-description" style={{ color: "var(--color-error, #ef4444)" }}>
           {error}
@@ -280,6 +422,9 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
   const em = data?.executionMetrics;
   const ap = data?.activityPattern;
   const awu = data?.awuMetrics;
+  const personaMetrics = data?.personaMetrics ?? [];
+  const feedbackMetrics = data?.feedbackMetrics;
+  const retryMetrics = data?.retryMetrics;
   const modelRows = cm?.costByModel ?? [];
   const hasModelCost = modelRows.some((m) => m.cost > 0);
   const modelBarMax =
@@ -295,7 +440,7 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
     tm && tm.totalCreated > 0 ? Math.round((tm.completed / tm.totalCreated) * 100) : 0;
 
   return (
-    <div className="settings-panel">
+    <div className="settings-panel insights-panel">
       {/* Header with workspace and period inline */}
       <div className="insights-header">
         <div className="insights-header-left">
@@ -314,16 +459,72 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
               ))}
             </select>
             <div className="insights-period-filter">
-              {[7, 14, 30].map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  className={`insights-period-btn${periodDays === d ? " active" : ""}`}
-                  onClick={() => setPeriodDays(d)}
-                >
-                  {d}d
-                </button>
-              ))}
+              {visiblePresets.map(({ value, label }) =>
+                value === "custom" ? (
+                  <div key="custom" className="insights-period-custom-wrap" ref={customPickerRef}>
+                    <button
+                      type="button"
+                      className={`insights-period-btn${selectedPreset === "custom" ? " active" : ""}`}
+                      onClick={() => {
+                        if (selectedPreset === "custom") {
+                          setShowCustomPicker((v) => !v);
+                        } else {
+                          setSelectedPreset("custom");
+                          setShowCustomPicker(true);
+                        }
+                      }}
+                    >
+                      {selectedPreset === "custom"
+                        ? `${customStart} – ${customEnd}`
+                        : label}
+                    </button>
+                    {showCustomPicker && (
+                      <div className="insights-custom-picker">
+                        <label className="insights-custom-picker-label">
+                          From
+                          <input
+                            type="date"
+                            className="insights-custom-picker-input"
+                            value={customStart}
+                            max={customEnd}
+                            onChange={(e) => setCustomStart(e.target.value)}
+                          />
+                        </label>
+                        <label className="insights-custom-picker-label">
+                          To
+                          <input
+                            type="date"
+                            className="insights-custom-picker-input"
+                            value={customEnd}
+                            min={customStart}
+                            max={toISODate(new Date())}
+                            onChange={(e) => setCustomEnd(e.target.value)}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="insights-period-btn active insights-custom-picker-apply"
+                          onClick={() => setShowCustomPicker(false)}
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`insights-period-btn${selectedPreset === value ? " active" : ""}`}
+                    onClick={() => {
+                      setSelectedPreset(value);
+                      setShowCustomPicker(false);
+                    }}
+                  >
+                    {label}
+                  </button>
+                ),
+              )}
             </div>
           </div>
         </div>
@@ -380,6 +581,117 @@ export function UsageInsightsPanel({ workspaceId: initialWorkspaceId }: UsageIns
             <div className="insights-hero-sub">per task</div>
           </div>
         </div>
+      )}
+
+      {data && (personaMetrics.length > 0 || feedbackMetrics || retryMetrics) && (
+        <div className="insights-two-col">
+          {personaMetrics.length > 0 && (
+            <div className="insights-card">
+              <div className="insights-card-header">Persona Performance</div>
+              <div>
+                {personaMetrics.slice(0, 5).map((persona) => (
+                  <div key={persona.personaId} className="insights-bar-row">
+                    <span className="insights-bar-label" style={{ minWidth: 140 }}>
+                      {persona.personaName}
+                    </span>
+                    <MiniBar value={persona.successRate} max={100} />
+                    <span className="insights-bar-value" style={{ minWidth: 54 }}>
+                      {persona.successRate.toFixed(0)}%
+                    </span>
+                    <span className="insights-model-calls" style={{ minWidth: 92 }}>
+                      ${persona.totalCost.toFixed(4)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="insights-runtime-note">
+                {personaMetrics[0]?.total ?? 0} tasks for top persona
+              </div>
+            </div>
+          )}
+
+          {(feedbackMetrics || retryMetrics) && (
+            <div className="insights-card">
+              <div className="insights-card-header">Feedback & Quality</div>
+              <div className="insights-runtime-grid">
+                <div className="insights-runtime-metric">
+                  <span className="insights-runtime-value">
+                    {feedbackMetrics?.satisfactionRate !== null &&
+                    feedbackMetrics?.satisfactionRate !== undefined
+                      ? `${feedbackMetrics.satisfactionRate.toFixed(0)}%`
+                      : "\u2014"}
+                  </span>
+                  <span className="insights-runtime-label">Satisfaction</span>
+                </div>
+                <div className="insights-runtime-metric">
+                  <span className="insights-runtime-value">{feedbackMetrics?.totalFeedback ?? 0}</span>
+                  <span className="insights-runtime-label">Feedback events</span>
+                </div>
+                <div className="insights-runtime-metric">
+                  <span className="insights-runtime-value">{retryMetrics?.retriedTasks ?? 0}</span>
+                  <span className="insights-runtime-label">Retried tasks</span>
+                </div>
+                <div className="insights-runtime-metric">
+                  <span className="insights-runtime-value">
+                    {retryMetrics?.avgAttempts !== null && retryMetrics?.avgAttempts !== undefined
+                      ? retryMetrics.avgAttempts.toFixed(1)
+                      : "\u2014"}
+                  </span>
+                  <span className="insights-runtime-label">Avg attempts</span>
+                </div>
+              </div>
+              {feedbackMetrics && feedbackMetrics.topRejectionReasons.length > 0 && (
+                <>
+                  <div className="insights-runtime-section-label">Top rejection reasons</div>
+                  <div>
+                    {feedbackMetrics.topRejectionReasons.map((item) => (
+                      <div key={item.reason} className="insights-bar-row">
+                        <span className="insights-bar-label" style={{ minWidth: 140 }}>
+                          {item.reason}
+                        </span>
+                        <MiniBar
+                          value={item.count}
+                          max={feedbackMetrics.topRejectionReasons[0]?.count || 1}
+                        />
+                        <span className="insights-bar-value">{item.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {data && (
+        <UsageInsightsLlmSection
+          llmSummary={
+            data.llmSummary ?? {
+              totalLlmCalls: 0,
+              totalCost: 0,
+              chargeableCallRate: null,
+              avgTokensPerCall: null,
+              totalInputTokens: 0,
+              totalOutputTokens: 0,
+              totalCachedTokens: 0,
+              cacheReadRate: null,
+              distinctTaskCount: 0,
+            }
+          }
+          llmSuccessRate={data.llmSuccessRate ?? null}
+          requestsByDay={data.requestsByDay ?? []}
+          providerBreakdown={data.providerBreakdown ?? []}
+          costByModel={(data.costMetrics?.costByModel ?? []).map((m) => ({
+            model: m.model,
+            cost: m.cost,
+            calls: m.calls,
+            inputTokens: m.inputTokens ?? 0,
+            outputTokens: m.outputTokens ?? 0,
+            cachedTokens: m.cachedTokens ?? 0,
+            distinctTasks: m.distinctTasks ?? 0,
+          }))}
+        />
       )}
 
       {/* Token/Runtime + AWU row */}
