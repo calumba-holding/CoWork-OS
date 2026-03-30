@@ -3,7 +3,7 @@
  *
  * Registers Electron globalShortcut intercepts for key combos that could
  * disrupt a computer use session. The guard is enabled when the CUA session
- * starts and disabled when it ends.
+ * starts and disabled when the session ends.
  *
  * Limitation: Electron's globalShortcut cannot intercept all macOS system
  * shortcuts (e.g. Cmd+Tab, Cmd+Space are handled by the OS before Electron
@@ -28,6 +28,8 @@ const INTERCEPTABLE_SHORTCUTS = [
 export class ShortcutGuard {
   private registeredAccelerators: string[] = [];
   private _active = false;
+  private escapeRegistered = false;
+  private onEscapePress: (() => void) | null = null;
 
   get isActive(): boolean {
     return this._active;
@@ -36,10 +38,12 @@ export class ShortcutGuard {
   /**
    * Start intercepting dangerous shortcuts.
    * Intercepted shortcuts are silently swallowed (no-op handler).
+   * @param onEscape - Called when Escape is pressed (abort computer use).
    */
-  enable(): void {
+  enable(onEscape?: () => void): void {
     if (this._active) return;
     this._active = true;
+    this.onEscapePress = onEscape ?? null;
 
     for (const accelerator of INTERCEPTABLE_SHORTCUTS) {
       try {
@@ -53,6 +57,20 @@ export class ShortcutGuard {
         // Some accelerators may not be registerable on certain OS versions — skip
       }
     }
+
+    if (this.onEscapePress) {
+      try {
+        const ok = globalShortcut.register("Escape", () => {
+          this.onEscapePress?.();
+        });
+        if (ok) {
+          this.escapeRegistered = true;
+          this.registeredAccelerators.push("Escape");
+        }
+      } catch {
+        // Escape may fail to register if another app reserved it
+      }
+    }
   }
 
   /**
@@ -61,6 +79,8 @@ export class ShortcutGuard {
   disable(): void {
     if (!this._active) return;
     this._active = false;
+    this.onEscapePress = null;
+    this.escapeRegistered = false;
 
     for (const accelerator of this.registeredAccelerators) {
       try {
