@@ -30,6 +30,10 @@ export function TelegramSettings({ onStatusChange }: TelegramSettingsProps) {
   const [botToken, setBotToken] = useState("");
   const [channelName, setChannelName] = useState("Telegram Bot");
   const [securityMode, setSecurityMode] = useState<SecurityMode>("pairing");
+  const [groupRoutingMode, setGroupRoutingMode] = useState<
+    "all" | "mentionsOnly" | "mentionsOrCommands" | "commandsOnly"
+  >("mentionsOrCommands");
+  const [allowedGroupChatIds, setAllowedGroupChatIds] = useState("");
 
   // Pairing code state
   const [pairingCode, setPairingCode] = useState<string | null>(null);
@@ -52,6 +56,22 @@ export function TelegramSettings({ onStatusChange }: TelegramSettingsProps) {
         setChannel(telegramChannel);
         setChannelName(telegramChannel.name);
         setSecurityMode(telegramChannel.securityMode);
+        setGroupRoutingMode(
+          ((telegramChannel.config.groupRoutingMode as
+            | "all"
+            | "mentionsOnly"
+            | "mentionsOrCommands"
+            | "commandsOnly") || "mentionsOrCommands") as
+            | "all"
+            | "mentionsOnly"
+            | "mentionsOrCommands"
+            | "commandsOnly",
+        );
+        setAllowedGroupChatIds(
+          Array.isArray(telegramChannel.config.allowedGroupChatIds)
+            ? (telegramChannel.config.allowedGroupChatIds as string[]).join(", ")
+            : "",
+        );
         onStatusChange?.(telegramChannel.status === "connected");
 
         // Load users for this channel
@@ -102,6 +122,11 @@ export function TelegramSettings({ onStatusChange }: TelegramSettingsProps) {
         type: "telegram",
         name: channelName,
         botToken: botToken.trim(),
+        groupRoutingMode,
+        telegramAllowedGroupChatIds: allowedGroupChatIds
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean),
         securityMode,
       });
 
@@ -230,6 +255,30 @@ export function TelegramSettings({ onStatusChange }: TelegramSettingsProps) {
     }
   };
 
+  const handleUpdateRoutingSettings = async () => {
+    if (!channel) return;
+    try {
+      setSaving(true);
+      const nextConfig = {
+        ...channel.config,
+        groupRoutingMode,
+        allowedGroupChatIds: allowedGroupChatIds
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean),
+      };
+      await window.electronAPI.updateGatewayChannel({
+        id: channel.id,
+        config: nextConfig,
+      });
+      setChannel({ ...channel, config: nextConfig });
+    } catch (error: Any) {
+      setTestResult({ success: false, error: error.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading) {
     return <div className="settings-loading">Loading Telegram settings...</div>;
   }
@@ -285,6 +334,39 @@ export function TelegramSettings({ onStatusChange }: TelegramSettingsProps) {
                 "Only pre-approved Telegram user IDs can use the bot"}
               {securityMode === "open" &&
                 "Anyone who messages the bot can use it (not recommended)"}
+            </p>
+          </div>
+
+          <div className="settings-field">
+            <label>Group Routing</label>
+            <select
+              className="settings-select"
+              value={groupRoutingMode}
+              onChange={(e) =>
+                setGroupRoutingMode(
+                  e.target.value as "all" | "mentionsOnly" | "mentionsOrCommands" | "commandsOnly",
+                )
+              }
+            >
+              <option value="mentionsOrCommands">Mentions or slash commands</option>
+              <option value="mentionsOnly">Mentions or replies only</option>
+              <option value="commandsOnly">Slash commands only</option>
+              <option value="all">All group messages</option>
+            </select>
+            <p className="settings-hint">Use stricter routing in busy Telegram groups.</p>
+          </div>
+
+          <div className="settings-field">
+            <label>Allowed Group Chat IDs (Optional)</label>
+            <input
+              type="text"
+              className="settings-input"
+              placeholder="-10012345, -10067890"
+              value={allowedGroupChatIds}
+              onChange={(e) => setAllowedGroupChatIds(e.target.value)}
+            />
+            <p className="settings-hint">
+              Comma-separated group IDs allowed to trigger the bot. Leave blank to allow any group.
             </p>
           </div>
 
@@ -366,6 +448,43 @@ export function TelegramSettings({ onStatusChange }: TelegramSettingsProps) {
           <option value="allowlist">Allowlist Only</option>
           <option value="open">Open</option>
         </select>
+      </div>
+
+      <div className="settings-section">
+        <h4>Group Routing</h4>
+        <div className="settings-field">
+          <label>Routing Rule</label>
+          <select
+            className="settings-select"
+            value={groupRoutingMode}
+            onChange={(e) =>
+              setGroupRoutingMode(
+                e.target.value as "all" | "mentionsOnly" | "mentionsOrCommands" | "commandsOnly",
+              )
+            }
+          >
+            <option value="mentionsOrCommands">Mentions or slash commands</option>
+            <option value="mentionsOnly">Mentions or replies only</option>
+            <option value="commandsOnly">Slash commands only</option>
+            <option value="all">All group messages</option>
+          </select>
+        </div>
+        <div className="settings-field">
+          <label>Allowed Group Chat IDs</label>
+          <input
+            type="text"
+            className="settings-input"
+            placeholder="-10012345, -10067890"
+            value={allowedGroupChatIds}
+            onChange={(e) => setAllowedGroupChatIds(e.target.value)}
+          />
+          <p className="settings-hint">
+            Restrict routing to specific groups if you want tighter control.
+          </p>
+        </div>
+        <button className="button-secondary" onClick={handleUpdateRoutingSettings} disabled={saving}>
+          {saving ? "Saving..." : "Save Routing Settings"}
+        </button>
       </div>
 
       {securityMode === "pairing" && (
