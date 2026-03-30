@@ -44,6 +44,14 @@ If you see `Killed: 9` during `npm run setup`, macOS terminated a native build d
 npm run setup
 ```
 
+## Computer use (macOS) issues
+
+If **screenshots fail or time out**, grant **Screen Recording** for CoWork OS in **System Settings → Privacy & Security**, then **quit and restart** the app. If **clicks or typing do nothing**, enable **Accessibility** for CoWork OS the same way.
+
+If the agent **never uses** `computer_*` tools, confirm **Settings → Tools → Built-in tools** includes the **computer use** category, and phrase tasks as **native app / window / dialog** work (not pure browser or CLI tasks).
+
+See the full guide: [Computer use (macOS)](computer-use.md).
+
 ## Windows native setup fails (`better-sqlite3`)
 
 If first launch exits after:
