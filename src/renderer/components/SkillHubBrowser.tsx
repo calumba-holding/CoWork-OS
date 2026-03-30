@@ -6,6 +6,98 @@ import {
   SkillStatusEntry,
 } from "../../shared/types";
 
+const compactNumberFormatter = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+function isLikelyGitSkillSource(rawValue: string): boolean {
+  const value = rawValue.trim();
+  if (!value) {
+    return false;
+  }
+
+  if (/^git@/i.test(value) || /^github:/i.test(value)) {
+    return true;
+  }
+
+  if (!/^https?:\/\//i.test(value)) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+    const pathParts = parsed.pathname.replace(/\/+$/g, "").split("/").filter(Boolean);
+    const lastSegment = pathParts[pathParts.length - 1]?.toLowerCase() || "";
+    return lastSegment.endsWith(".git") || host === "github.com" || host.endsWith(".github.com");
+  } catch {
+    return false;
+  }
+}
+
+function formatCompactCount(value?: number): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return compactNumberFormatter.format(value);
+}
+
+function isClawHubSkillSource(rawValue: string): boolean {
+  const value = rawValue.trim();
+  if (!value) {
+    return false;
+  }
+
+  if (/^clawhub:/i.test(value)) {
+    return true;
+  }
+
+  if (!/^https?:\/\//i.test(value)) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+    const pathParts = parsed.pathname.replace(/\/+$/g, "").split("/").filter(Boolean);
+    return host === "clawhub.ai" && pathParts.length >= 2 && pathParts[0] !== "skills";
+  } catch {
+    return false;
+  }
+}
+
+function getClawHubSlug(rawValue: string): string | null {
+  const value = rawValue.trim();
+  if (!value) {
+    return null;
+  }
+
+  if (/^clawhub:/i.test(value)) {
+    const slug = value.slice("clawhub:".length).trim().toLowerCase();
+    return slug || null;
+  }
+
+  if (!/^https?:\/\//i.test(value)) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+    if (host !== "clawhub.ai") {
+      return null;
+    }
+    const pathParts = parsed.pathname.replace(/\/+$/g, "").split("/").filter(Boolean);
+    if (pathParts.length === 0 || pathParts[0] === "skills") {
+      return null;
+    }
+    return pathParts[pathParts.length - 1]?.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
 interface SkillHubBrowserProps {
   onSkillInstalled?: (skill: CustomSkill) => void;
   onClose?: () => void;
@@ -15,16 +107,21 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SkillRegistryEntry[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [clawHubQuery, setClawHubQuery] = useState("");
+  const [clawHubResults, setClawHubResults] = useState<SkillRegistryEntry[]>([]);
+  const [isSearchingClawHub, setIsSearchingClawHub] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<SkillRegistryEntry | null>(null);
   const [installedSkills, setInstalledSkills] = useState<Set<string>>(new Set());
   const [skillStatus, setSkillStatus] = useState<SkillStatusReport | null>(null);
   const [installing, setInstalling] = useState<string | null>(null);
+  const [externalSource, setExternalSource] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"browse" | "installed" | "status">("installed");
+  const [activeTab, setActiveTab] = useState<"browse" | "clawhub" | "installed" | "status">(
+    "installed",
+  );
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Load installed skills and status on mount
   useEffect(() => {
     loadSkillStatus();
   }, []);
@@ -37,11 +134,16 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
       const status = await window.electronAPI.getSkillStatus();
       setSkillStatus(status);
 
-      // Build set of installed skill IDs
       const installed = new Set<string>();
       status.skills.forEach((skill) => {
         if (skill.source === "managed") {
           installed.add(skill.id);
+          const clawHubSlug =
+            getClawHubSlug(skill.metadata?.homepage || "") ||
+            getClawHubSlug(skill.metadata?.repository || "");
+          if (clawHubSlug) {
+            installed.add(clawHubSlug);
+          }
         }
       });
       setInstalledSkills(installed);
@@ -79,6 +181,59 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
     }
   }, [searchQuery]);
 
+  const handleClawHubSearch = useCallback(async () => {
+    setIsSearchingClawHub(true);
+    setError(null);
+
+    try {
+      const trimmed = clawHubQuery.trim();
+      const result = await window.electronAPI.searchClawHubSkills(
+        trimmed,
+        trimmed ? undefined : { pageSize: 10 },
+      );
+      setClawHubResults(result.results);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "ClawHub search failed";
+      setError(message);
+      setClawHubResults([]);
+    } finally {
+      setIsSearchingClawHub(false);
+    }
+  }, [clawHubQuery]);
+
+  useEffect(() => {
+    if (activeTab !== "clawhub" || clawHubQuery.trim()) {
+      return;
+    }
+
+    void handleClawHubSearch();
+  }, [activeTab, clawHubQuery, handleClawHubSearch]);
+
+  const renderStatsLine = (skill: SkillRegistryEntry) => {
+    const stars = formatCompactCount(skill.stars);
+    const downloads = formatCompactCount(skill.downloads);
+    const installsCurrent = formatCompactCount(skill.installsCurrent);
+    const installsAllTime = formatCompactCount(skill.installsAllTime);
+    const parts = [
+      stars ? `⭐ ${stars}` : null,
+      downloads ? `${downloads} downloads` : null,
+      installsCurrent ? `${installsCurrent} current installs` : null,
+      installsAllTime ? `${installsAllTime} all-time installs` : null,
+    ].filter((value): value is string => Boolean(value));
+
+    if (parts.length === 0) {
+      return null;
+    }
+
+    return <p className="skillhub-meta">{parts.join(" · ")}</p>;
+  };
+
+  const installSucceeded = async (skill: CustomSkill) => {
+    setInstalledSkills((prev) => new Set([...prev, skill.id]));
+    onSkillInstalled?.(skill);
+    await loadSkillStatus();
+  };
+
   const handleInstall = async (skillId: string) => {
     setInstalling(skillId);
     setError(null);
@@ -87,14 +242,64 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
       const result = await window.electronAPI.installSkillFromRegistry(skillId);
 
       if (result.success && result.skill) {
-        setInstalledSkills((prev) => new Set([...prev, skillId]));
-        onSkillInstalled?.(result.skill);
-        await loadSkillStatus();
+        await installSucceeded(result.skill);
       } else {
         setError(result.error || "Installation failed");
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Installation failed";
+      setError(message);
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const handleClawHubInstall = async (skillId: string) => {
+    setInstalling(skillId);
+    setError(null);
+
+    try {
+      const result = await window.electronAPI.installSkillFromClawHub(skillId);
+
+      if (result.success && result.skill) {
+        await installSucceeded(result.skill);
+      } else {
+        setError(result.error || "Installation failed");
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Installation failed";
+      setError(message);
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const handleExternalInstall = async () => {
+    const source = externalSource.trim();
+    if (!source) {
+      setError("Paste a Git repository, ClawHub URL, or raw skill URL first");
+      return;
+    }
+
+    setInstalling("__external__");
+    setError(null);
+
+    try {
+      const result = isClawHubSkillSource(source)
+        ? await window.electronAPI.installSkillFromClawHub(source)
+        : isLikelyGitSkillSource(source)
+          ? await window.electronAPI.installSkillFromGit(source)
+          : await window.electronAPI.installSkillFromUrl(source);
+
+      if (result.success && result.skill) {
+        setExternalSource("");
+        await installSucceeded(result.skill);
+        setActiveTab("installed");
+      } else {
+        setError(result.error || "Import failed");
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Import failed";
       setError(message);
     } finally {
       setInstalling(null);
@@ -147,12 +352,107 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
     return <span className="settings-badge settings-badge--neutral">Missing Requirements</span>;
   };
 
-  const renderBrowseTab = () => (
-    <div className="skillhub-tab">
+  const renderSearchResults = (
+    results: SkillRegistryEntry[],
+    onInstall: (skillId: string) => void,
+  ) => (
+    <div className="skillhub-list">
+      {results.map((skill) => (
+        <div
+          key={`${skill.source || "cowork"}:${skill.id}`}
+          className={`settings-card skillhub-card ${selectedSkill?.id === skill.id ? "is-selected" : ""}`}
+          onClick={() => setSelectedSkill(skill)}
+        >
+          <div className="skillhub-card-header">
+            <div className="skillhub-card-info">
+              <span className="skillhub-icon">{skill.icon || "📦"}</span>
+              <div>
+                <div className="skillhub-title-row">
+                  <h4 className="skillhub-title">{skill.name}</h4>
+                  {skill.source === "clawhub" && (
+                    <span className="settings-badge settings-badge--outline">ClawHub</span>
+                  )}
+                </div>
+                <p className="settings-description skillhub-description">{skill.description}</p>
+                {(skill.author || skill.version) && (
+                  <p className="skillhub-meta">
+                    {skill.author ? `${skill.author} · ` : ""}
+                    v{skill.version}
+                  </p>
+                )}
+                {renderStatsLine(skill)}
+              </div>
+            </div>
+            <div className="skillhub-card-actions">
+              {installedSkills.has(skill.id) ? (
+                <span className="settings-badge settings-badge--success">Installed</span>
+              ) : (
+                <button
+                  className="button-primary button-small"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onInstall(skill.id);
+                  }}
+                  disabled={installing === skill.id}
+                >
+                  {installing === skill.id ? "Installing..." : "Install"}
+                </button>
+              )}
+            </div>
+          </div>
+          {skill.tags && skill.tags.length > 0 && (
+            <div className="skillhub-tags">
+              {skill.tags.map((tag) => (
+                <span key={tag} className="settings-badge settings-badge--outline">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+
+  const renderExternalImportCard = () => (
+    <div className="settings-card">
+      <div className="settings-section-header">
+        <div>
+          <h4>Import External Skill</h4>
+          <p className="settings-description">
+            Paste a Git repository, ClawHub skill page URL, raw skill JSON URL, or raw{" "}
+            <code>SKILL.md</code> URL to bring third-party skills into CoWork OS.
+          </p>
+        </div>
+      </div>
       <div className="input-with-button">
         <input
           type="text"
-          placeholder="Search skills..."
+          placeholder="https://clawhub.ai/owner/skill or https://github.com/org/skill-repo"
+          className="settings-input"
+          value={externalSource}
+          onChange={(e) => setExternalSource(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleExternalInstall()}
+        />
+        <button
+          className="button-primary button-small"
+          onClick={handleExternalInstall}
+          disabled={installing === "__external__"}
+        >
+          {installing === "__external__" ? "Installing..." : "Import"}
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderBrowseTab = () => (
+    <div className="skillhub-tab">
+      {renderExternalImportCard()}
+
+      <div className="input-with-button">
+        <input
+          type="text"
+          placeholder="Search CoWork registry..."
           className="settings-input"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
@@ -167,58 +467,79 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
         </button>
       </div>
 
-      {searchResults.length > 0 ? (
-        <div className="skillhub-list">
-          {searchResults.map((skill) => (
-            <div
-              key={skill.id}
-              className={`settings-card skillhub-card ${selectedSkill?.id === skill.id ? "is-selected" : ""}`}
-              onClick={() => setSelectedSkill(skill)}
-            >
-              <div className="skillhub-card-header">
-                <div className="skillhub-card-info">
-                  <span className="skillhub-icon">{skill.icon || "📦"}</span>
-                  <div>
-                    <div className="skillhub-title-row">
-                      <h4 className="skillhub-title">{skill.name}</h4>
-                    </div>
-                    <p className="settings-description skillhub-description">{skill.description}</p>
-                  </div>
-                </div>
-                <div className="skillhub-card-actions">
-                  {installedSkills.has(skill.id) ? (
-                    <span className="settings-badge settings-badge--success">Installed</span>
-                  ) : (
-                    <button
-                      className="button-primary button-small"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleInstall(skill.id);
-                      }}
-                      disabled={installing === skill.id}
-                    >
-                      {installing === skill.id ? "Installing..." : "Install"}
-                    </button>
-                  )}
-                </div>
-              </div>
-              {skill.tags && skill.tags.length > 0 && (
-                <div className="skillhub-tags">
-                  {skill.tags.map((tag) => (
-                    <span key={tag} className="settings-badge settings-badge--outline">
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      ) : searchQuery && !isSearching ? (
-        <div className="settings-empty">No skills found. Try a different search term.</div>
+      {searchQuery && !isSearching ? (
+        searchResults.length > 0 ? (
+          renderSearchResults(searchResults, handleInstall)
+        ) : (
+          <div className="settings-empty">No skills found. Try a different search term.</div>
+        )
+      ) : searchQuery && isSearching ? (
+        <div className="settings-empty">Searching registry...</div>
       ) : (
         <div className="settings-empty">
-          Search the SkillHub registry to discover and install new skills.
+          Search the CoWork registry to discover and install curated skills.
+        </div>
+      )}
+    </div>
+  );
+
+  const renderClawHubTab = () => (
+    <div className="skillhub-tab">
+      {renderExternalImportCard()}
+
+      <div className="settings-card">
+        <div className="settings-section-header">
+          <div>
+            <h4>Browse ClawHub</h4>
+            <p className="settings-description">
+              Search live ClawHub skills and install them directly.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="input-with-button">
+        <input
+          type="text"
+          placeholder="Search ClawHub skills..."
+          className="settings-input"
+          value={clawHubQuery}
+          onChange={(e) => setClawHubQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleClawHubSearch()}
+        />
+        <button
+          className="button-secondary button-small"
+          onClick={handleClawHubSearch}
+          disabled={isSearchingClawHub}
+        >
+          {isSearchingClawHub ? "Searching..." : "Search"}
+        </button>
+      </div>
+
+      {!clawHubQuery.trim() && clawHubResults.length > 0 && !isSearchingClawHub && (
+        <div className="settings-section-header">
+          <div>
+            <h4>Top Downloads</h4>
+            <p className="settings-description">
+              The 10 most-downloaded public ClawHub skills right now.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {clawHubResults.length > 0 && !isSearchingClawHub ? (
+        renderSearchResults(clawHubResults, handleClawHubInstall)
+      ) : clawHubQuery && !isSearchingClawHub ? (
+        <div className="settings-empty">
+          No ClawHub skills found. Try the exact slug, or paste the ClawHub page URL above.
+        </div>
+      ) : isSearchingClawHub ? (
+        <div className="settings-empty">
+          {clawHubQuery.trim() ? "Searching ClawHub..." : "Loading popular ClawHub skills..."}
+        </div>
+      ) : (
+        <div className="settings-empty">
+          Search ClawHub by name or slug, or paste a ClawHub page URL above.
         </div>
       )}
     </div>
@@ -230,7 +551,7 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
     return (
       <div className="skillhub-tab">
         <div className="settings-section-header">
-          <h3>Installed from Registry</h3>
+          <h3>Installed Skills</h3>
           <div className="settings-section-actions">
             <button className="button-secondary button-small" onClick={handleOpenFolder}>
               Open Folder
@@ -249,6 +570,9 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
                       <div className="skillhub-title-row">
                         <h4 className="skillhub-title">{skill.name}</h4>
                         {getStatusBadge(skill)}
+                        {skill.category === "ClawHub" && (
+                          <span className="settings-badge settings-badge--outline">ClawHub</span>
+                        )}
                       </div>
                       <p className="settings-description skillhub-description">
                         {skill.description}
@@ -282,9 +606,9 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
           </div>
         ) : (
           <div className="settings-empty">
-            No skills installed from registry yet.
+            No managed skills installed yet.
             <br />
-            Browse the registry to discover and install skills.
+            Browse the registry, ClawHub, or import a bundle to add one.
           </div>
         )}
       </div>
@@ -347,7 +671,6 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
     );
   };
 
-  // Show initial loading state
   if (isLoadingStatus) {
     return <div className="settings-loading">Loading skills...</div>;
   }
@@ -359,7 +682,7 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
           <div>
             <h3>SkillHub</h3>
             <p className="settings-description">
-              Search the SkillHub registry to discover and install new skills.
+              Manage curated skills, browse ClawHub, and import third-party skill bundles.
             </p>
           </div>
           <div className="settings-section-actions">
@@ -399,7 +722,13 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
           className={`settings-tab ${activeTab === "browse" ? "active" : ""}`}
           onClick={() => setActiveTab("browse")}
         >
-          Browse Registry
+          CoWork Registry
+        </button>
+        <button
+          className={`settings-tab ${activeTab === "clawhub" ? "active" : ""}`}
+          onClick={() => setActiveTab("clawhub")}
+        >
+          ClawHub
         </button>
         <button
           className={`settings-tab ${activeTab === "status" ? "active" : ""}`}
@@ -411,6 +740,7 @@ export function SkillHubBrowser({ onSkillInstalled, onClose }: SkillHubBrowserPr
 
       <div className="skillhub-tab-content">
         {activeTab === "browse" && renderBrowseTab()}
+        {activeTab === "clawhub" && renderClawHubTab()}
         {activeTab === "installed" && renderInstalledTab()}
         {activeTab === "status" && renderStatusTab()}
       </div>
