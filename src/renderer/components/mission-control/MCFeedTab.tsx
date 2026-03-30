@@ -17,7 +17,7 @@ export function MCFeedTab({ data }: MCFeedTabProps) {
   const {
     agents, feedItems, feedFilter, setFeedFilter,
     selectedAgent, setSelectedAgent, getAgent,
-    setDetailPanel, formatRelativeTime, agentContext,
+    setDetailPanel, formatRelativeTime, agentContext, isAllWorkspacesSelected,
   } = data;
 
   const activeAgents = agents.filter((a) => a.isActive);
@@ -64,14 +64,19 @@ export function MCFeedTab({ data }: MCFeedTabProps) {
                 style={item.taskId ? { cursor: "pointer" } : undefined}
               >
                 <div className="mc-v2-feed-item-header">
-                  {agent ? (
-                    <span className="mc-v2-feed-agent" style={{ color: agent.color }}>
-                      {(() => { const Icon = getEmojiIcon(agent.icon || "🤖"); return <Icon size={14} strokeWidth={2} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />; })()}
-                      {agent.displayName}
-                    </span>
-                  ) : item.agentName ? (
-                    <span className="mc-v2-feed-agent system">{item.agentName}</span>
-                  ) : null}
+                  <div className="mc-v2-feed-item-meta">
+                    {agent ? (
+                      <span className="mc-v2-feed-agent" style={{ color: agent.color }}>
+                        {(() => { const Icon = getEmojiIcon(agent.icon || "🤖"); return <Icon size={14} strokeWidth={2} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />; })()}
+                        {agent.displayName}
+                      </span>
+                    ) : item.agentName ? (
+                      <span className="mc-v2-feed-agent system">{item.agentName}</span>
+                    ) : null}
+                    {isAllWorkspacesSelected && item.workspaceName ? (
+                      <span className="mc-v2-workspace-tag">{item.workspaceName}</span>
+                    ) : null}
+                  </div>
                   <span className="mc-v2-feed-time">{formatRelativeTime(item.timestamp)}</span>
                 </div>
                 <div className="mc-v2-feed-content">{item.content}</div>
