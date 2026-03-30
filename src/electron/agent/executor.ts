@@ -76,7 +76,7 @@ import { sanitizeToolCallHistory } from "./llm/openai-compatible";
 import { getCustomSkillLoader } from "./custom-skill-loader";
 import { MemoryService } from "../memory/MemoryService";
 import { PlaybookService } from "../memory/PlaybookService";
-import { HermesParityService } from "./HermesParityService";
+import { RuntimeVisibilityService } from "./RuntimeVisibilityService";
 import { UserProfileService } from "../memory/UserProfileService";
 import { KnowledgeGraphService } from "../knowledge-graph/KnowledgeGraphService";
 import { MemorySynthesizer } from "../memory/MemorySynthesizer";
@@ -84,6 +84,7 @@ import { IntentRouter } from "./strategy/IntentRouter";
 import { TaskStrategyService } from "./strategy/TaskStrategyService";
 import { CitationTracker } from "./citation/CitationTracker";
 import { WorkflowDecomposer } from "./strategy/WorkflowDecomposer";
+import { WorkflowPipeline } from "./strategy/WorkflowPipeline";
 import { scorePlanStepIntentAlignment, scoreStepIntentOverlap } from "./step-intent-alignment";
 import { buildWorkspaceKitContext } from "../memory/WorkspaceKitContext";
 import { MemoryFeaturesManager } from "../settings/memory-features-manager";
@@ -152,6 +153,7 @@ import {
   evaluateToolAvailability,
   evaluateToolPolicy,
   filterToolsByPolicy,
+  hasNativeDesktopGuiIntent,
   normalizeExecutionMode,
   normalizeTaskDomain,
 } from "./tool-policy-engine";
@@ -596,10 +598,10 @@ const isLLMImageContent = (block: LLMContent): block is LLMImageContent => {
  * Supports both Anthropic API and AWS Bedrock
  */
 export class TaskExecutor {
-  private provider: LLMProvider;
+  private provider!: LLMProvider;
   private toolRegistry: ToolRegistry;
   private sandboxRunner: SandboxRunner;
-  private contextManager: ContextManager;
+  private contextManager!: ContextManager;
   private toolFailureTracker: ToolFailureTracker;
   private toolCallDeduplicator: ToolCallDeduplicator;
   private fileOperationTracker: FileOperationTracker;
@@ -637,8 +639,8 @@ export class TaskExecutor {
     message?: string;
   } | null = null;
   private plan?: Plan;
-  private modelId: string;
-  private modelKey: string;
+  private modelId!: string;
+  private modelKey!: string;
   private llmProfileUsed: LlmProfile = "cheap";
   private resolvedModelKey: string = "";
   private conversationHistory: LLMMessage[] = [];
@@ -3970,6 +3972,10 @@ ${transcript}
   private acpxRuntimeRunner: AcpxRuntimeRunner | null = null;
   private lastRoutingState: LLMRoutingRuntimeState | null = null;
   private cachedLlmSettings: ReturnType<typeof LLMProviderFactory.loadSettings> | null = null;
+  private providerFailoverSelections: Array<
+    ReturnType<typeof LLMProviderFactory.resolveTaskModelSelection>
+  > = [];
+  private providerFailoverIndex = 0;
 
   /** Expose workspace ID for daemon to refresh executors when permissions change. */
   getWorkspaceId(): string {
@@ -4241,32 +4247,22 @@ ${transcript}
     this.shouldPauseForRequiredDecision =
       allowUserInput && pauseForRequiredDecision && !task.parentTaskId && (task.agentType ?? "main") === "main";
     this.windowStartEventCount = this.daemon.getTaskEvents(this.task.id).length;
+    const isVerificationTask =
+      task.agentConfig?.verificationAgent === true ||
+      /^verify\s*:/i.test(task.title) ||
+      /^verification\s*:/i.test(task.title);
+    this.cachedLlmSettings = LLMProviderFactory.loadSettings();
     const llmSelection = LLMProviderFactory.resolveTaskModelSelection(task.agentConfig, {
-      isVerificationTask:
-        task.agentConfig?.verificationAgent === true ||
-        /^verify\s*:/i.test(task.title) ||
-        /^verification\s*:/i.test(task.title),
+      isVerificationTask,
     });
-
-    // Initialize LLM provider using the resolved provider/model route.
-    this.provider = LLMProviderFactory.createProvider({
-      type: llmSelection.providerType,
-      model: llmSelection.modelId,
-    });
-
-    this.modelId = llmSelection.modelId;
-    this.modelKey = llmSelection.modelKey;
-    this.llmProfileUsed = llmSelection.llmProfileUsed;
-    this.resolvedModelKey = llmSelection.resolvedModelKey;
+    this.applyResolvedProviderSelection(llmSelection);
+    this.rebuildProviderFailoverSelections(llmSelection, this.llmProfileUsed);
 
     if (llmSelection.warnings.length > 0) {
       for (const warning of llmSelection.warnings) {
         console.warn(`${this.logTag} ${warning}`);
       }
     }
-
-    // Initialize context manager for handling long conversations
-    this.contextManager = new ContextManager(this.modelKey);
 
     // Initialize tool registry
     this.toolRegistry = new ToolRegistry(
@@ -4315,10 +4311,10 @@ ${transcript}
     this.fileOperationTracker = new FileOperationTracker();
 
     console.log(
-      `${this.logTag} TaskExecutor initialized with ${llmSelection.providerType}, model: ${this.modelId}, profile: ${this.llmProfileUsed}, source: ${llmSelection.modelSource}`,
+      `${this.logTag} TaskExecutor initialized with ${llmSelection.providerType}, model: ${llmSelection.modelId}, profile: ${this.llmProfileUsed}, source: ${llmSelection.modelSource}`,
     );
     this.emitEvent("log", {
-      message: `LLM route selected: provider=${llmSelection.providerType}, profile=${this.llmProfileUsed}, source=${llmSelection.modelSource}, model=${this.modelId}`,
+      message: `LLM route selected: provider=${llmSelection.providerType}, profile=${this.llmProfileUsed}, source=${llmSelection.modelSource}, model=${llmSelection.modelId}`,
       llmProfileUsed: this.llmProfileUsed,
       resolvedModelKey: this.resolvedModelKey,
       modelSource: llmSelection.modelSource,
@@ -4332,7 +4328,7 @@ ${transcript}
             : "automatic_execution",
       fallbackChain: [],
       fallbackOccurred: false,
-      manualOverride: Boolean(task.agentConfig?.modelKey),
+      manualOverride: this.hasExplicitTaskRouteOverride(),
     });
   }
 
@@ -4794,48 +4790,27 @@ ${transcript}
     maxRetries = 5,
   ): Promise<Any> {
     const llmCallId = ++this.llmCallSequence;
+    const maxAttempts =
+      maxRetries + 1 + Math.max(0, (this.providerFailoverSelections?.length || 1) - 1);
     console.log(
-      `${this.logTag}[LLM ${llmCallId}] start: ${operation} (max attempts: ${maxRetries + 1})`,
+      `${this.logTag}[LLM ${llmCallId}] start: ${operation} (max attempts: ${maxAttempts})`,
     );
     let lastError: Error | null = null;
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const attemptNumber = attempt + 1;
       const attemptStart = Date.now();
       try {
         if (attempt > 0) {
           const delay = calculateBackoffDelay(attempt - 1);
           console.log(
-            `${this.logTag} Retry attempt ${attempt}/${maxRetries} for ${operation} after ${delay}ms`,
+            `${this.logTag} Retry attempt ${attempt}/${maxAttempts - 1} for ${operation} after ${delay}ms`,
           );
-          const retryReason =
-            typeof lastError?.message === "string"
-              ? lastError.message.toLowerCase().includes("rate limit")
-                ? "quota"
-                : lastError.message.toLowerCase().includes("timeout")
-                  ? "provider_outage"
-                  : "fallback"
-              : "fallback";
           this.emitEvent("llm_retry", {
             operation,
             attempt,
-            maxRetries,
+            maxRetries: maxAttempts - 1,
             delayMs: delay,
-          });
-          this.emitRoutingState({
-            routeReason: retryReason as LLMRoutingReason,
-            fallbackOccurred: true,
-            fallbackChain: [
-              ...(this.lastRoutingState?.fallbackChain || []),
-              {
-                providerType: this.provider.type,
-                modelKey: this.modelKey,
-                reason: retryReason,
-                attemptedAt: Date.now(),
-                success: false,
-                error: lastError?.message || undefined,
-              },
-            ],
           });
           await sleep(delay);
         }
@@ -4859,9 +4834,30 @@ ${transcript}
 
         console.log(
           `${this.logTag}[LLM ${llmCallId}] success: ${operation} ` +
-            `(attempt ${attemptNumber}/${maxRetries + 1}, ${elapsedMs}ms, stopReason=${stopReason || "unknown"}, blocks=${contentBlocks}` +
+            `(attempt ${attemptNumber}/${maxAttempts}, ${elapsedMs}ms, stopReason=${stopReason || "unknown"}, blocks=${contentBlocks}` +
             `${totalTokens !== undefined ? `, tokens=${totalTokens}` : ""})`,
         );
+        if (this.lastRoutingState?.fallbackOccurred) {
+          const fallbackChain = this.lastRoutingState.fallbackChain || [];
+          const lastStep = fallbackChain[fallbackChain.length - 1];
+          if (
+            !lastStep ||
+            lastStep.providerType !== this.provider.type ||
+            lastStep.modelKey !== this.modelKey ||
+            lastStep.success !== true
+          ) {
+            this.appendRoutingFallbackStep(
+              {
+                providerType: this.provider.type,
+                modelKey: this.modelKey,
+                reason: this.lastRoutingState.routeReason || "fallback",
+                attemptedAt: Date.now(),
+                success: true,
+              },
+              this.lastRoutingState.routeReason || "fallback",
+            );
+          }
+        }
         return response;
       } catch (error: Any) {
         lastError = error;
@@ -4873,7 +4869,7 @@ ${transcript}
         if (isCancellation || error.name === "AbortError" || isNonRetryableLLMError(error.message)) {
           console.log(
             `${this.logTag}[LLM ${llmCallId}] terminal failure: ${operation} ` +
-              `(attempt ${attemptNumber}/${maxRetries + 1}, ${elapsedMs}ms, cancellation=${isCancellation}) -> ${errorMessage}`,
+              `(attempt ${attemptNumber}/${maxAttempts}, ${elapsedMs}ms, cancellation=${isCancellation}) -> ${errorMessage}`,
           );
           throw error;
         }
@@ -4903,13 +4899,34 @@ ${transcript}
           error.status === 502 ||
           error.status === 504;
 
-        if (!isRetryable || attempt === maxRetries) {
+        const retryReason = this.getRetryRouteReason(error);
+        if (isRetryable && this.failoverToNextProvider(retryReason, error)) {
+          console.warn(
+            `${this.logTag}[LLM ${llmCallId}] failover: ${operation} ` +
+              `(attempt ${attemptNumber}/${maxAttempts}) -> ${this.provider.type}/${this.modelId}`,
+          );
+          continue;
+        }
+
+        if (!isRetryable || attempt === maxAttempts - 1) {
           console.log(
             `${this.logTag}[LLM ${llmCallId}] terminal failure: ${operation} ` +
-              `(attempt ${attemptNumber}/${maxRetries + 1}, ${elapsedMs}ms, retryable=${isRetryable}) -> ${errorMessage}`,
+              `(attempt ${attemptNumber}/${maxAttempts}, ${elapsedMs}ms, retryable=${isRetryable}) -> ${errorMessage}`,
           );
           throw error;
         }
+
+        this.appendRoutingFallbackStep(
+          {
+            providerType: this.provider.type,
+            modelKey: this.modelKey,
+            reason: retryReason,
+            attemptedAt: Date.now(),
+            success: false,
+            error: errorMessage,
+          },
+          retryReason,
+        );
 
         this.emitEvent("log", {
           metric: "llm_retry_reason",
@@ -6529,7 +6546,7 @@ ${transcript}
 
     // Persist usage to task events so it can be exported/audited later.
     // Store totals (not just deltas) so consumers can just take the most recent record.
-    if (safeInput > 0 || safeOutput > 0 || deltaCost > 0) {
+    if (safeInput > 0 || safeOutput > 0 || safeCached > 0 || deltaCost > 0) {
       const cumulativeInput = this.getCumulativeInputTokens();
       const cumulativeOutput = this.getCumulativeOutputTokens();
       const cumulativeCost = this.getCumulativeCost();
@@ -6541,6 +6558,7 @@ ${transcript}
         delta: {
           inputTokens: safeInput,
           outputTokens: safeOutput,
+          cachedTokens: safeCached,
           totalTokens: safeInput + safeOutput,
           cost: deltaCost,
         },
@@ -9175,7 +9193,7 @@ ${transcript}
         }
       }
 
-      const learningProgress = HermesParityService.buildLearningProgress({
+      const learningProgress = RuntimeVisibilityService.buildLearningProgress({
         task: this.task,
         outcome:
           outcome === "success"
@@ -9985,6 +10003,7 @@ ${transcript}
     stepContract: StepExecutionContract,
     stepKind: "analysis" | "mutation_required" | "verification",
     taskDomain: TaskDomain,
+    stepText?: string,
   ): Set<string> {
     const always = new Set<string>([
       "revise_plan",
@@ -10076,6 +10095,14 @@ ${transcript}
       base.add("get_video_generation_job");
       base.add("cancel_video_generation_job");
     }
+    if (hasNativeDesktopGuiIntent(String(stepText || "").toLowerCase())) {
+      base.add("open_application");
+      base.add("computer_screenshot");
+      base.add("computer_click");
+      base.add("computer_type");
+      base.add("computer_key");
+      base.add("computer_move_mouse");
+    }
     return base;
   }
 
@@ -10095,15 +10122,17 @@ ${transcript}
       : this.isVerificationStepForCompletion(step)
         ? "verification"
         : "analysis";
+    const stepText = `${this.task.title || ""}\n${step.description || ""}\n${this.task.prompt || ""}\n${this.lastUserMessage || ""}\n${this.lastAssistantOutput || ""}`;
     const allowlist = this.buildStepToolAllowlist(
       stepContract,
       stepKind,
       this.getEffectiveTaskDomain(),
+      stepText,
     );
-    const stepText = `${step.description || ""}\n${this.task.prompt || ""}\n${this.lastAssistantOutput || ""}`.toLowerCase();
+    const normalizedStepText = stepText.toLowerCase();
     const mcpReferenced =
       /\bmcp[_\s-]|connector|slack|salesforce|jira|linear|notion|github|postgres|mysql|hubspot\b/.test(
-        stepText,
+        normalizedStepText,
       );
 
     const scoped = tools.filter((tool) => {
@@ -17244,6 +17273,55 @@ You are continuing a previous conversation. The context from the previous conver
               phaseCount: phases.length,
               phases: phases.map((p) => ({ type: p.phaseType, prompt: p.prompt.slice(0, 100) })),
             });
+            if (this.task.agentConfig?.useWorkflowPipeline === true && !this.task.parentTaskId) {
+              const currentDepth = this.task.depth ?? 0;
+              const pipeline = new WorkflowPipeline(
+                this.task.id,
+                this.task.workspaceId,
+                phases,
+                {
+                  createChildTask: async (params) => {
+                    const child = await this.daemon.createChildTask({
+                      title: params.title,
+                      prompt: params.prompt,
+                      workspaceId: params.workspaceId,
+                      parentTaskId: params.parentTaskId,
+                      agentType: "sub",
+                      depth: currentDepth + 1,
+                      agentConfig: {
+                        autonomousMode: true,
+                        allowUserInput: false,
+                        conversationMode: "task",
+                        ...(params.agentConfig || {}),
+                      },
+                    });
+                    return { id: child.id };
+                  },
+                  getTaskStatus: async (taskId) => {
+                    const task = await this.daemon.getTaskById(taskId);
+                    return {
+                      status: task?.status || "failed",
+                      resultSummary: task?.resultSummary,
+                    };
+                  },
+                  log: (...args: unknown[]) => console.log(`${this.logTag} [WorkflowPipeline]`, ...args),
+                },
+              );
+              const pipelineResult = await pipeline.execute();
+              if (pipelineResult.status === "completed") {
+                const summary = pipelineResult.phases
+                  .map((phase) =>
+                    [`## ${phase.title}`, phase.output || "_No output captured._"].join("\n"),
+                  )
+                  .join("\n\n");
+                this.finalizeTaskBestEffort(
+                  summary,
+                  "Workflow pipeline completed via sequential child tasks.",
+                );
+                return;
+              }
+              throw new Error(pipelineResult.error || "Workflow pipeline failed");
+            }
             // Augment the task prompt with decomposition context
             const phaseList = phases
               .map((p, i) => `  Phase ${i + 1} (${p.phaseType}): ${p.prompt.slice(0, 120)}`)
@@ -17673,7 +17751,7 @@ PLANNING RULES:
 
 RESILIENCE RULES:
 - Do not stop at "cannot be done" when fallbacks exist.
-- Fallback chain: available tools -> custom skills -> run_command -> run_applescript -> browser automation.
+ - Fallback chain: available tools -> custom skills -> MCP/API connectors -> browser automation (browser_*) for websites -> run_command for CLI/local commands -> computer_* for native macOS GUI tasks -> run_applescript only as an explicit AppleScript path or low-level fallback.
 - Ask the user only when blocked by permissions/credentials/policy or missing required path after search.
 
 WORKSPACE + PATH DISCOVERY:
@@ -17692,6 +17770,8 @@ SKILL + TOOL ROUTING (CRITICAL):
 - Only use a custom skill when the Custom Skills section lists it. Do NOT invent or guess skill IDs that are not shown.
 - For general research start with web_search; for a known URL prefer web_fetch; use browser tools for interactive/JS pages.
 - Never use run_command curl/wget for web access.
+ - COMPUTER USE (computer_*): macOS-only. Preferred for native apps, simulators, menu bar apps, System Settings, Finder, and other GUI-only tools. For native GUI work, launch with open_application if needed, then use computer_screenshot before computer_click / computer_type / computer_key. Do NOT use computer_* for ordinary websites — use browser_navigate and browser_* instead. Prefer MCP tools when an integration exists.
+ - RUN_APPLESCRIPT: Use only when the user explicitly requests AppleScript / osascript, or when computer_* cannot complete a specific macOS automation step and you need a low-level fallback. Do NOT pick run_applescript first for normal native app interaction.
 
 DIAGRAM + VISUALIZATION ROUTING (CRITICAL):
 - For ANY diagram, flowchart, chart, graph, architecture diagram, sequence diagram, mind map, timeline, ERD, Gantt chart, or other visualization: use create_diagram — NOT an HTML file.
@@ -18049,6 +18129,9 @@ Return ONLY a JSON object:
           },
         ],
       });
+      if (response.usage) {
+        this.updateTracking(response.usage.inputTokens, response.usage.outputTokens, response.usage.cachedTokens);
+      }
       const text = (response.content || [])
         .filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
         .map((b) => b.text)
@@ -19313,6 +19396,7 @@ WEB RESEARCH & TOOL SELECTION (CRITICAL):
 - For reading SPECIFIC URLs: USE web_fetch - lightweight, doesn't require browser.
 - For INTERACTIVE pages or JavaScript content: USE browser_navigate + browser_get_content.
 - For SCREENSHOTS: USE browser_navigate + browser_screenshot.
+- For NATIVE macOS UI (not a web page): after browser/shell/MCP are ruled out, use computer_screenshot then computer_click / computer_type as needed; expect per-app session approval.
 - NEVER use run_command with curl or wget for general web research when web_search/web_fetch/browser tools can do the job.
 - Network diagnostics for troubleshooting (for example: ping, nc, ssh, traceroute) are allowed when relevant.
 
@@ -19384,11 +19468,12 @@ You have an extremely wide toolkit. When a task seems outside your abilities, us
 1. Check your available tools — you have 100+ tools; the right one may exist under a different name than expected.
 2. Check custom skills — use skill_list to see if a skill already covers this workflow.
 3. Use run_command — the shell is a universal escape hatch. If it can be done from a terminal, you can do it (npm, python, curl, ffmpeg, git, brew, etc.).
-4. Use run_applescript — for macOS GUI automation: control apps, click UI elements, manage windows, interact with System Preferences, automate Finder, etc.
-5. Use browser tools — any web-based task can be automated: fill forms, click buttons, extract data, take screenshots.
-6. Combine tools creatively — chain multiple tools to solve novel problems. Example: web_search to find info → write_file to save it → run_command to process it → gmail_action to email the result.
-7. Create a skill — if this is a recurring need the user might have again, use skill_create to make a reusable workflow.
-8. Suggest MCP integration — if the gap is an entire service/API (e.g., Jira, HubSpot, Salesforce), mention that CoWork OS supports MCP servers and the user can connect one in Settings.
+4. Use browser tools — any web-based task can be automated: fill forms, click buttons, extract data, take screenshots.
+5. Use computer_* — for native macOS GUI automation: interact with Calculator, Notes, Finder, System Settings, Xcode, Simulator, menu bar apps, and other desktop-only tools. Prefer this over AppleScript for normal GUI interaction.
+6. Use run_applescript — only for explicit AppleScript requests or as a low-level macOS fallback when computer_* cannot complete a specific step.
+7. Combine tools creatively — chain multiple tools to solve novel problems. Example: web_search to find info → write_file to save it → run_command to process it → gmail_action to email the result.
+8. Create a skill — if this is a recurring need the user might have again, use skill_create to make a reusable workflow.
+9. Suggest MCP integration — if the gap is an entire service/API (e.g., Jira, HubSpot, Salesforce), mention that CoWork OS supports MCP servers and the user can connect one in Settings.
 - NEVER say "I can't do that" without trying at least 2-3 approaches from this chain first.
 - When you solve a problem creatively, briefly explain your approach so the user learns what's possible.
 
@@ -24193,6 +24278,127 @@ TASK / CONVERSATION HISTORY:
     this._suppressNextUserMessageEvent = true;
   }
 
+  private isVerificationTaskRoute(): boolean {
+    return (
+      this.task.agentConfig?.verificationAgent === true ||
+      /^verify\s*:/i.test(this.task.title) ||
+      /^verification\s*:/i.test(this.task.title)
+    );
+  }
+
+  private hasExplicitTaskRouteOverride(): boolean {
+    return Boolean(this.task.agentConfig?.providerType || this.task.agentConfig?.modelKey);
+  }
+
+  private applyResolvedProviderSelection(
+    selection: ReturnType<typeof LLMProviderFactory.resolveTaskModelSelection>,
+  ): void {
+    this.provider = LLMProviderFactory.createProvider({
+      type: selection.providerType,
+      model: selection.modelId,
+    });
+    this.modelId = selection.modelId;
+    this.modelKey = selection.modelKey;
+    this.llmProfileUsed = selection.llmProfileUsed;
+    this.resolvedModelKey = selection.resolvedModelKey;
+    this.contextManager = new ContextManager(this.modelKey);
+  }
+
+  private rebuildProviderFailoverSelections(
+    primarySelection: ReturnType<typeof LLMProviderFactory.resolveTaskModelSelection>,
+    forceProfile?: LlmProfile,
+  ): void {
+    this.providerFailoverSelections = LLMProviderFactory.resolveProviderFailoverChain(
+      primarySelection,
+      this.task.agentConfig,
+      {
+        forceProfile,
+        isVerificationTask: this.isVerificationTaskRoute(),
+      },
+    );
+    this.providerFailoverIndex = 0;
+  }
+
+  private getRetryRouteReason(error: Any): LLMRoutingReason {
+    const message = String(error?.message || "").toLowerCase();
+    if (error?.status === 429 || message.includes("rate limit") || message.includes("quota")) {
+      return "quota";
+    }
+    if (
+      message.includes("timeout") ||
+      message.includes("timed out") ||
+      message.includes("network") ||
+      message.includes("econnreset") ||
+      message.includes("etimedout") ||
+      message.includes("enotfound") ||
+      message.includes("eai_again") ||
+      message.includes("econnrefused") ||
+      error?.status === 408 ||
+      error?.status === 502 ||
+      error?.status === 503 ||
+      error?.status === 504
+    ) {
+      return "provider_outage";
+    }
+    return "fallback";
+  }
+
+  private appendRoutingFallbackStep(
+    step: LLMRoutingFallbackStep,
+    routeReason: LLMRoutingReason,
+  ): LLMRoutingFallbackStep[] {
+    const fallbackChain = [...(this.lastRoutingState?.fallbackChain || []), step];
+    this.emitRoutingState({
+      routeReason,
+      fallbackOccurred: true,
+      fallbackChain,
+      manualOverride: this.hasExplicitTaskRouteOverride(),
+    });
+    return fallbackChain;
+  }
+
+  private failoverToNextProvider(routeReason: LLMRoutingReason, error: Any): boolean {
+    const nextSelection = this.providerFailoverSelections[this.providerFailoverIndex + 1];
+    if (!nextSelection) {
+      return false;
+    }
+
+    const previousProvider = this.provider.type;
+    const previousModelKey = this.modelKey;
+    this.appendRoutingFallbackStep(
+      {
+        providerType: previousProvider,
+        modelKey: previousModelKey,
+        reason: routeReason,
+        attemptedAt: Date.now(),
+        success: false,
+        error: error?.message || undefined,
+      },
+      routeReason,
+    );
+
+    this.providerFailoverIndex += 1;
+    this.applyResolvedProviderSelection(nextSelection);
+    this.emitRoutingState({
+      routeReason,
+      fallbackOccurred: true,
+      fallbackChain: this.lastRoutingState?.fallbackChain || [],
+      manualOverride: this.hasExplicitTaskRouteOverride(),
+    });
+    this.emitEvent("log", {
+      message:
+        `LLM failover activated: provider=${nextSelection.providerType}, ` +
+        `model=${nextSelection.modelId}, previousProvider=${previousProvider}, ` +
+        `reason=${routeReason}`,
+      routeReason,
+      previousProvider,
+      previousModelKey,
+      nextProvider: nextSelection.providerType,
+      nextModel: nextSelection.modelId,
+    });
+    return true;
+  }
+
   private emitRoutingState(overrides?: {
     routeReason?: LLMRoutingReason;
     fallbackChain?: LLMRoutingFallbackStep[];
@@ -24200,7 +24406,7 @@ TASK / CONVERSATION HISTORY:
     manualOverride?: boolean;
   }): void {
     const settings = this.cachedLlmSettings ?? LLMProviderFactory.loadSettings();
-    const route = HermesParityService.buildRoutingState(settings, {
+    const route = RuntimeVisibilityService.buildRoutingState(settings, {
       task: {
         title: this.task.title,
         prompt: this.task.prompt,
@@ -24208,17 +24414,17 @@ TASK / CONVERSATION HISTORY:
         source: this.task.source,
         status: this.task.status,
       },
-      isVerificationTask:
-        this.task.agentConfig?.verificationAgent === true ||
-        /^verify\s*:/i.test(this.task.title) ||
-        /^verification\s*:/i.test(this.task.title),
+      isVerificationTask: this.isVerificationTaskRoute(),
     });
     const state: LLMRoutingRuntimeState = {
       ...route,
+      activeProvider: this.provider?.type || route.activeProvider,
+      activeModel: this.modelId || route.activeModel,
+      profileHint: this.llmProfileUsed || route.profileHint,
       routeReason: overrides?.routeReason || route.routeReason,
       fallbackChain: overrides?.fallbackChain || route.fallbackChain,
       fallbackOccurred: overrides?.fallbackOccurred ?? route.fallbackOccurred,
-      manualOverride: overrides?.manualOverride ?? route.manualOverride,
+      manualOverride: overrides?.manualOverride ?? this.hasExplicitTaskRouteOverride(),
       updatedAt: Date.now(),
     };
     this.lastRoutingState = state;
@@ -24255,10 +24461,7 @@ TASK / CONVERSATION HISTORY:
     const desiredProfile = forceProfile || this.llmProfileUsed;
     const newSelection = LLMProviderFactory.resolveTaskModelSelection(selectionConfig, {
       forceProfile: desiredProfile,
-      isVerificationTask:
-        this.task.agentConfig?.verificationAgent === true ||
-        /^verify\s*:/i.test(this.task.title) ||
-        /^verification\s*:/i.test(this.task.title),
+      isVerificationTask: this.isVerificationTaskRoute(),
     });
 
     if (
@@ -24269,15 +24472,8 @@ TASK / CONVERSATION HISTORY:
         `${this.logTag} Provider/model changed mid-session: ${this.provider.type}/${this.modelId} → ${newSelection.providerType}/${newSelection.modelId}`,
       );
       try {
-        this.provider = LLMProviderFactory.createProvider({
-          type: newSelection.providerType,
-          model: newSelection.modelId,
-        });
-        this.modelId = newSelection.modelId;
-        this.modelKey = newSelection.modelKey;
-        this.llmProfileUsed = newSelection.llmProfileUsed;
-        this.resolvedModelKey = newSelection.resolvedModelKey;
-        this.contextManager = new ContextManager(this.modelKey);
+        this.applyResolvedProviderSelection(newSelection);
+        this.rebuildProviderFailoverSelections(newSelection, desiredProfile);
         this.emitEvent("log", {
           message:
             `LLM provider updated mid-session: provider=${newSelection.providerType}, ` +
@@ -24287,7 +24483,7 @@ TASK / CONVERSATION HISTORY:
           routeReason: providerChangedInSettings ? "profile_routing" : "manual_override",
           fallbackChain: [],
           fallbackOccurred: false,
-          manualOverride: Boolean(this.task.agentConfig?.modelKey),
+          manualOverride: this.hasExplicitTaskRouteOverride(),
         });
       } catch (err: Any) {
         console.warn(
@@ -24296,11 +24492,12 @@ TASK / CONVERSATION HISTORY:
       }
     } else if (newSelection.llmProfileUsed !== this.llmProfileUsed) {
       this.llmProfileUsed = newSelection.llmProfileUsed;
+      this.rebuildProviderFailoverSelections(newSelection, desiredProfile);
       this.emitRoutingState({
         routeReason: providerChangedInSettings ? "profile_routing" : "manual_override",
         fallbackChain: [],
         fallbackOccurred: false,
-        manualOverride: Boolean(this.task.agentConfig?.modelKey),
+        manualOverride: this.hasExplicitTaskRouteOverride(),
       });
     }
   }
