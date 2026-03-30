@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Runtime visibility docs**: added a dedicated runtime-upgrade page plus cross-links from the docs home, features catalog, Mission Control, comparison docs, README, and project status pages so the visible learning loop, unified recall, shell persistence, and router observability are discoverable from the main surfaces.
+
 ### Changed
 - **Renderer performance**: in the `CoWork-OS/CoWork-OS` repo, sidebar rows now flatten before virtualization, timeline cards use `@chenglou/pretext` estimates with `ResizeObserver` reconciliation, and the main transcript cap stays conservative until the transcript surface is virtualized.
 
