@@ -785,7 +785,6 @@ export const TOOL_GROUPS = {
     "channel_download_discord_attachment",
     // Session scratchpad (read)
     "scratchpad_read",
-    "batch_image_process",
   ],
   // Write operations - medium risk
   "group:write": [
