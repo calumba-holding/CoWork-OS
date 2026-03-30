@@ -24,6 +24,7 @@ import {
   getKnownConnectorIds,
   isConnectorConfiguredByCapability,
 } from "../connectors/capabilities";
+import type { MCPConnectorEvent } from "./MCPServerConnection";
 
 const KNOWN_CONNECTORS = new Set(getKnownConnectorIds());
 const logger = createLogger("MCPClientManager");
@@ -49,6 +50,7 @@ export class MCPClientManager extends EventEmitter {
   private initialized = false;
   private isInitializing = false; // Flag to batch operations during startup
   private rebuildToolMapDebounceTimer: NodeJS.Timeout | null = null;
+  private desiredTriggerResourceSubscriptions: Map<string, Set<string>> = new Map();
   private startupStats: { enabled: number; attempted: number; connected: number; failed: number } = {
     enabled: 0,
     attempted: 0,
@@ -260,6 +262,46 @@ export class MCPClientManager extends EventEmitter {
     return connection.getTools();
   }
 
+  async syncTriggerResourceSubscriptions(
+    triggers: Array<{ serverId?: string; connectorId?: string; resourceUri?: string }>,
+  ): Promise<void> {
+    const resourcesByServer = new Map<string, Set<string>>();
+    for (const trigger of triggers) {
+      const resourceUri = String(trigger.resourceUri || "").trim();
+      if (!resourceUri) continue;
+      const targetServerIds = new Set<string>();
+      if (trigger.serverId) {
+        targetServerIds.add(trigger.serverId);
+      } else if (trigger.connectorId) {
+        for (const [serverId] of this.connections) {
+          const config = MCPSettingsManager.getServer(serverId);
+          if (config && this.detectConnectorId(config) === trigger.connectorId) {
+            targetServerIds.add(serverId);
+          }
+        }
+      }
+      for (const serverId of targetServerIds) {
+        if (!resourcesByServer.has(serverId)) {
+          resourcesByServer.set(serverId, new Set());
+        }
+        resourcesByServer.get(serverId)!.add(resourceUri);
+      }
+    }
+    this.desiredTriggerResourceSubscriptions = resourcesByServer;
+
+    await Promise.all(
+      Array.from(this.connections.entries()).map(async ([serverId, connection]) => {
+        try {
+          await connection.syncResourceSubscriptions(
+            this.desiredTriggerResourceSubscriptions.get(serverId) || [],
+          );
+        } catch (error) {
+          logger.debug(`Failed to sync resource subscriptions for ${serverId}:`, error);
+        }
+      }),
+    );
+  }
+
   /**
    * Check if a tool exists (by name)
    */
@@ -390,6 +432,13 @@ export class MCPClientManager extends EventEmitter {
       if (status === "connected" || status === "disconnected" || status === "reconnecting") {
         this.rebuildToolMap();
       }
+      if (status === "connected") {
+        void connection
+          .syncResourceSubscriptions(this.desiredTriggerResourceSubscriptions.get(serverId) || [])
+          .catch((error) => {
+            logger.debug(`Failed to restore resource subscriptions for ${serverId}:`, error);
+          });
+      }
 
       this.emit("event", event);
 
@@ -412,6 +461,15 @@ export class MCPClientManager extends EventEmitter {
 
       // Broadcast to renderer
       this.broadcastStatusChange();
+    });
+
+    connection.on("connector_event", (event: MCPConnectorEvent) => {
+      const config = MCPSettingsManager.getServer(serverId);
+      const connectorId = config ? this.detectConnectorId(config) : undefined;
+      this.emit("connector_event", {
+        ...event,
+        connectorId: event.connectorId || connectorId,
+      });
     });
 
     connection.on("error", (error) => {
