@@ -8,6 +8,9 @@ import {
   Terminal,
   Image,
   ChevronDown,
+  Code,
+  ArrowDownToLine,
+  MousePointer2,
 } from "lucide-react";
 
 interface ToolCategoryConfig {
@@ -18,6 +21,8 @@ interface ToolCategoryConfig {
 
 interface BuiltinToolsSettingsData {
   categories: {
+    code: ToolCategoryConfig;
+    webfetch: ToolCategoryConfig;
     browser: ToolCategoryConfig;
     search: ToolCategoryConfig;
     system: ToolCategoryConfig;
@@ -25,6 +30,7 @@ interface BuiltinToolsSettingsData {
     skill: ToolCategoryConfig;
     shell: ToolCategoryConfig;
     image: ToolCategoryConfig;
+    computer_use: ToolCategoryConfig;
   };
   toolOverrides: Record<string, { enabled: boolean; priority?: "high" | "normal" | "low" }>;
   toolTimeouts: Record<string, number>;
@@ -41,6 +47,16 @@ const CATEGORY_INFO: Record<
   CategoryKey,
   { name: string; icon: React.ReactNode; description: string }
 > = {
+  code: {
+    name: "Code & Search in Repo",
+    icon: <Code {...IC} />,
+    description: "Glob, grep, edit, and code navigation tools",
+  },
+  webfetch: {
+    name: "Integrations & Web Fetch",
+    icon: <ArrowDownToLine {...IC} />,
+    description: "Lightweight HTTP and connector actions (Drive, Gmail, calendar, etc.)",
+  },
   file: {
     name: "File Operations",
     icon: <FileText {...IC} />,
@@ -76,7 +92,26 @@ const CATEGORY_INFO: Record<
     icon: <Image {...IC} />,
     description: "Generate images using AI (requires Gemini API)",
   },
+  computer_use: {
+    name: "Computer Use (macOS)",
+    icon: <MousePointer2 {...IC} />,
+    description: "Native desktop control — mouse, keyboard, screenshots (last resort vs browser/shell)",
+  },
 };
+
+/** Stable order for settings UI (matches backend category keys). */
+const CATEGORY_ORDER: CategoryKey[] = [
+  "code",
+  "webfetch",
+  "browser",
+  "search",
+  "system",
+  "file",
+  "skill",
+  "shell",
+  "image",
+  "computer_use",
+];
 
 const PRIORITY_OPTIONS: Array<{
   value: "high" | "normal" | "low";
@@ -106,7 +141,17 @@ export function BuiltinToolsSettings() {
         window.electronAPI.getBuiltinToolsSettings(),
         window.electronAPI.getBuiltinToolsCategories(),
       ]);
-      setSettings(loadedSettings);
+      const mergedCategories = { ...loadedSettings.categories } as BuiltinToolsSettingsData["categories"];
+      for (const key of CATEGORY_ORDER) {
+        if (!mergedCategories[key]) {
+          mergedCategories[key] = {
+            enabled: true,
+            priority: key === "code" || key === "webfetch" ? "high" : "normal",
+            description: CATEGORY_INFO[key].description,
+          };
+        }
+      }
+      setSettings({ ...loadedSettings, categories: mergedCategories });
       setCategories(loadedCategories);
     } catch (error) {
       console.error("Failed to load built-in tools settings:", error);
@@ -286,7 +331,7 @@ export function BuiltinToolsSettings() {
       </div>
 
       <div className="builtin-tools-categories">
-        {(Object.keys(CATEGORY_INFO) as CategoryKey[]).map((category) => {
+        {CATEGORY_ORDER.map((category) => {
           const info = CATEGORY_INFO[category];
           const config = settings.categories[category];
           const tools = categories[category] || [];
