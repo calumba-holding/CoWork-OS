@@ -50,4 +50,36 @@ describe("ChannelRegistry", () => {
     expect(result.valid).toBe(false);
     expect(result.errors).toContain("Invalid email protocol: smtp2");
   });
+
+  it("rejects Outlook.com-family accounts for manual IMAP/SMTP setup", () => {
+    const result = registry.validateConfig("email", {
+      protocol: "imap-smtp",
+      email: "user@msn.com",
+      password: "secret",
+      imapHost: "imap-mail.outlook.com",
+      smtpHost: "smtp-mail.outlook.com",
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
+      "Outlook.com, Hotmail, Live, and MSN accounts require OAuth2/Modern Auth for IMAP/SMTP. Use the Outlook.com provider and connect with Microsoft OAuth instead of a password. Before connecting, create a Microsoft Entra app registration for personal Microsoft accounts, add the Mobile and desktop redirect URI http://localhost, and grant delegated IMAP.AccessAsUser.All plus SMTP.Send permissions.",
+    );
+  });
+
+  it("accepts OAuth-based Outlook.com email configs", () => {
+    const result = registry.validateConfig("email", {
+      protocol: "imap-smtp",
+      authMethod: "oauth",
+      oauthProvider: "microsoft",
+      oauthClientId: "client-id",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      email: "user@msn.com",
+      imapHost: "imap-mail.outlook.com",
+      smtpHost: "smtp-mail.outlook.com",
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
 });
