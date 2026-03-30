@@ -1,4 +1,5 @@
 import "./mission-control.css";
+import { isTempWorkspaceId } from "../../../shared/types";
 import { useMissionControlData } from "./useMissionControlData";
 import { MCTopBar } from "./MCTopBar";
 import { MCOverviewTab } from "./MCOverviewTab";
@@ -27,10 +28,12 @@ export function MissionControlPanel({
     loading, activeTab,
     editingAgent, setEditingAgent, isCreatingAgent, agentError, handleSaveAgent,
     standupOpen, setStandupOpen, selectedWorkspace,
-    teamsOpen, setTeamsOpen, selectedWorkspaceId, agents, tasks, setDetailPanel,
+    teamsOpen, setTeamsOpen, agents, tasks, setDetailPanel,
     reviewsOpen, setReviewsOpen,
     agentContext, detailPanel,
   } = data;
+  const supportsWorkspaceReports =
+    !!selectedWorkspace && !isTempWorkspaceId(selectedWorkspace.id);
 
   if (loading) {
     return (
@@ -74,7 +77,7 @@ export function MissionControlPanel({
       </div>
 
       {/* Modals */}
-      {standupOpen && selectedWorkspace && (
+      {standupOpen && supportsWorkspaceReports && selectedWorkspace && (
         <div className="mc-v2-editor-overlay">
           <div className="mc-v2-editor-modal mc-v2-standup-modal">
             <StandupReportViewer
@@ -85,11 +88,11 @@ export function MissionControlPanel({
         </div>
       )}
 
-      {teamsOpen && selectedWorkspaceId && (
+      {teamsOpen && selectedWorkspace && (
         <div className="mc-v2-editor-overlay">
           <div className="mc-v2-editor-modal mc-v2-standup-modal">
             <AgentTeamsPanel
-              workspaceId={selectedWorkspaceId}
+              workspaceId={selectedWorkspace.id}
               agents={agents}
               tasks={tasks}
               onOpenTask={(taskId) => {
@@ -104,11 +107,11 @@ export function MissionControlPanel({
         </div>
       )}
 
-      {reviewsOpen && selectedWorkspaceId && (
+      {reviewsOpen && supportsWorkspaceReports && selectedWorkspace && (
         <div className="mc-v2-editor-overlay">
           <div className="mc-v2-editor-modal mc-v2-standup-modal">
             <AgentPerformanceReviewViewer
-              workspaceId={selectedWorkspaceId}
+              workspaceId={selectedWorkspace.id}
               agents={agents}
               onClose={() => setReviewsOpen(false)}
             />
