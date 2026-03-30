@@ -5,7 +5,12 @@ import * as crypto from "crypto";
 import { Workspace } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { LLMTool } from "../llm/types";
-import { AppAccessLevel, AppPermissionManager } from "../../security/app-permission-manager";
+import type { AppAccessLevel } from "../../security/app-permission-manager";
+import { ComputerUseSessionManager } from "../../computer-use/session-manager";
+import {
+  getMacScreenCaptureAccessStatus,
+  checkAccessibilityTrusted,
+} from "../../computer-use/computer-use-permissions";
 
 type Any = any; // oxlint-disable-line typescript-eslint(no-explicit-any)
 
@@ -13,6 +18,7 @@ const execAsync = promisify(exec);
 
 const CUA_ACTION_TIMEOUT_MS = 15_000;
 const SCREENSHOT_MAX_DIMENSION = 2560;
+const DESKTOP_CAPTURER_TIMEOUT_MS = 12_000;
 
 /**
  * Blocked key combinations that must never be emitted during computer use.
@@ -54,16 +60,6 @@ function getElectronDesktopCapturer(): Any {
   }
 }
 
-function getElectronSystemPreferences(): Any {
-  try {
-    // oxlint-disable-next-line typescript-eslint(no-require-imports)
-    const electron = require("electron") as Any;
-    return electron?.systemPreferences;
-  } catch {
-    return undefined;
-  }
-}
-
 export type CUAClickButton = "left" | "right" | "middle";
 export type CUAClickType = "single" | "double" | "triple";
 
@@ -74,43 +70,51 @@ export interface CUAScreenshotResult {
   hash: string;
 }
 
+async function getDesktopSourcesWithTimeout(
+  desktopCapturer: Any,
+  opts: { types: string[]; thumbnailSize: { width: number; height: number } },
+  timeoutMs: number,
+): Promise<Any[]> {
+  const promise = desktopCapturer.getSources(opts);
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      reject(
+        new Error(
+          "Screen capture timed out. Grant Screen Recording for CoWork OS in System Settings > Privacy & Security > Screen Recording, then restart the app if needed.",
+        ),
+      );
+    }, timeoutMs);
+  });
+  return (await Promise.race([promise, timeout])) as Any[];
+}
+
 /**
  * ComputerUseTools provides native OS-level mouse, keyboard, and screenshot
  * control for computer use agent (CUA) workflows.
  *
- * On macOS this uses AppleScript / cliclick / CoreGraphics via shell commands.
- * Each action requires explicit user approval via daemon.requestApproval().
+ * On macOS this uses AppleScript / CoreGraphics via shell commands.
+ * A single computer-use session per machine applies: per-app consent for the session,
+ * safety overlay, and Esc to stop.
  */
 export class ComputerUseTools {
   private lastScreenshotHash: string | null = null;
-  private readonly appPermissionManager: AppPermissionManager;
 
   constructor(
     private workspace: Workspace,
     private daemon: AgentDaemon,
     private taskId: string,
-  ) {
-    this.appPermissionManager = new AppPermissionManager(`computer-use:${taskId}`);
-    this.appPermissionManager.onPermissionRequest = async (request) => {
-      const approved = await this.daemon.requestApproval(
-        this.taskId,
-        "computer_use",
-        `Allow ${request.requestedLevel === "full_control" ? "full control" : "view-only access"} for ${request.appName}`,
-        {
-          appName: request.appName,
-          bundleId: request.bundleId,
-          requestedLevel: request.requestedLevel,
-          reason: request.reason,
-        },
-        { allowAutoApprove: false },
-      );
-
-      return approved ? request.requestedLevel : "denied";
-    };
-  }
+  ) {}
 
   setWorkspace(workspace: Workspace): void {
     this.workspace = workspace;
+  }
+
+  private session(): ComputerUseSessionManager {
+    return ComputerUseSessionManager.getInstance();
+  }
+
+  private pm() {
+    return this.session().acquire(this.taskId, this.daemon);
   }
 
   // ───────────── Accessibility permission check ─────────────
@@ -123,11 +127,7 @@ export class ComputerUseTools {
     if (os.platform() !== "darwin") {
       return false;
     }
-    const systemPreferences = getElectronSystemPreferences();
-    if (!systemPreferences?.isTrustedAccessibilityClient) {
-      return false;
-    }
-    return systemPreferences.isTrustedAccessibilityClient({ prompt: true }) as boolean;
+    return checkAccessibilityTrusted(true);
   }
 
   private async ensureAccessibility(): Promise<void> {
@@ -143,40 +143,34 @@ export class ComputerUseTools {
     }
   }
 
-  private async requireApproval(tool: string, details: Record<string, unknown>): Promise<void> {
-    const approved = await this.daemon.requestApproval(
-      this.taskId,
-      tool,
-      `Computer Use: ${tool}`,
-      details,
-    );
-    if (!approved) {
-      throw new Error(`User denied computer use action: ${tool}`);
+  private async ensureScreenCaptureAllowed(): Promise<void> {
+    if (os.platform() !== "darwin") return;
+    const status = getMacScreenCaptureAccessStatus();
+    if (status === "denied") {
+      throw new Error(
+        "Screen Recording is denied for CoWork OS. Enable it in System Settings > Privacy & Security > Screen Recording, then restart the app.",
+      );
     }
+    // "not-determined" / "unknown" — still attempt capture (may prompt / register app)
   }
 
   private async ensureAppPermission(
     toolName: string,
-    requestedLevel: AppAccessLevel,
+    minimumLevel: AppAccessLevel,
     reason: string,
   ): Promise<{ name: string; bundleId: string }> {
+    this.session().checkNotAborted();
+    const pm = this.pm();
     const app = await this.getFrontmostApp();
-    const existing = this.appPermissionManager.getPermission(app.name, app.bundleId);
-    if (!existing || !this.appPermissionManager.isToolAllowed(app.name, toolName, app.bundleId)) {
-      const granted = await this.appPermissionManager.requestPermission(
-        app.name,
-        app.bundleId,
-        requestedLevel,
-        reason,
-      );
-      if (
-        granted === "denied" ||
-        !this.appPermissionManager.isToolAllowed(app.name, toolName, app.bundleId)
-      ) {
+    const existing = pm.getPermission(app.name, app.bundleId);
+    if (!existing || !pm.isToolAllowed(app.name, toolName, app.bundleId)) {
+      const granted = await pm.requestPermission(app.name, app.bundleId, minimumLevel, reason);
+      if (granted === "denied" || !pm.isToolAllowed(app.name, toolName, app.bundleId)) {
         throw new Error(
-          `Computer use access for ${app.name} is not approved for ${requestedLevel === "full_control" ? "input control" : "view-only access"}.`,
+          `Computer use access for ${app.name} is not approved for this session (${minimumLevel}).`,
         );
       }
+      await this.session().onAppPermissionGranted();
     }
 
     return app;
@@ -186,12 +180,12 @@ export class ComputerUseTools {
 
   async moveMouse(x: number, y: number): Promise<{ success: boolean; x: number; y: number }> {
     await this.ensureAccessibility();
+    this.session().updateActionStatus("Moving pointer…");
     const app = await this.ensureAppPermission(
       "computer_move_mouse",
       "view_only",
       "Move the cursor in the frontmost application.",
     );
-    await this.requireApproval("computer_move_mouse", { x, y });
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "computer_move_mouse",
@@ -202,7 +196,6 @@ export class ComputerUseTools {
     });
 
     try {
-      // Use AppleScript with Quartz Event Services to move the mouse
       const script = `
 do shell script "python3 -c '
 import Quartz
@@ -234,12 +227,12 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Q
     clickType: CUAClickType = "single",
   ): Promise<{ success: boolean; x: number; y: number }> {
     await this.ensureAccessibility();
+    this.session().updateActionStatus("Clicking…");
     const app = await this.ensureAppPermission(
       "computer_click",
-      "full_control",
+      "click_only",
       "Send a click to the frontmost application.",
     );
-    await this.requireApproval("computer_click", { x, y, button, clickType });
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "computer_click",
@@ -264,7 +257,6 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Q
       const upEvent =
         button === "right" ? "Quartz.kCGEventRightMouseUp" : "Quartz.kCGEventLeftMouseUp";
 
-      // Build a Python script using Quartz CoreGraphics for precise clicking
       const pyScript = `
 import Quartz, time
 pos = (${x}, ${y})
@@ -297,8 +289,6 @@ for i in range(${clickCount}):
     }
   }
 
-  // ───────────── Drag ─────────────
-
   async drag(
     fromX: number,
     fromY: number,
@@ -306,12 +296,12 @@ for i in range(${clickCount}):
     toY: number,
   ): Promise<{ success: boolean }> {
     await this.ensureAccessibility();
+    this.session().updateActionStatus("Dragging…");
     const app = await this.ensureAppPermission(
       "computer_click",
-      "full_control",
+      "click_only",
       "Drag inside the frontmost application.",
     );
-    await this.requireApproval("computer_click", { fromX, fromY, toX, toY, action: "drag" });
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "computer_click",
@@ -364,23 +354,18 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     }
   }
 
-  // ───────────── Keyboard control ─────────────
-
   async typeText(text: string): Promise<{ success: boolean; length: number }> {
     if (!text || typeof text !== "string") {
       throw new Error("Invalid text: must be a non-empty string");
     }
 
     await this.ensureAccessibility();
+    this.session().updateActionStatus("Typing…");
     const app = await this.ensureAppPermission(
       "computer_type",
       "full_control",
       "Type text into the frontmost application.",
     );
-    await this.requireApproval("computer_type", {
-      textPreview: text.length > 100 ? `${text.slice(0, 100)}...` : text,
-      length: text.length,
-    });
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "computer_type",
@@ -390,7 +375,6 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     });
 
     try {
-      // Use AppleScript keystroke for reliable text entry
       const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       const script = `tell application "System Events" to keystroke "${escaped}"`;
       await execAsync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, {
@@ -417,7 +401,6 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
       throw new Error("Invalid keys: must be a non-empty array of key names");
     }
 
-    // Block dangerous system shortcuts
     const normalized = normalizeKeysForBlocklist(keys);
     if (BLOCKED_KEY_COMBOS.has(normalized)) {
       throw new Error(
@@ -427,12 +410,12 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     }
 
     await this.ensureAccessibility();
+    this.session().updateActionStatus("Key input…");
     const app = await this.ensureAppPermission(
       "computer_key",
       "full_control",
       "Send keyboard input to the frontmost application.",
     );
-    await this.requireApproval("computer_key", { keys });
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "computer_key",
@@ -442,7 +425,6 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     });
 
     try {
-      // Map common key names to AppleScript key code / modifier syntax
       const modifiers: string[] = [];
       let keyChar: string | null = null;
       let keyCode: number | null = null;
@@ -476,17 +458,25 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
         } else if (lower === "right") {
           keyCode = 124;
         } else if (lower.startsWith("f") && /^f\d{1,2}$/.test(lower)) {
-          // Function keys: F1=122, F2=120, F3=99, F4=118, F5=96, F6=97, F7=98, F8=100,
-          // F9=101, F10=109, F11=103, F12=111
           const fkeyMap: Record<string, number> = {
-            f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97,
-            f7: 98, f8: 100, f9: 101, f10: 109, f11: 103, f12: 111,
+            f1: 122,
+            f2: 120,
+            f3: 99,
+            f4: 118,
+            f5: 96,
+            f6: 97,
+            f7: 98,
+            f8: 100,
+            f9: 101,
+            f10: 109,
+            f11: 103,
+            f12: 111,
           };
           keyCode = fkeyMap[lower] ?? null;
         } else if (lower.length === 1) {
           keyChar = lower;
         } else {
-          keyChar = k; // Pass through as-is for keystroke
+          keyChar = k;
         }
       }
 
@@ -520,13 +510,13 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     }
   }
 
-  // ───────────── Screenshot ─────────────
-
   async takeScreenshot(): Promise<CUAScreenshotResult> {
+    await this.ensureScreenCaptureAllowed();
+    this.session().updateActionStatus("Capturing screen…");
     const app = await this.ensureAppPermission(
       "computer_screenshot",
       "view_only",
-      "Capture a screenshot of the frontmost application context.",
+      "Capture a screenshot of the screen for the frontmost application context.",
     );
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "computer_screenshot",
@@ -545,24 +535,35 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
       const scaleFactor = display?.scaleFactor ?? 2;
       const workArea = display?.workAreaSize ?? { width: 1920, height: 1080 };
 
-      // Capture at native resolution up to our max
       const captureWidth = Math.min(workArea.width * scaleFactor, SCREENSHOT_MAX_DIMENSION);
       const captureHeight = Math.min(workArea.height * scaleFactor, SCREENSHOT_MAX_DIMENSION);
 
-      const sources = await desktopCapturer.getSources({
-        types: ["screen"],
-        thumbnailSize: { width: captureWidth, height: captureHeight },
-      });
+      const sources = await getDesktopSourcesWithTimeout(
+        desktopCapturer,
+        {
+          types: ["screen"],
+          thumbnailSize: { width: captureWidth, height: captureHeight },
+        },
+        DESKTOP_CAPTURER_TIMEOUT_MS,
+      );
 
       if (sources.length === 0) {
         throw new Error("No screen sources available for capture");
       }
 
-      const primaryScreen = sources[0];
+      const primaryId = display?.id;
+      let primaryScreen = sources[0];
+      if (primaryId !== undefined) {
+        const match = sources.find((s: Any) => String(s.display_id) === String(primaryId));
+        if (match) primaryScreen = match;
+      }
+
       const image = primaryScreen.thumbnail;
 
       if (image.isEmpty()) {
-        throw new Error("Failed to capture screenshot — image is empty");
+        throw new Error(
+          "Failed to capture screenshot — image is empty. Check Screen Recording permission and restart CoWork OS after granting.",
+        );
       }
 
       const pngData = image.toPNG();
@@ -594,22 +595,15 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     }
   }
 
-  // ───────────── Pixel change detection ─────────────
-
-  /**
-   * Compare a fresh screenshot against the last known hash.
-   * Returns true if the screen has changed since the last screenshot.
-   */
   async detectScreenChange(): Promise<{ changed: boolean; previousHash: string | null; currentHash: string }> {
+    const previousHash = this.lastScreenshotHash;
     const fresh = await this.takeScreenshot();
     return {
-      changed: this.lastScreenshotHash !== null && fresh.hash !== this.lastScreenshotHash,
-      previousHash: this.lastScreenshotHash,
+      changed: previousHash !== null && fresh.hash !== previousHash,
+      previousHash,
       currentHash: fresh.hash,
     };
   }
-
-  // ───────────── Frontmost app detection ─────────────
 
   async getFrontmostApp(): Promise<{ name: string; bundleId: string }> {
     if (os.platform() !== "darwin") {
@@ -634,8 +628,6 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     }
   }
 
-  // ───────────── Scroll ─────────────
-
   async scroll(
     x: number,
     y: number,
@@ -643,12 +635,12 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     amount: number = 3,
   ): Promise<{ success: boolean }> {
     await this.ensureAccessibility();
+    this.session().updateActionStatus("Scrolling…");
     const app = await this.ensureAppPermission(
       "computer_click",
-      "full_control",
+      "click_only",
       "Scroll inside the frontmost application.",
     );
-    await this.requireApproval("computer_click", { x, y, action: "scroll", direction, amount });
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "computer_click",
@@ -662,16 +654,13 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
     });
 
     try {
-      // First move to position, then scroll
       const scrollY = direction === "up" ? amount : direction === "down" ? -amount : 0;
       const scrollX = direction === "left" ? amount : direction === "right" ? -amount : 0;
 
       const pyScript = `
 import Quartz
-# Move mouse to position
 move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (${x}, ${y}), Quartz.kCGMouseButtonLeft)
 Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
-# Scroll
 scroll = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 2, ${scrollY}, ${scrollX})
 Quartz.CGEventPost(Quartz.kCGHIDEventTap, scroll)
 `;
@@ -696,15 +685,11 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, scroll)
     }
   }
 
-  // ───────────── Tool definitions ─────────────
-
   static getToolDefinitions(options?: { headless?: boolean }): LLMTool[] {
-    // Computer use tools are not available in headless mode
     if (options?.headless) {
       return [];
     }
 
-    // Only available on macOS for now
     if (os.platform() !== "darwin") {
       return [];
     }
@@ -713,9 +698,9 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, scroll)
       {
         name: "computer_screenshot",
         description:
-          "Take a screenshot of the entire screen for visual analysis. " +
-          "Use this to see what is currently displayed on screen before performing " +
-          "mouse or keyboard actions. Returns a base64-encoded PNG image.",
+          "Take a screenshot of the current screen for visual analysis in native macOS apps. " +
+          "Preferred for desktop GUI tasks after open_application launches the app. " +
+          "Use this before computer_click / computer_type / computer_key so you can act on what is visible. Returns a base64-encoded PNG image.",
         input_schema: {
           type: "object",
           properties: {},
@@ -725,10 +710,8 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, scroll)
       {
         name: "computer_click",
         description:
-          "Click at specific screen coordinates. Use after taking a screenshot to " +
-          "interact with UI elements. Supports left/right/middle click, double-click, " +
-          "triple-click, drag, and scroll. The agent must take a screenshot first to " +
-          "determine the correct coordinates.",
+          "Click at specific screen coordinates in native macOS apps. Preferred for normal GUI interaction in apps like Calculator, Notes, Finder, System Settings, Xcode, and Simulator. " +
+          "Use after taking a screenshot to interact with visible UI elements. Supports left/right/middle click, double-click, triple-click, drag, and scroll.",
         input_schema: {
           type: "object",
           properties: {
@@ -779,8 +762,8 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, scroll)
       {
         name: "computer_type",
         description:
-          "Type text at the current cursor position using OS-level keyboard input. " +
-          "Use this to enter text into any focused text field in any application. " +
+          "Type text at the current cursor position using OS-level keyboard input in native macOS apps. " +
+          "Preferred over run_applescript for entering text into focused GUI fields. " +
           "The text is typed character by character as real keyboard input.",
         input_schema: {
           type: "object",
@@ -796,9 +779,9 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, scroll)
       {
         name: "computer_key",
         description:
-          "Press a key combination using OS-level keyboard input. " +
-          "Use this for keyboard shortcuts like Cmd+C, Cmd+V, Return, Escape, etc. " +
-          "Provide an array of key names to press simultaneously. " +
+          "Press a key combination using OS-level keyboard input in native macOS apps. " +
+          "Preferred over run_applescript for shortcuts and non-text keys during GUI automation. " +
+          "Use this for keyboard shortcuts like Cmd+C, Cmd+V, Return, Escape, etc. Provide an array of key names to press simultaneously. " +
           "Modifier keys: cmd/command, ctrl/control, alt/option, shift. " +
           "Special keys: return, escape, tab, space, delete, up, down, left, right, f1-f12.",
         input_schema: {
@@ -818,8 +801,8 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, scroll)
       {
         name: "computer_move_mouse",
         description:
-          "Move the mouse cursor to specific screen coordinates without clicking. " +
-          "Use this to hover over elements or position the cursor before other actions.",
+          "Move the mouse cursor to specific screen coordinates without clicking in native macOS apps. " +
+          "Use this to hover over elements or position the cursor before other computer_* actions.",
         input_schema: {
           type: "object",
           properties: {
