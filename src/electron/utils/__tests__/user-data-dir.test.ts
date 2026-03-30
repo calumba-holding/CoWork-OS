@@ -90,4 +90,40 @@ describe("getUserDataDir", () => {
     const { getUserDataDir } = await import("../user-data-dir");
     expect(getUserDataDir()).toBe("/from/env");
   });
+
+  it("scopes named profile paths under profiles directory", async () => {
+    process.env.COWORK_USER_DATA_DIR = "/custom/data";
+    process.env.COWORK_PROFILE = "Work Alpha";
+    process.argv = ["node", "app"];
+    const { getUserDataDir, getActiveProfileId } = await import("../user-data-dir");
+    expect(getActiveProfileId()).toBe("work-alpha");
+    expect(getUserDataDir()).toBe("/custom/data/profiles/work-alpha");
+  });
+
+  it("keeps default profile on the root userData path", async () => {
+    process.env.COWORK_USER_DATA_DIR = "/custom/data";
+    process.env.COWORK_PROFILE = "default";
+    process.argv = ["node", "app"];
+    const { getUserDataDir, getActiveProfileId } = await import("../user-data-dir");
+    expect(getActiveProfileId()).toBe("default");
+    expect(getUserDataDir()).toBe("/custom/data");
+  });
+
+  it("reads profile from argv when env is absent", async () => {
+    process.env.COWORK_USER_DATA_DIR = "/custom/data";
+    delete process.env.COWORK_PROFILE;
+    process.argv = ["node", "app", "--profile", "qa-profile"];
+    const { getUserDataDir, getActiveProfileId } = await import("../user-data-dir");
+    expect(getActiveProfileId()).toBe("qa-profile");
+    expect(getUserDataDir()).toBe("/custom/data/profiles/qa-profile");
+  });
+
+  it("prefers argv profile over env profile", async () => {
+    process.env.COWORK_USER_DATA_DIR = "/custom/data";
+    process.env.COWORK_PROFILE = "ops";
+    process.argv = ["node", "app", "--profile", "qa-profile"];
+    const { getUserDataDir, getActiveProfileId } = await import("../user-data-dir");
+    expect(getActiveProfileId()).toBe("qa-profile");
+    expect(getUserDataDir()).toBe("/custom/data/profiles/qa-profile");
+  });
 });
