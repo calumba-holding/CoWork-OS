@@ -1,9 +1,15 @@
 /**
  * Search Provider abstraction types
- * Allows switching between Tavily, Brave Search, SerpAPI, and Google Custom Search
+ * Allows switching between Tavily, Exa, Brave Search, SerpAPI, and Google Custom Search
  */
 
-export type SearchProviderType = "tavily" | "brave" | "serpapi" | "google" | "duckduckgo";
+export type SearchProviderType =
+  | "tavily"
+  | "exa"
+  | "brave"
+  | "serpapi"
+  | "google"
+  | "duckduckgo";
 
 export type SearchType = "web" | "news" | "images";
 
@@ -11,6 +17,8 @@ export interface SearchProviderConfig {
   type: SearchProviderType;
   // Tavily-specific
   tavilyApiKey?: string;
+  // Exa-specific
+  exaApiKey?: string;
   // Brave-specific
   braveApiKey?: string;
   // SerpAPI-specific
@@ -105,6 +113,13 @@ export const SEARCH_PROVIDER_INFO = {
     supportedTypes: ["web", "news"] as SearchType[],
     envVar: "TAVILY_API_KEY",
     signupUrl: "https://tavily.com/",
+  },
+  exa: {
+    displayName: "Exa",
+    description: "Semantic web and news search with content-aware results",
+    supportedTypes: ["web", "news"] as SearchType[],
+    envVar: "EXA_API_KEY",
+    signupUrl: "https://exa.ai/",
   },
   brave: {
     displayName: "Brave Search",
