@@ -419,9 +419,16 @@ export class EmailAdapter implements ChannelAdapter {
     // Check sender allowlist if configured
     if (this.config.allowedSenders && this.config.allowedSenders.length > 0) {
       const senderAddress = email.from.address.toLowerCase();
-      const isAllowed = this.config.allowedSenders.some((allowed) =>
-        senderAddress.includes(allowed.toLowerCase()),
-      );
+      const senderDomain = senderAddress.split("@")[1] || "";
+      const isAllowed = this.config.allowedSenders.some((allowed) => {
+        const normalized = allowed.trim().toLowerCase();
+        if (!normalized) return false;
+        if (normalized.includes("@")) {
+          return senderAddress === normalized;
+        }
+        const domain = normalized.startsWith("@") ? normalized.slice(1) : normalized;
+        return senderDomain === domain;
+      });
       if (!isAllowed) {
         console.log(`Email: Ignoring message from non-allowed sender: ${senderAddress}`);
         return;
