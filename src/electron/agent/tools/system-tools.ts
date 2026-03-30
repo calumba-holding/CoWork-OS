@@ -884,10 +884,10 @@ export class SystemTools {
       {
         name: "run_applescript",
         description:
-          "Execute AppleScript code on macOS to automate applications and system tasks. " +
-          "Examples: control apps (Safari, Finder, Mail), manage windows, click UI elements, " +
-          "get/set system preferences, interact with files, send keystrokes. " +
-          "Only available on macOS.",
+          "Execute exact AppleScript / osascript code on macOS. " +
+          "Use this when the user explicitly asks for AppleScript, or as a low-level fallback " +
+          "after computer_* tools cannot complete a specific native GUI step. " +
+          "Do not prefer this first for ordinary native app interaction. Only available on macOS.",
         input_schema: {
           type: "object",
           properties: {
