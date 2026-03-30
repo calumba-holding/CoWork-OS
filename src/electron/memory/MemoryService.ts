@@ -20,6 +20,7 @@ import {
   MemoryStats,
 } from "../database/repositories";
 import { LLMProviderFactory } from "../agent/llm";
+import { recordLlmCallError, recordLlmCallSuccess } from "../agent/llm/usage-telemetry";
 import { estimateTokens } from "../agent/context-manager";
 import { InputSanitizer } from "../agent/security";
 import {
@@ -1781,6 +1782,17 @@ export class MemoryService {
           },
         ],
       });
+      recordLlmCallSuccess(
+        {
+          workspaceId: group.workspaceId,
+          sourceKind: "memory_batch_summary",
+          sourceId: group.batchKey,
+          providerType: provider.type,
+          modelKey: modelId,
+          modelId,
+        },
+        response.usage,
+      );
 
       let summary = "";
       for (const content of response.content) {
@@ -1789,6 +1801,15 @@ export class MemoryService {
       summary = this.buildDeterministicSummary(summary);
       if (summary) return { summaryText: summary, usedLlm: true };
     } catch (error) {
+      recordLlmCallError(
+        {
+          workspaceId: group.workspaceId,
+          sourceKind: "memory_batch_summary",
+          sourceId: group.batchKey,
+          providerType: LLMProviderFactory.getSelectedProvider?.() || null,
+        },
+        error,
+      );
       console.warn("[MemoryService] Batch compression failed:", group.batchKey, error);
     }
 
