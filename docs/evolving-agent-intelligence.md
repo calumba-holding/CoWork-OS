@@ -6,6 +6,20 @@ All improvements are opt-in (admin-toggleable), rate-limited, and governed by th
 
 ---
 
+## 0. Runtime Visibility
+
+The learning loop is now visible as part of the task and operator experience, not just as backend plumbing.
+
+- Task completion emits a standardized learning progression that shows memory capture, playbook reinforcement, and skill proposal review state
+- Mission Control and task detail views render the same progression so operators can inspect the evidence behind each step
+- Unified recall spans tasks, messages, files, workspace notes, memory entries, and knowledge-graph context behind one search experience
+- Persistent shell sessions preserve cwd, env deltas, and aliases per task/workspace for longer operator workflows
+- Provider routing and fallback decisions are surfaced so automatic model changes are legible in real time
+
+This layer is additive: it makes the learning loop easier to understand and trust while preserving CoWork OS's core surfaces of desktop control, channels, inbox, devices, and governed automation.
+
+---
+
 ## 1. Unified Memory Synthesizer
 
 **File:** `src/electron/memory/MemorySynthesizer.ts`
