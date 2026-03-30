@@ -5,6 +5,7 @@ import {
   Archive,
   Calendar,
   CheckSquare,
+  ChevronDown,
   Clock,
   Inbox,
   MailSearch,
@@ -1355,8 +1356,8 @@ export function InboxAgentPanel() {
     if (rest.length) {
       groups.push({
         id: "rest",
-        label: "Everything else",
-        description: "Lower priority or already handled threads",
+        label: "",
+        description: "",
         threads: rest,
       });
     }
@@ -1670,103 +1671,123 @@ export function InboxAgentPanel() {
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "12px" }}>
-            {[
-              { id: "inbox" as const, label: "Inbox" },
-              { id: "sent" as const, label: "Sent" },
-              { id: "all" as const, label: "All" },
-            ].map((view) => {
-              const active = mailboxView === view.id;
-              return (
-                <button
-                  key={view.id}
-                  type="button"
-                  onClick={() => {
-                    setMailboxView(view.id);
-                    void loadThreads({ mailboxView: view.id });
-                  }}
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: "20px",
-                    fontSize: "0.74rem",
-                    fontWeight: active ? 700 : 500,
-                    border: active
-                      ? "1px solid var(--color-accent)"
-                      : "1px solid var(--color-border-subtle)",
-                    background: active ? "var(--color-accent-subtle)" : "transparent",
-                    color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
-                    cursor: "pointer",
-                    transition: "all 0.12s ease",
-                    fontFamily: "var(--font-ui)",
-                  }}
-                  aria-pressed={active}
-                >
-                  {view.label}
-                </button>
-              );
-            })}
-          </div>
-
-          {mailboxAccounts.length > 1 && (
-            <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "12px" }}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+              marginBottom: "12px",
+            }}
+          >
+            <div
+              role="tablist"
+              aria-label="Mailbox folder"
+              style={{
+                display: "flex",
+                padding: "3px",
+                gap: "2px",
+                borderRadius: "11px",
+                background: "var(--color-bg-secondary)",
+                border: "1px solid var(--color-border-subtle)",
+                boxSizing: "border-box",
+              }}
+            >
               {[
-                { id: ALL_MAILBOX_ACCOUNTS_FILTER, label: "All accounts" },
-                ...mailboxAccounts.map((account) => ({
-                  id: account.id,
-                  label: formatMailboxAccountLabel(account),
-                })),
-              ].map((accountOption) => {
-                const active = selectedAccountId === accountOption.id;
+                { id: "inbox" as const, label: "Inbox" },
+                { id: "sent" as const, label: "Sent" },
+                { id: "all" as const, label: "All" },
+              ].map((view) => {
+                const active = mailboxView === view.id;
                 return (
                   <button
-                    key={accountOption.id}
+                    key={view.id}
                     type="button"
+                    role="tab"
+                    aria-selected={active}
                     onClick={() => {
-                      setSelectedAccountId(accountOption.id);
-                      void loadThreads({ accountId: accountOption.id });
+                      setMailboxView(view.id);
+                      void loadThreads({ mailboxView: view.id });
                     }}
                     style={{
-                      padding: "4px 10px",
-                      borderRadius: "20px",
-                      fontSize: "0.72rem",
-                      fontWeight: active ? 700 : 500,
-                      border: active
-                        ? "1px solid var(--color-accent)"
-                        : "1px solid var(--color-border-subtle)",
-                      background: active ? "var(--color-accent-subtle)" : "transparent",
-                      color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
+                      flex: 1,
+                      minWidth: 0,
+                      padding: "6px 6px",
+                      borderRadius: "8px",
+                      fontSize: "0.7rem",
+                      fontWeight: active ? 600 : 500,
+                      border: "none",
+                      background: active ? "var(--color-bg-elevated)" : "transparent",
+                      color: active ? "var(--color-text-primary)" : "var(--color-text-muted)",
                       cursor: "pointer",
-                      transition: "all 0.12s ease",
+                      transition: "background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease",
                       fontFamily: "var(--font-ui)",
-                      maxWidth: "100%",
+                      boxShadow: active ? "0 1px 2px rgba(0,0,0,0.06)" : "none",
                     }}
-                    aria-pressed={active}
-                    title={accountOption.label}
                   >
-                    <span
-                      style={{
-                        display: "inline-block",
-                        maxWidth: "180px",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        verticalAlign: "bottom",
-                      }}
-                    >
-                      {accountOption.label}
-                    </span>
+                    {view.label}
                   </button>
                 );
               })}
             </div>
-          )}
+
+            {mailboxAccounts.length > 1 && (
+              <div style={{ position: "relative", width: "100%" }}>
+                <select
+                  aria-label="Mailbox account"
+                  value={selectedAccountId}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setSelectedAccountId(next);
+                    void loadThreads({ accountId: next });
+                  }}
+                  style={{
+                    width: "100%",
+                    margin: 0,
+                    padding: "7px 32px 7px 10px",
+                    borderRadius: "10px",
+                    border: "1px solid var(--color-border-subtle)",
+                    background: "var(--color-bg-secondary)",
+                    fontSize: "0.72rem",
+                    fontWeight: 500,
+                    fontFamily: "var(--font-ui)",
+                    color: "var(--color-text-primary)",
+                    cursor: "pointer",
+                    appearance: "none",
+                    WebkitAppearance: "none",
+                    MozAppearance: "none",
+                    boxSizing: "border-box",
+                    lineHeight: 1.25,
+                  }}
+                >
+                  <option value={ALL_MAILBOX_ACCOUNTS_FILTER}>All accounts</option>
+                  {mailboxAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {formatMailboxAccountLabel(account)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown
+                  size={14}
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    right: "10px",
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    pointerEvents: "none",
+                    color: "var(--color-text-muted)",
+                  }}
+                />
+              </div>
+            )}
+          </div>
 
           {/* Inbox pulse */}
             <div
               style={{
-                marginBottom: "12px",
-                padding: "8px",
-                borderRadius: "var(--radius-lg, 14px)",
+                marginBottom: "8px",
+                padding: "6px",
+                borderRadius: "var(--radius-md, 12px)",
                 background: "var(--color-bg-elevated)",
                 border: "1px solid var(--color-border-subtle)",
                 boxShadow: "var(--shadow-sm)",
@@ -1777,19 +1798,19 @@ export function InboxAgentPanel() {
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
-                gap: "10px",
-                marginBottom: "10px",
+                gap: "8px",
+                marginBottom: "6px",
               }}
             >
               <div>
                 <div
                 style={{
-                  fontSize: "0.72rem",
+                  fontSize: "0.62rem",
                   fontWeight: 700,
                   letterSpacing: "0.06em",
                   textTransform: "uppercase",
                   color: "var(--color-text-muted)",
-                  marginBottom: "2px",
+                  marginBottom: "0",
                 }}
                 >
                   Inbox pulse
@@ -1801,7 +1822,7 @@ export function InboxAgentPanel() {
                 style={{
                   display: "grid",
                   gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                  gap: "6px",
+                  gap: "4px",
                 }}
               >
                 {pulseCards.map((card) => {
@@ -1820,8 +1841,8 @@ export function InboxAgentPanel() {
                     style={{
                       appearance: "none",
                       WebkitAppearance: "none",
-                      minHeight: 72,
-                      borderRadius: "var(--radius-md, 12px)",
+                      minHeight: 54,
+                      borderRadius: "var(--radius-sm, 8px)",
                       background: active ? "var(--color-bg-secondary)" : "var(--color-bg-elevated)",
                       border: `1px solid ${active ? "var(--color-text-primary)" : "var(--color-border-subtle)"}`,
                       textAlign: "left" as const,
@@ -1830,19 +1851,19 @@ export function InboxAgentPanel() {
                       display: "flex",
                       flexDirection: "column",
                       justifyContent: "center",
-                      gap: "6px",
+                      gap: "3px",
                       width: "100%",
                       minWidth: 0,
                       boxSizing: "border-box",
-                      padding: "10px 10px 8px",
+                      padding: "6px 6px 5px",
                       boxShadow: active ? "0 0 0 1px var(--color-text-primary) inset" : "none",
                     }}
                     aria-pressed={active}
                   >
-                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "center", gap: "6px" }}>
+                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "center", gap: "4px" }}>
                       <div
                         style={{
-                          fontSize: "2.3rem",
+                          fontSize: "1.55rem",
                           fontWeight: 800,
                           color: "var(--color-text-primary)",
                           lineHeight: 1,
@@ -1854,12 +1875,12 @@ export function InboxAgentPanel() {
                     </div>
                     <div
                       style={{
-                        fontSize: "0.72rem",
+                        fontSize: "0.58rem",
                         color: "var(--color-text-muted)",
                         fontWeight: 700,
-                        lineHeight: 1.1,
+                        lineHeight: 1.05,
                         textTransform: "uppercase",
-                        letterSpacing: "0.09em",
+                        letterSpacing: "0.07em",
                         textAlign: "center",
                       }}
                     >
@@ -1879,8 +1900,8 @@ export function InboxAgentPanel() {
                   padding: "12px 14px",
                   borderRadius: "var(--radius-md, 10px)",
                   marginBottom: "12px",
-                  background: "rgba(124, 92, 191, 0.08)",
-                  border: "1px solid rgba(124, 92, 191, 0.28)",
+                  background: "rgba(34, 211, 238, 0.08)",
+                  border: "1px solid rgba(34, 211, 238, 0.28)",
                   color: "var(--color-text-primary)",
                   fontSize: "0.8rem",
                   lineHeight: 1.5,
@@ -1925,8 +1946,8 @@ export function InboxAgentPanel() {
                 padding: "12px",
                 borderRadius: "var(--radius-md, 10px)",
                 background:
-                  "linear-gradient(180deg, rgba(124,92,191,0.10) 0%, rgba(255,255,255,0.95) 100%)",
-                border: "1px solid rgba(124,92,191,0.18)",
+                  "linear-gradient(180deg, rgba(34, 211, 238, 0.10) 0%, var(--color-bg-elevated) 100%)",
+                border: "1px solid rgba(34, 211, 238, 0.18)",
                 display: "flex",
                 flexWrap: "wrap",
                 gap: "6px",
@@ -2186,45 +2207,47 @@ export function InboxAgentPanel() {
                   background: "var(--color-bg-secondary)",
                 }}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "baseline",
-                    justifyContent: "space-between",
-                    gap: "12px",
-                    marginBottom: "8px",
-                    padding: "0 2px",
-                  }}
-                >
-                  <div>
-                    <div
-                      style={{
-                        fontSize: "0.76rem",
-                        fontWeight: 800,
-                        letterSpacing: "0.08em",
-                        textTransform: "uppercase",
-                        color: "var(--color-text-primary)",
-                      }}
-                    >
-                      {group.label}
-                    </div>
-                    <div style={{ fontSize: "0.72rem", color: "var(--color-text-muted)", marginTop: "2px" }}>
-                      {group.description}
-                    </div>
-                  </div>
-                  <span
+                {(group.label || group.description) && (
+                  <div
                     style={{
-                      fontSize: "0.7rem",
-                      padding: "3px 8px",
-                      borderRadius: "999px",
-                      background: "var(--color-bg-elevated)",
-                      color: "var(--color-text-muted)",
-                      border: "1px solid var(--color-border-subtle)",
+                      display: "flex",
+                      alignItems: "baseline",
+                      justifyContent: "space-between",
+                      gap: "12px",
+                      marginBottom: "8px",
+                      padding: "0 2px",
                     }}
                   >
-                    {group.threads.length}
-                  </span>
-                </div>
+                    <div>
+                      <div
+                        style={{
+                          fontSize: "0.76rem",
+                          fontWeight: 800,
+                          letterSpacing: "0.08em",
+                          textTransform: "uppercase",
+                          color: "var(--color-text-primary)",
+                        }}
+                      >
+                        {group.label}
+                      </div>
+                      <div style={{ fontSize: "0.72rem", color: "var(--color-text-muted)", marginTop: "2px" }}>
+                        {group.description}
+                      </div>
+                    </div>
+                    <span
+                      style={{
+                        fontSize: "0.7rem",
+                        padding: "3px 8px",
+                        borderRadius: "999px",
+                        background: "var(--color-bg-elevated)",
+                        color: "var(--color-text-muted)",
+                        border: "1px solid var(--color-border-subtle)",
+                      }}
+                    >
+                      {group.threads.length}
+                    </span>
+                  </div>
+                )}
 
                 <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                   {group.threads.map((thread) => {
@@ -2249,12 +2272,12 @@ export function InboxAgentPanel() {
                           border: selected
                             ? "1px solid var(--color-accent)"
                             : selectedForBulk
-                              ? "1px solid rgba(124,92,191,0.5)"
+                              ? "1px solid rgba(34, 211, 238, 0.5)"
                               : "1px solid var(--color-border-subtle)",
                           background: selected
-                            ? "linear-gradient(180deg, rgba(124,92,191,0.12) 0%, rgba(255,255,255,0.96) 100%)"
+                            ? "linear-gradient(180deg, rgba(34, 211, 238, 0.12) 0%, var(--color-bg-elevated) 100%)"
                             : selectedForBulk
-                              ? "rgba(124,92,191,0.08)"
+                              ? "rgba(34, 211, 238, 0.08)"
                               : "var(--color-bg-elevated)",
                           color: "var(--color-text-primary)",
                           cursor: "pointer",
@@ -2380,7 +2403,7 @@ export function InboxAgentPanel() {
                                   fontSize: "0.64rem",
                                   padding: "2px 6px",
                                   borderRadius: "999px",
-                                  background: "rgba(99,102,241,0.08)",
+                                  background: "rgba(34, 211, 238, 0.08)",
                                   color: "var(--color-text-muted)",
                                   border: "1px solid var(--color-border-subtle)",
                                 }}
@@ -2393,9 +2416,9 @@ export function InboxAgentPanel() {
                                     fontSize: "0.64rem",
                                     padding: "2px 6px",
                                     borderRadius: "999px",
-                                    background: "rgba(99,102,241,0.12)",
+                                    background: "rgba(34, 211, 238, 0.12)",
                                     color: "var(--color-accent)",
-                                    border: "1px solid rgba(99,102,241,0.16)",
+                                    border: "1px solid rgba(34, 211, 238, 0.16)",
                                   }}
                                 >
                                   {thread.unreadCount} unread
@@ -3068,8 +3091,8 @@ export function InboxAgentPanel() {
                 marginBottom: "16px",
                 padding: "14px",
                 borderRadius: "var(--radius-lg, 14px)",
-                background: "linear-gradient(180deg, rgba(124,92,191,0.08) 0%, rgba(255,255,255,0.96) 100%)",
-                border: "1px solid rgba(124,92,191,0.18)",
+                background: "linear-gradient(180deg, rgba(34, 211, 238, 0.08) 0%, var(--color-bg-elevated) 100%)",
+                border: "1px solid rgba(34, 211, 238, 0.18)",
               }}
             >
               <div
