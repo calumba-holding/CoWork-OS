@@ -56,6 +56,7 @@ export const toPublicChannel = (
   enabled: channel.enabled,
   status: statusOverride ?? channel.status,
   botUsername: channel.botUsername,
+  configReadError: channel.configReadError,
   securityMode: channel.securityConfig?.mode,
   createdAt: channel.createdAt,
   updatedAt: channel.updatedAt,
