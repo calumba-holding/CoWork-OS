@@ -120,6 +120,12 @@ The agent can fetch messages and download attachments directly from Discord, not
 
 **Typical flow:** Use `channel_list_chats` with `channel: "discord"` to discover chat IDs, then `channel_fetch_discord_messages` for live history, and `channel_download_discord_attachment` for any message with attachments.
 
+### Supervisor Mode
+
+Discord can run a strict worker/supervisor protocol with a dedicated coordination channel, watched output channels, and human escalation mirrored into Mission Control.
+
+See [Supervisor Mode on Discord](supervisor-mode-discord.md).
+
 ---
 
 ## Slack
@@ -358,17 +364,31 @@ IMAP/SMTP integration — works with any email provider.
 
 ### Setup
 
-1. Configure in **Settings** > **Email** — use quick setup for Gmail, Outlook, or Yahoo
-2. Enter email address and password/app password
-3. Configure IMAP/SMTP settings if using other provider
+1. Configure in **Settings** > **Email**.
+2. Choose the matching provider preset when available.
+3. Use password/app-password auth for Gmail, Yahoo, Microsoft 365, and most generic IMAP/SMTP providers.
+4. Use Microsoft OAuth for **Outlook.com / Hotmail / Live / MSN** personal accounts.
+
+### Outlook.com OAuth Setup
+
+For personal Microsoft mailboxes, the Client ID field is not enough by itself. CoWork expects you to bring your own Microsoft Entra app registration.
+
+1. In Azure / Microsoft Entra, create a new app registration.
+2. Under **Supported account types**, choose a setting that includes personal Microsoft accounts.
+3. Under **Authentication**, add the **Mobile and desktop applications** platform and add the redirect URI `http://localhost`.
+4. If Azure shows **Allow public client flows**, enable it for a native/public client registration that uses PKCE.
+5. Under **API permissions**, grant delegated `IMAP.AccessAsUser.All` and `SMTP.Send`.
+6. In CoWork, choose the **Outlook.com** preset, paste the **Application (client) ID**, leave **Client Secret** empty unless you intentionally created a confidential client, and keep **Tenant** as `consumers` for Outlook.com-family accounts.
+7. Click **Connect Microsoft Account** and finish the browser sign-in flow.
 
 ### Provider Settings
 
-| Provider | IMAP Host | IMAP Port | SMTP Host | SMTP Port |
-|----------|-----------|-----------|-----------|-----------|
-| **Gmail** | imap.gmail.com | 993 | smtp.gmail.com | 587 |
-| **Outlook** | outlook.office365.com | 993 | smtp.office365.com | 587 |
-| **Yahoo** | imap.mail.yahoo.com | 993 | smtp.mail.yahoo.com | 465 |
+| Provider | Auth | IMAP Host | IMAP Port | SMTP Host | SMTP Port |
+|----------|------|-----------|-----------|-----------|-----------|
+| **Gmail** | Password / app password | imap.gmail.com | 993 | smtp.gmail.com | 587 |
+| **Microsoft 365** | Password / app password | outlook.office365.com | 993 | smtp.office365.com | 587 |
+| **Outlook.com** | Microsoft OAuth | imap-mail.outlook.com | 993 | smtp-mail.outlook.com | 587 |
+| **Yahoo** | Password / app password | imap.mail.yahoo.com | 993 | smtp.mail.yahoo.com | 465 |
 
 ### Filtering Options
 
@@ -382,7 +402,7 @@ IMAP/SMTP integration — works with any email provider.
 - Universal: works with any IMAP/SMTP provider
 - **[LOOM protocol](https://github.com/AlmarionAI/loom-mvn)**: Dual-protocol email system (LOOM for agents, IMAP/SMTP for legacy)
 
-> **Notes:** Gmail/Outlook with 2FA require app passwords. Uses IMAP polling (default 30 seconds).
+> **Notes:** Gmail with 2FA usually requires an app password. Outlook.com personal accounts use Microsoft OAuth app registration, not password auth. Uses IMAP polling (default 30 seconds).
 
 ---
 
