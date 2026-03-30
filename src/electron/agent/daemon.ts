@@ -24,6 +24,7 @@ import { extractMentionedRoles } from "../agents/mentions";
 import { selectAgentsForTask } from "../agents/capabilityMatcher";
 import {
   Task,
+  TaskVerificationEvidenceBundle,
   TaskStatus,
   TaskEvent,
   EventType,
@@ -100,11 +101,14 @@ import {
 import { WorktreeManager } from "../git/WorktreeManager";
 import type { ComparisonService } from "../git/ComparisonService";
 import {
+  deriveEntropySweepDecision,
   deriveReviewGateDecision,
   inferMutationFromSummary,
+  resolveEntropySweepPolicy,
   resolveReviewPolicy,
   scoreTaskRisk,
 } from "../eval/risk";
+import { buildEntropySweepPrompt, collectBlastRadiusPaths } from "./post-task-entropy-sweep";
 import { isAutomatedTaskLike } from "../../shared/automated-task-detection";
 import { LLMProviderFactory } from "./llm/provider-factory";
 
@@ -4873,6 +4877,7 @@ export class AgentDaemon extends EventEmitter {
     explicitEvidenceRequired: boolean;
     strictCompletionContract: boolean;
     riskReasons: string[];
+    verificationEvidenceBundle?: TaskVerificationEvidenceBundle;
   }): { passed: boolean; issues: string[] } {
     const issues: string[] = [];
     const summary = params.resultSummary?.trim() || "";
@@ -4890,6 +4895,12 @@ export class AgentDaemon extends EventEmitter {
     }
     if (params.explicitEvidenceRequired && params.riskReasons.includes("tests_expected_without_evidence")) {
       issues.push("tests_expected_without_execution_evidence");
+    }
+    if (params.explicitEvidenceRequired && params.verificationEvidenceBundle) {
+      const hasSuccessfulVerificationEvidence = params.verificationEvidenceBundle.entries.some((entry) => entry.ok);
+      if (!hasSuccessfulVerificationEvidence) {
+        issues.push("missing_successful_verification_evidence");
+      }
     }
     if (params.strictCompletionContract && summary.length < 60) {
       issues.push("strict_mode_requires_more_complete_summary");
@@ -5146,6 +5157,7 @@ export class AgentDaemon extends EventEmitter {
   private async runPostCompletionVerification(
     parentTask: Task,
     parentSummary?: string,
+    verificationEvidenceBundle?: TaskVerificationEvidenceBundle,
     timeoutMs = 120_000,
   ): Promise<void> {
     // Guard: verifier should only run for top-level tasks.
@@ -5153,6 +5165,11 @@ export class AgentDaemon extends EventEmitter {
 
     const currentDepth = parentTask.depth ?? 0;
     if (currentDepth >= 3) return;
+
+    const bundleBlock =
+      verificationEvidenceBundle && verificationEvidenceBundle.entries.length > 0
+        ? JSON.stringify(verificationEvidenceBundle.entries.slice(0, 40), null, 2)
+        : "(no structured verification evidence — rely on files and summary)";
 
     const verificationPrompt = [
       "You are an independent post-completion verification agent.",
@@ -5164,6 +5181,9 @@ export class AgentDaemon extends EventEmitter {
       "",
       "## Parent Summary",
       parentSummary || "(no summary)",
+      "",
+      "## Deterministic verification evidence (from verified mode)",
+      bundleBlock,
       "",
       "## Instructions",
       "1. Inspect files and outputs using read/search tools only.",
@@ -5229,6 +5249,88 @@ export class AgentDaemon extends EventEmitter {
   }
 
   /**
+   * Read-only post-task entropy sweep (stale docs, contradictions, dead-code hints).
+   * Non-blocking; does not downgrade parent terminal status on ISSUES (first rollout).
+   */
+  private async runPostTaskEntropySweep(
+    parentTask: Task,
+    params: {
+      historicalEvents: TaskEvent[];
+      outputSummary?: TaskOutputSummary;
+      parentSummary?: string;
+    },
+    timeoutMs = 120_000,
+  ): Promise<void> {
+    if (parentTask.parentTaskId || (parentTask.agentType ?? "main") !== "main") return;
+
+    const currentDepth = parentTask.depth ?? 0;
+    if (currentDepth >= 3) return;
+
+    const blastRadius = collectBlastRadiusPaths(params.historicalEvents, params.outputSummary, 60);
+    const sweepPrompt = buildEntropySweepPrompt({
+      task: parentTask,
+      blastRadiusPaths: blastRadius,
+      resultSummary: params.parentSummary,
+    });
+
+    const childTask = await this.createChildTask({
+      title: `Entropy sweep: ${parentTask.title}`.slice(0, 200),
+      prompt: sweepPrompt,
+      workspaceId: parentTask.workspaceId,
+      parentTaskId: parentTask.id,
+      agentType: "sub",
+      depth: currentDepth + 1,
+      agentConfig: {
+        autonomousMode: true,
+        allowUserInput: false,
+        retainMemory: false,
+        maxTurns: 14,
+        conversationMode: "task",
+        llmProfile: "strong",
+        llmProfileForced: true,
+        verificationAgent: false,
+        reviewPolicy: "off",
+        entropySweepPolicy: "off",
+        toolRestrictions: ["group:write", "group:destructive", "group:image"],
+      },
+    });
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const child = this.taskRepo.findById(childTask.id);
+      if (!child) break;
+      if (child.status === "completed") {
+        const text = child.resultSummary || "";
+        const clean = /ENTROPY:\s*CLEAN/i.test(text) || /\bNO_ISSUES_FOUND\b/i.test(text);
+        this.logEvent(parentTask.id, "entropy_sweep_completed", {
+          source: "post_completion_entropy_sweep",
+          childTaskId: childTask.id,
+          blastRadiusCount: blastRadius.length,
+          clean,
+          summary: text.slice(0, 2000),
+        });
+        return;
+      }
+      if (child.status === "failed" || child.status === "cancelled") {
+        this.logEvent(parentTask.id, "entropy_sweep_failed", {
+          source: "post_completion_entropy_sweep",
+          childTaskId: childTask.id,
+          message: `Entropy sweep ${child.status}.`,
+          summary: String(child.resultSummary || "").slice(0, 2000),
+        });
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    this.logEvent(parentTask.id, "entropy_sweep_failed", {
+      source: "post_completion_entropy_sweep",
+      message: "Entropy sweep timed out.",
+      timeoutMs,
+    });
+  }
+
+  /**
    * Mark task as completed
    * Note: We keep the executor in memory for follow-up messages (with TTL-based cleanup)
    */
@@ -5251,6 +5353,8 @@ export class AgentDaemon extends EventEmitter {
       verificationEvidenceMode?: VerificationEvidenceMode;
       pendingChecklist?: string[];
       verificationMessage?: string;
+      /** Deterministic checks run in verified mode (shell, files, http, etc.) */
+      verificationEvidenceBundle?: TaskVerificationEvidenceBundle;
     },
   ): void {
     const existingTask = this.taskRepo.findById(taskId);
@@ -5798,6 +5902,7 @@ export class AgentDaemon extends EventEmitter {
         explicitEvidenceRequired: reviewDecision.explicitEvidenceRequired,
         strictCompletionContract: reviewDecision.strictCompletionContract,
         riskReasons: risk.reasons,
+        verificationEvidenceBundle: metadata?.verificationEvidenceBundle,
       });
       if (!quality.passed && reviewDecision.strictCompletionContract) {
         terminalStatus = "partial_success";
@@ -5954,8 +6059,38 @@ export class AgentDaemon extends EventEmitter {
         policy: reviewPolicy,
         tier: reviewDecision.tier,
       });
-      void this.runPostCompletionVerification(existingTask, updates.resultSummary).catch((error) => {
+      void this.runPostCompletionVerification(
+        existingTask,
+        updates.resultSummary,
+        metadata?.verificationEvidenceBundle,
+      ).catch((error) => {
         console.warn("[AgentDaemon] Post-completion verification failed to launch:", error);
+      });
+    }
+
+    const entropyPolicy = resolveEntropySweepPolicy(
+      existingTask.agentConfig?.entropySweepPolicy,
+      reviewPolicy,
+    );
+    const entropyDecision = deriveEntropySweepDecision({
+      policy: entropyPolicy,
+      riskLevel: risk.level,
+      isMutatingTask:
+        inferMutationFromSummary(metadata?.outputSummary) || risk.signals.changedFileCount > 0,
+      deepWorkMode: existingTask.agentConfig?.deepWorkMode === true,
+    });
+    if (entropyDecision.runEntropySweep) {
+      this.logEvent(taskId, "entropy_sweep_started", {
+        source: "post_completion_entropy_sweep",
+        policy: entropyPolicy,
+        tier: risk.level,
+      });
+      void this.runPostTaskEntropySweep(existingTask, {
+        historicalEvents,
+        outputSummary: metadata?.outputSummary,
+        parentSummary: updates.resultSummary,
+      }).catch((error) => {
+        console.warn("[AgentDaemon] Post-task entropy sweep failed to launch:", error);
       });
     }
 
