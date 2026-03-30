@@ -15,11 +15,42 @@ Shipped enterprise connectors run as MCP servers and expose tools over MCP (stdi
 
 For some integrations with strong native CoWork paths, the runtime now prefers direct APIs first and only falls back to MCP when needed. Today that applies to GitHub and Notion.
 
+Connector notifications are also part of the runtime surface now: MCP resource updates and catalog-change notifications can be bridged into CoWork's Event Triggers so connector-side content changes can wake agents or create follow-up tasks.
+
 Benefits:
 - Decoupled release cadence (connectors ship independently of the desktop app).
 - Supports local and managed deployments.
 - Works with existing CoWork MCP settings, registry, and tool discovery.
 - Avoids duplicate surfaces where native integrations are the better default.
+
+## Connector Events and Content Triggers
+
+CoWork can now treat MCP connector notifications as automation inputs, not just tool catalogs.
+
+- `notifications/resources/updated` can trigger automations for specific resources or folders.
+- `tools_changed`, `resources_changed`, and `prompts_changed` are normalized into `connector_event` payloads.
+- Trigger rules can filter by `serverId`, `connectorId`, and `resourceUri`.
+- The MCP client manager keeps resource subscriptions in sync with active triggers so the app only subscribes to connector resources it actually needs.
+
+Examples:
+
+- "When a Jira issue assigned to me changes, create a triage task."
+- "When a Google Drive document in this folder changes, wake my research agent."
+
+## Connector Transport and Operations
+
+CoWork consumes MCP connectors across the supported transport modes:
+
+- **stdio** for most locally installed registry connectors
+- **SSE / streamable HTTP** when the connector exposes a hosted or long-lived server surface
+- **WebSocket** for connectors or MCP hosts that need bidirectional session behavior
+
+Operational notes:
+
+- active trigger rules determine which connector resources CoWork subscribes to
+- removing or disabling a trigger causes the MCP client manager to unsubscribe when that resource is no longer needed
+- reconnects rebuild tool/resource catalogs and re-apply the active subscription set
+- stale or failed subscriptions degrade to normal connector access rather than crashing the task runtime; operators should inspect connector status when trigger-driven automations stop firing
 
 ## Shipped Connector Allowlist
 
