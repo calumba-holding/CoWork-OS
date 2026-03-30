@@ -9,6 +9,8 @@ import {
   EmailChannelConfigSchema,
   AddEmailChannelSchema,
   AddDiscordChannelSchema,
+  AddFeishuChannelSchema,
+  AddWeComChannelSchema,
 } from "../validation";
 import { z } from "zod";
 
@@ -257,6 +259,49 @@ describe("GuardrailSettingsSchema", () => {
       webSearchMaxUsesPerStep: 100,
     });
     expect(result.success).toBe(true);
+  });
+});
+
+describe("gateway channel schemas", () => {
+  it("validates a Feishu add-channel request", () => {
+    const result = AddFeishuChannelSchema.safeParse({
+      type: "feishu",
+      name: "Feishu Bot",
+      feishuAppId: "cli_123",
+      feishuAppSecret: "secret_123",
+      feishuVerificationToken: "token_123",
+      webhookPort: 3980,
+      webhookPath: "/feishu/webhook",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("validates a WeCom add-channel request", () => {
+    const result = AddWeComChannelSchema.safeParse({
+      type: "wecom",
+      name: "WeCom Bot",
+      wecomCorpId: "wx123456",
+      wecomAgentId: 1000002,
+      wecomSecret: "secret_123",
+      wecomToken: "token_123",
+      wecomEncodingAESKey: "abcdefghijklmnopqrstuvwxyzABCDEFG1234567890",
+      webhookPort: 3981,
+      webhookPath: "/wecom/webhook",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects invalid WeCom encoding AES key length", () => {
+    const result = AddWeComChannelSchema.safeParse({
+      type: "wecom",
+      name: "WeCom Bot",
+      wecomCorpId: "wx123456",
+      wecomAgentId: 1000002,
+      wecomSecret: "secret_123",
+      wecomToken: "token_123",
+      wecomEncodingAESKey: "too-short",
+    });
+    expect(result.success).toBe(false);
   });
 });
 
