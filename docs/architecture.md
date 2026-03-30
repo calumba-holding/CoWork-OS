@@ -8,6 +8,7 @@ CoWork OS is a local-first desktop runtime for AI-assisted task execution, backg
 - **React renderer**: desktop UI, Mission Control, task timeline, settings, and monitoring surfaces
 - **Tool and connector layer**: file, shell, browser, web, native integrations, MCP connectors, and remote execution
 - **Local persistence**: SQLite, local files, knowledge graph state, run records, and workspace-kit contracts in `.cowork/`
+- **Runtime visibility surfaces**: the task runtime emits learning progression, unified recall, persistent shell, and live routing events into Mission Control and the renderer so operator state stays visible instead of hidden in services
 
 ## Heartbeat V3
 
