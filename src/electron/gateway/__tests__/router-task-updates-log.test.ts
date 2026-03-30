@@ -139,4 +139,57 @@ describe("MessageRouter.sendTaskUpdate logging", () => {
     expect(second).toBe("m2");
     expect(adapter.sendMessage).toHaveBeenCalledTimes(2);
   });
+
+  it("routes by channel id when multiple adapters share a type", async () => {
+    const db = createMockDb();
+    const router = new MessageRouter(db, {}, undefined);
+
+    const slackA = {
+      type: "slack",
+      status: "connected",
+      botUsername: "bot-a",
+      onMessage: vi.fn(),
+      onError: vi.fn(),
+      onStatusChange: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue("m-a"),
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    } as Any;
+    const slackB = {
+      type: "slack",
+      status: "connected",
+      botUsername: "bot-b",
+      onMessage: vi.fn(),
+      onError: vi.fn(),
+      onStatusChange: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue("m-b"),
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    } as Any;
+
+    router.registerAdapter(slackA, "slack-a");
+    router.registerAdapter(slackB, "slack-b");
+
+    (router as Any).channelRepo.findById = vi.fn().mockImplementation((id: string) => ({ id }));
+    (router as Any).messageRepo.create = vi.fn();
+
+    const messageId = await router.sendMessage(
+      "slack",
+      {
+        chatId: "C123",
+        text: "hello",
+      },
+      "slack-b",
+    );
+
+    expect(messageId).toBe("m-b");
+    expect(slackA.sendMessage).not.toHaveBeenCalled();
+    expect(slackB.sendMessage).toHaveBeenCalledTimes(1);
+    expect((router as Any).messageRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelId: "slack-b",
+        chatId: "C123",
+      }),
+    );
+  });
 });
