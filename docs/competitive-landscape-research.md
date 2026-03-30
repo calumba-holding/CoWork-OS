@@ -53,11 +53,13 @@
 | **LettaBot (Letta AI)** | Multi-channel AI with memory | Cross-channel memory, Telegram/Slack/WhatsApp/Discord/Signal | Less agentic (more chat-focused), smaller community | Similar multi-channel approach but less action-oriented |
 | **ChatBotKit** | Multi-platform AI chatbot builder | Easy deployment to Slack/Discord/WhatsApp/Messenger/Telegram | More chatbot than agent, not self-hosted, limited automation | Different category — chatbot builder, not personal AI agent |
 
-**Key Insight**: OpenClaw has significant adoption and meaningful capability overlap, and its community momentum is real. The category emphasis differs: OpenClaw leans toward framework/operator workflows, while CoWork OS emphasizes governed day-to-day operations via desktop + channel runtime.
+**Key Insight**: OpenClaw has significant adoption and meaningful capability overlap, and its community momentum is real. The category emphasis differs: OpenClaw leans toward framework/operator workflows, while CoWork OS emphasizes governed day-to-day operations via desktop + channel runtime, with visible learning progression, unified recall, persistent shell sessions, and live routing observability.
 
 ### CoWork OS Positioning vs OpenClaw and Hermes
 
-Based on the comparison pattern in the screenshot, CoWork OS sits between the two:
+The canonical **full comparison** (including the visual table, ecosystem rows, and security framing) lives in **[OpenClaw vs Hermes vs CoWork OS](./openclaw-hermes-cowork-comparison.md)**.
+
+Summary: CoWork OS sits between a **channel-first hub ecosystem** (OpenClaw) and a **learning-loop-first research agent** (Hermes):
 
 | Dimension | OpenClaw | Hermes | CoWork OS |
 |---|---|---|---|
@@ -66,7 +68,7 @@ Based on the comparison pattern in the screenshot, CoWork OS sits between the tw
 | Main strength | Broad ecosystem and operator flexibility | Self-improvement loop and memory depth | Approvals, local-first governance, and multi-channel delivery |
 | Best fit | Developers and operators who want a framework/runtime | Users who want a learning agent that gets smarter over time | Teams that want a production-ready AI operating system |
 
-In short: OpenClaw is closer to a framework/operator layer, Hermes is closer to a learning-loop-first agent, and CoWork OS is the governed runtime that productizes both ideas for day-to-day operations.
+In short: OpenClaw is closer to a framework/operator layer, Hermes is closer to a learning-loop-first agent, and CoWork OS is the governed runtime that productizes both ideas for day-to-day operations while exposing the learning loop and router decisions directly to users.
 
 ---
 
