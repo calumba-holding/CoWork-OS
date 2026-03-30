@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { Workspace } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import {
@@ -39,6 +41,39 @@ export class VideoTools {
     this.videoGenerator = new VideoGenerator(workspace);
   }
 
+  private validateReferenceMediaPath(
+    filePath: string,
+    kind: "image" | "video",
+    maxBytes: number,
+  ): void {
+    if (!path.isAbsolute(filePath)) {
+      throw new Error(`Reference ${kind} path must be an absolute path`);
+    }
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Reference ${kind} file does not exist: ${filePath}`);
+    }
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile()) {
+      throw new Error(`Reference ${kind} path must point to a file`);
+    }
+    if (stats.size > maxBytes) {
+      throw new Error(
+        `Reference ${kind} file is too large (${stats.size} bytes). Max allowed is ${maxBytes} bytes.`,
+      );
+    }
+    const extension = path.extname(filePath).toLowerCase();
+    const allowedExtensions =
+      kind === "image"
+        ? new Set([".png", ".jpg", ".jpeg", ".webp"])
+        : new Set([".mp4", ".mov", ".m4v", ".webm"]);
+    if (!allowedExtensions.has(extension)) {
+      throw new Error(
+        `Reference ${kind} file type "${extension || "(none)"}" is not supported. ` +
+          `Allowed: ${Array.from(allowedExtensions.values()).join(", ")}`,
+      );
+    }
+  }
+
   /**
    * Submit a video generation request.
    * Returns immediately when the provider uses async jobs (pending=true).
@@ -61,6 +96,12 @@ export class VideoTools {
     }
     if ((input.referenceImagePath || input.referenceVideoPath) && !this.workspace.permissions.read) {
       throw new Error("Read permission not granted — required to read reference media files");
+    }
+    if (input.referenceImagePath) {
+      this.validateReferenceMediaPath(input.referenceImagePath, "image", 25 * 1024 * 1024);
+    }
+    if (input.referenceVideoPath) {
+      this.validateReferenceMediaPath(input.referenceVideoPath, "video", 500 * 1024 * 1024);
     }
 
     const result = await this.videoGenerator.generate(input);
