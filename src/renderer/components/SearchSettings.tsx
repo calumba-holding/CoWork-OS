@@ -22,6 +22,7 @@ export function SearchSettings({ onStatusChange }: SearchSettingsProps) {
 
   // API Key form state
   const [tavilyApiKey, setTavilyApiKey] = useState("");
+  const [exaApiKey, setExaApiKey] = useState("");
   const [braveApiKey, setBraveApiKey] = useState("");
   const [serpapiApiKey, setSerpapiApiKey] = useState("");
   const [googleApiKey, setGoogleApiKey] = useState("");
@@ -63,6 +64,7 @@ export function SearchSettings({ onStatusChange }: SearchSettingsProps) {
         primaryProvider,
         fallbackProvider,
         tavily: tavilyApiKey ? { apiKey: tavilyApiKey } : undefined,
+        exa: exaApiKey ? { apiKey: exaApiKey } : undefined,
         brave: braveApiKey ? { apiKey: braveApiKey } : undefined,
         serpapi: serpapiApiKey ? { apiKey: serpapiApiKey } : undefined,
         google:
@@ -75,6 +77,7 @@ export function SearchSettings({ onStatusChange }: SearchSettingsProps) {
       });
       // Clear the input fields after saving
       setTavilyApiKey("");
+      setExaApiKey("");
       setBraveApiKey("");
       setSerpapiApiKey("");
       setGoogleApiKey("");
@@ -158,6 +161,27 @@ export function SearchSettings({ onStatusChange }: SearchSettingsProps) {
                     Get your API key from{" "}
                     <a href="https://tavily.com/" target="_blank" rel="noopener noreferrer">
                       tavily.com
+                    </a>
+                  </p>
+                </div>
+              )}
+
+              {activeProviderConfig.type === "exa" && (
+                <div className="settings-field">
+                  <label>Exa API Key</label>
+                  <input
+                    type="password"
+                    className="settings-input"
+                    placeholder={
+                      activeProviderConfig.configured ? "••••••••••••••••" : "exa_..."
+                    }
+                    value={exaApiKey}
+                    onChange={(e) => setExaApiKey(e.target.value)}
+                  />
+                  <p className="settings-hint">
+                    Get your API key from{" "}
+                    <a href="https://exa.ai/" target="_blank" rel="noopener noreferrer">
+                      exa.ai
                     </a>
                   </p>
                 </div>
