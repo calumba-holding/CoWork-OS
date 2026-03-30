@@ -49,6 +49,8 @@ const OriginChannelSchema = z.preprocess(
     "email",
     "teams",
     "googlechat",
+    "feishu",
+    "wecom",
     "x",
   ] as const),
 );
@@ -536,6 +538,15 @@ export const VideoGenerationSettingsSchema = z
 export const LLMSettingsSchema = z.object({
   providerType: LLMProviderTypeSchema,
   modelKey: z.string().max(200),
+  fallbackProviders: z
+    .array(
+      z.object({
+        providerType: LLMProviderTypeSchema,
+        modelKey: z.string().max(200).optional(),
+      }),
+    )
+    .max(5)
+    .optional(),
   anthropic: AnthropicSettingsSchema,
   bedrock: BedrockSettingsSchema,
   ollama: OllamaSettingsSchema,
@@ -561,13 +572,18 @@ export const LLMSettingsSchema = z.object({
 // ============ Search Settings Schemas ============
 
 export const SearchProviderTypeSchema = z
-  .enum(["tavily", "brave", "serpapi", "google", "duckduckgo"])
+  .enum(["tavily", "exa", "brave", "serpapi", "google", "duckduckgo"])
   .nullable();
 
 export const SearchSettingsSchema = z.object({
   primaryProvider: SearchProviderTypeSchema,
   fallbackProvider: SearchProviderTypeSchema,
   tavily: z
+    .object({
+      apiKey: z.string().max(500).optional(),
+    })
+    .optional(),
+  exa: z
     .object({
       apiKey: z.string().max(500).optional(),
     })
@@ -868,6 +884,10 @@ export const AddTelegramChannelSchema = z.object({
   type: z.literal("telegram"),
   name: z.string().min(1).max(MAX_TITLE_LENGTH),
   botToken: z.string().min(1).max(500),
+  groupRoutingMode: z
+    .enum(["all", "mentionsOnly", "mentionsOrCommands", "commandsOnly"])
+    .optional(),
+  telegramAllowedGroupChatIds: z.array(z.string().max(100)).max(200).optional(),
   securityMode: SecurityModeSchema.optional(),
 });
 
@@ -938,6 +958,7 @@ export const AddSignalChannelSchema = z.object({
   trustMode: SignalTrustModeSchema.optional(),
   dmPolicy: DmPolicySchema.optional(),
   groupPolicy: GroupPolicySchema.optional(),
+  allowedNumbers: z.array(z.string().max(20)).max(100).optional(),
   sendReadReceipts: z.boolean().optional(),
   sendTypingIndicators: z.boolean().optional(),
 });
@@ -1003,6 +1024,31 @@ export const AddXChannelSchema = z.object({
   xPollIntervalSec: z.number().int().min(30).max(3600).optional(),
   xFetchCount: z.number().int().min(1).max(200).optional(),
   xOutboundEnabled: z.boolean().optional(),
+});
+
+export const AddFeishuChannelSchema = z.object({
+  type: z.literal("feishu"),
+  name: z.string().min(1).max(MAX_TITLE_LENGTH),
+  feishuAppId: z.string().min(1).max(200),
+  feishuAppSecret: z.string().min(1).max(500),
+  feishuVerificationToken: z.string().max(500).optional(),
+  feishuEncryptKey: z.string().max(500).optional(),
+  webhookPort: z.number().int().min(1024).max(65535).optional(),
+  webhookPath: z.string().min(1).max(200).optional(),
+  securityMode: SecurityModeSchema.optional(),
+});
+
+export const AddWeComChannelSchema = z.object({
+  type: z.literal("wecom"),
+  name: z.string().min(1).max(MAX_TITLE_LENGTH),
+  wecomCorpId: z.string().min(1).max(200),
+  wecomAgentId: z.number().int().min(1).max(1_000_000_000),
+  wecomSecret: z.string().min(1).max(500),
+  wecomToken: z.string().min(1).max(500),
+  wecomEncodingAESKey: z.string().length(43).optional(),
+  webhookPort: z.number().int().min(1024).max(65535).optional(),
+  webhookPath: z.string().min(1).max(200).optional(),
+  securityMode: SecurityModeSchema.optional(),
 });
 
 const getOptionalString = (value: unknown): string | undefined => {
@@ -1280,6 +1326,8 @@ export const AddChannelSchema = z.discriminatedUnion("type", [
   AddTwitchChannelSchema,
   AddLineChannelSchema,
   AddBlueBubblesChannelSchema,
+  AddFeishuChannelSchema,
+  AddWeComChannelSchema,
   AddXChannelSchema,
   AddEmailChannelSchema,
 ]);
@@ -1864,6 +1912,8 @@ export const HookMappingChannelSchema = z.enum([
   "line",
   "bluebubbles",
   "email",
+  "feishu",
+  "wecom",
   "last",
 ]);
 
