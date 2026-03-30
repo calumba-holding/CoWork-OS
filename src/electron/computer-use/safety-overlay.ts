@@ -3,7 +3,7 @@
  *
  * When the CUA is actively controlling the desktop, two always-on-top windows appear:
  *  1. An orange border around the entire screen (click-through, transparent).
- *  2. A thinking panel docked to the top-right showing the agent's current reasoning.
+ *  2. A status panel docked to the top-right showing high-level action state only.
  *
  * Both windows follow the frameless/transparent BrowserWindow pattern from
  * NotificationOverlayWindow.ts.
@@ -13,7 +13,7 @@ import { BrowserWindow, screen } from "electron";
 
 const BORDER_WIDTH = 4;
 const THINKING_PANEL_WIDTH = 320;
-const THINKING_PANEL_HEIGHT = 200;
+const THINKING_PANEL_HEIGHT = 220;
 const THINKING_PANEL_MARGIN = 12;
 
 export class CUASafetyOverlay {
@@ -41,12 +41,18 @@ export class CUASafetyOverlay {
     this.thinkingWindow = null;
   }
 
-  updateThinking(text: string): void {
+  /** High-level status only (e.g. Preparing, Capturing screen) — not model chain-of-thought. */
+  updateStatus(text: string): void {
     if (!this.thinkingWindow || this.thinkingWindow.isDestroyed()) return;
     const escaped = text.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$/g, "\\$");
     this.thinkingWindow.webContents
       .executeJavaScript(`document.getElementById('thinking-text').textContent = \`${escaped}\`;`)
       .catch(() => {});
+  }
+
+  /** @deprecated Use updateStatus */
+  updateThinking(text: string): void {
+    this.updateStatus(text);
   }
 
   // ───────────── Border window ─────────────
@@ -103,7 +109,7 @@ export class CUASafetyOverlay {
     this.borderWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
   }
 
-  // ───────────── Thinking panel ─────────────
+  // ───────────── Status panel ─────────────
 
   private createThinkingWindow(): void {
     const display = screen.getPrimaryDisplay();
@@ -148,14 +154,22 @@ export class CUASafetyOverlay {
   .body {
     padding: 10px 12px;
     line-height: 1.5;
-    max-height: 140px;
+    max-height: 120px;
     overflow-y: auto;
     color: #444;
+  }
+  .footer {
+    padding: 6px 12px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #8b4513;
+    border-top: 1px solid rgba(224, 122, 58, 0.15);
   }
 </style></head>
 <body>
   <div class="header"><span class="dot"></span> Computer Use Active</div>
   <div class="body" id="thinking-text">Preparing...</div>
+  <div class="footer">Press Esc to stop</div>
 </body></html>`;
 
     this.thinkingWindow = new BrowserWindow({
