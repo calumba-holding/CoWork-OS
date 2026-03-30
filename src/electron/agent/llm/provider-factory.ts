@@ -1749,14 +1749,47 @@ export class LLMProviderFactory {
     currentModel: string;
     providers: Array<{ type: LLMProviderType; name: string; configured: boolean }>;
     models: Array<{ key: string; displayName: string; description: string }>;
+    routing?: {
+      currentProvider: LLMProviderType;
+      currentModel: string;
+      activeProvider: LLMProviderType;
+      activeModel: string;
+      routeReason: "manual_override" | "profile_routing" | "automatic_execution" | "verification" | "fallback" | "provider_outage" | "quota" | "model_capability" | "unknown";
+      fallbackChain: Array<{
+        providerType: LLMProviderType;
+        modelKey: string;
+        reason: string;
+        attemptedAt: number;
+        success: boolean;
+        error?: string;
+      }>;
+      fallbackOccurred: boolean;
+      manualOverride: boolean;
+      profileHint?: LlmProfile;
+      updatedAt: number;
+    };
   } {
     const settings = this.loadSettings();
     const modelStatus = this.getProviderModelStatus(settings);
+    const routingSettings = this.getProviderRoutingSettings(settings, settings.providerType);
+    const currentModel = modelStatus.currentModel;
     return {
       currentProvider: settings.providerType,
-      currentModel: modelStatus.currentModel,
+      currentModel,
       providers: this.getAvailableProviders(),
       models: modelStatus.models,
+      routing: {
+        currentProvider: settings.providerType,
+        currentModel,
+        activeProvider: settings.providerType,
+        activeModel: currentModel,
+        routeReason: routingSettings.profileRoutingEnabled ? "profile_routing" : "manual_override",
+        fallbackChain: [],
+        fallbackOccurred: false,
+        manualOverride: false,
+        profileHint: routingSettings.profileRoutingEnabled ? "cheap" : "strong",
+        updatedAt: Date.now(),
+      },
     };
   }
 
