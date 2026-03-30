@@ -23,6 +23,8 @@ import {
   WhatsAppConfig as _WhatsAppConfig,
   ImessageConfig as _ImessageConfig,
   SignalConfig as _SignalConfig,
+  FeishuConfig as _FeishuConfig,
+  WeComConfig as _WeComConfig,
   MattermostConfig as _MattermostConfig,
   MatrixConfig as _MatrixConfig,
   TwitchConfig as _TwitchConfig,
@@ -37,6 +39,8 @@ import { SlackAdapter, createSlackAdapter } from "./channels/slack";
 import { WhatsAppAdapter, createWhatsAppAdapter } from "./channels/whatsapp";
 import { ImessageAdapter, createImessageAdapter } from "./channels/imessage";
 import { SignalAdapter, createSignalAdapter } from "./channels/signal";
+import { createFeishuAdapter } from "./channels/feishu";
+import { createWeComAdapter } from "./channels/wecom";
 import { MattermostAdapter, createMattermostAdapter } from "./channels/mattermost";
 import { MatrixAdapter, createMatrixAdapter } from "./channels/matrix";
 import { TwitchAdapter, createTwitchAdapter } from "./channels/twitch";
@@ -708,6 +712,10 @@ export class ChannelGateway {
   async addTelegramChannel(
     name: string,
     botToken: string,
+    options?: {
+      groupRoutingMode?: "all" | "mentionsOnly" | "mentionsOrCommands" | "commandsOnly";
+      allowedGroupChatIds?: string[];
+    },
     securityMode: "open" | "allowlist" | "pairing" = "pairing",
   ): Promise<Channel> {
     // Check if Telegram channel already exists
@@ -721,7 +729,11 @@ export class ChannelGateway {
       type: "telegram",
       name,
       enabled: false, // Don't enable until tested
-      config: { botToken },
+      config: {
+        botToken,
+        groupRoutingMode: options?.groupRoutingMode,
+        allowedGroupChatIds: options?.allowedGroupChatIds,
+      },
       securityConfig: {
         mode: securityMode,
         pairingCodeTTL: 300, // 5 minutes
@@ -779,12 +791,6 @@ export class ChannelGateway {
     signingSecret?: string,
     securityMode: "open" | "allowlist" | "pairing" = "pairing",
   ): Promise<Channel> {
-    // Check if Slack channel already exists
-    const existing = this.channelRepo.findByType("slack");
-    if (existing) {
-      throw new Error("Slack channel already configured. Update or remove it first.");
-    }
-
     // Create channel record
     const channel = this.channelRepo.create({
       type: "slack",
@@ -932,6 +938,7 @@ export class ChannelGateway {
     trustMode: "tofu" | "always" | "manual" = "tofu",
     dmPolicy: "open" | "allowlist" | "pairing" | "disabled" = "pairing",
     groupPolicy: "open" | "allowlist" | "disabled" = "allowlist",
+    allowedNumbers?: string[],
     sendReadReceipts: boolean = true,
     sendTypingIndicators: boolean = true,
   ): Promise<Channel> {
@@ -953,6 +960,7 @@ export class ChannelGateway {
         trustMode,
         dmPolicy,
         groupPolicy,
+        allowedNumbers,
         sendReadReceipts,
         sendTypingIndicators,
       },
@@ -1288,6 +1296,94 @@ export class ChannelGateway {
   }
 
   /**
+   * Add a new Feishu / Lark channel
+   */
+  async addFeishuChannel(
+    name: string,
+    appId: string,
+    appSecret: string,
+    verificationToken?: string,
+    encryptKey?: string,
+    webhookPort: number = 3980,
+    webhookPath: string = "/feishu/webhook",
+    securityMode: "open" | "allowlist" | "pairing" = "pairing",
+  ): Promise<Channel> {
+    const existing = this.channelRepo.findByType("feishu");
+    if (existing) {
+      throw new Error("Feishu / Lark channel already configured. Update or remove it first.");
+    }
+
+    const channel = this.channelRepo.create({
+      type: "feishu",
+      name,
+      enabled: false,
+      config: {
+        appId,
+        appSecret,
+        verificationToken,
+        encryptKey,
+        webhookPort,
+        webhookPath,
+      },
+      securityConfig: {
+        mode: securityMode,
+        allowedUsers: [],
+        pairingCodeTTL: 300,
+        maxPairingAttempts: 5,
+        rateLimitPerMinute: 30,
+      },
+      status: "disconnected",
+    });
+
+    return channel;
+  }
+
+  /**
+   * Add a new WeCom channel
+   */
+  async addWeComChannel(
+    name: string,
+    corpId: string,
+    agentId: number,
+    secret: string,
+    token: string,
+    encodingAESKey?: string,
+    webhookPort: number = 3981,
+    webhookPath: string = "/wecom/webhook",
+    securityMode: "open" | "allowlist" | "pairing" = "pairing",
+  ): Promise<Channel> {
+    const existing = this.channelRepo.findByType("wecom");
+    if (existing) {
+      throw new Error("WeCom channel already configured. Update or remove it first.");
+    }
+
+    const channel = this.channelRepo.create({
+      type: "wecom",
+      name,
+      enabled: false,
+      config: {
+        corpId,
+        agentId,
+        secret,
+        token,
+        encodingAESKey,
+        webhookPort,
+        webhookPath,
+      },
+      securityConfig: {
+        mode: securityMode,
+        allowedUsers: [],
+        pairingCodeTTL: 300,
+        maxPairingAttempts: 5,
+        rateLimitPerMinute: 30,
+      },
+      status: "disconnected",
+    });
+
+    return channel;
+  }
+
+  /**
    * Add a new X channel
    */
   async addXChannel(
@@ -1342,7 +1438,11 @@ export class ChannelGateway {
     if (!channel) return;
     this.assertChannelConfigAvailable(channel);
 
-    const adapter = this.router.getAdapter(channel.type as ChannelType);
+    const adapter =
+      this.router.getAdapterByChannelId(channelId) ||
+      (this.channelRepo.findAllByType(channel.type).length === 1
+        ? this.router.getAdapter(channel.type as ChannelType)
+        : undefined);
     if (adapter?.updateConfig) {
       adapter.updateConfig(channel.config as ChannelConfig);
     }
@@ -1358,11 +1458,15 @@ export class ChannelGateway {
     }
 
     // Create and register adapter if not already done
-    let adapter = this.router.getAdapter(channel.type as ChannelType);
+    let adapter =
+      this.router.getAdapterByChannelId(channelId) ||
+      (this.channelRepo.findAllByType(channel.type).length === 1
+        ? this.router.getAdapter(channel.type as ChannelType)
+        : undefined);
     if (!adapter) {
       adapter = this.createAdapterForChannel(channel);
       this.attachDiscordSupervisorHandler(adapter);
-      this.router.registerAdapter(adapter);
+      this.router.registerAdapter(adapter, channel.id);
     }
 
     // Update channel state
@@ -1381,7 +1485,11 @@ export class ChannelGateway {
       throw new Error("Channel not found");
     }
 
-    const adapter = this.router.getAdapter(channel.type as ChannelType);
+    const adapter =
+      this.router.getAdapterByChannelId(channelId) ||
+      (this.channelRepo.findAllByType(channel.type).length === 1
+        ? this.router.getAdapter(channel.type as ChannelType)
+        : undefined);
     if (adapter) {
       await adapter.disconnect();
     }
@@ -1514,6 +1622,7 @@ export class ChannelGateway {
 
     // Now delete the channel
     this.channelRepo.delete(channelId);
+    this.router.unregisterAdapter(channelId);
   }
 
   /**
@@ -1612,6 +1721,7 @@ export class ChannelGateway {
     chatId: string,
     text: string,
     options?: {
+      channelDbId?: string;
       replyTo?: string;
       parseMode?: "text" | "markdown" | "html";
       idempotencyKey?: string;
@@ -1623,7 +1733,7 @@ export class ChannelGateway {
       idempotencyKey: options?.idempotencyKey,
       replyTo: options?.replyTo,
       parseMode: options?.parseMode,
-    });
+    }, options?.channelDbId);
   }
 
   /**
@@ -1651,7 +1761,7 @@ export class ChannelGateway {
       text,
       replyTo: options?.replyTo,
       parseMode: options?.parseMode,
-    });
+    }, channel.id);
   }
 
   /**
@@ -1741,7 +1851,7 @@ export class ChannelGateway {
       try {
         const adapter = this.createAdapterForChannel(channel);
         this.attachDiscordSupervisorHandler(adapter);
-        this.router.registerAdapter(adapter);
+        this.router.registerAdapter(adapter, channel.id);
       } catch (error) {
         console.error(`Failed to create adapter for channel ${channel.type}:`, error);
       }
@@ -1985,6 +2095,31 @@ export class ChannelGateway {
           loomStatePath,
         });
 
+      case "feishu":
+        return createFeishuAdapter({
+          enabled: channel.enabled,
+          appId: channel.config.appId as string,
+          appSecret: channel.config.appSecret as string,
+          verificationToken: channel.config.verificationToken as string | undefined,
+          encryptKey: channel.config.encryptKey as string | undefined,
+          webhookPort: channel.config.webhookPort as number | undefined,
+          webhookPath: channel.config.webhookPath as string | undefined,
+          responsePrefix: channel.config.responsePrefix as string | undefined,
+        } as _FeishuConfig);
+
+      case "wecom":
+        return createWeComAdapter({
+          enabled: channel.enabled,
+          corpId: channel.config.corpId as string,
+          agentId: channel.config.agentId as number,
+          secret: channel.config.secret as string,
+          token: channel.config.token as string,
+          encodingAESKey: channel.config.encodingAESKey as string | undefined,
+          webhookPort: channel.config.webhookPort as number | undefined,
+          webhookPath: channel.config.webhookPath as string | undefined,
+          responsePrefix: channel.config.responsePrefix as string | undefined,
+        } as _WeComConfig);
+
       case "x":
         return createXAdapter({
           enabled: channel.enabled,
@@ -2039,6 +2174,8 @@ export { WhatsAppAdapter, createWhatsAppAdapter } from "./channels/whatsapp";
 export { ImessageAdapter, createImessageAdapter } from "./channels/imessage";
 export { SignalAdapter, createSignalAdapter } from "./channels/signal";
 export { SignalClient } from "./channels/signal-client";
+export { FeishuAdapter, createFeishuAdapter } from "./channels/feishu";
+export { WeComAdapter, createWeComAdapter } from "./channels/wecom";
 export { MattermostAdapter, createMattermostAdapter } from "./channels/mattermost";
 export { MattermostClient } from "./channels/mattermost-client";
 export { MatrixAdapter, createMatrixAdapter } from "./channels/matrix";
