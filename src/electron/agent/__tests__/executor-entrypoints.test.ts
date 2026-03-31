@@ -159,6 +159,59 @@ describe("TaskExecutor entrypoint guards", () => {
     );
   });
 
+  it("does not delegate to Claude when the user prompt does not explicitly say Claude Code", async () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+
+    executor.task = {
+      id: "task-1",
+      title: "Create an executive brief",
+      prompt: "Internal prompt may mention Claude Code, but the user did not ask for it.",
+      rawPrompt:
+        "Create an executive brief on the competitive landscape and list the top 5 risks and actions by priority.",
+      userPrompt:
+        "Create an executive brief on the competitive landscape and list the top 5 risks and actions by priority.",
+      agentConfig: {},
+    };
+    executor.isAcpxExternalRuntimeTask = vi.fn(() => false);
+    executor.toolRegistry = {
+      executeTool: vi.fn(),
+    };
+    executor.emitEvent = vi.fn();
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleExplicitClaudeCodeDelegation.call(
+      executor,
+    );
+
+    expect(handled).toBe(false);
+    expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
+  });
+
+  it("does not delegate to Claude when only internal or title text mentions Claude Code", async () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+
+    executor.task = {
+      id: "task-1",
+      title: "Use Claude Code for this task",
+      prompt:
+        "Use Claude Code for this task. Create a child task via acpx and do the work automatically.",
+      rawPrompt: "Create an executive brief about the market and prioritize the main risks.",
+      userPrompt: "Create an executive brief about the market and prioritize the main risks.",
+      agentConfig: {},
+    };
+    executor.isAcpxExternalRuntimeTask = vi.fn(() => false);
+    executor.toolRegistry = {
+      executeTool: vi.fn(),
+    };
+    executor.emitEvent = vi.fn();
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleExplicitClaudeCodeDelegation.call(
+      executor,
+    );
+
+    expect(handled).toBe(false);
+    expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
+  });
+
   it("normalizes explicit Claude child task prompts into imperative instructions", () => {
     const executor = Object.create(TaskExecutor.prototype) as Any;
     executor.extractCurrentTaskText = (value: unknown) =>
