@@ -97,6 +97,12 @@ export type TimelineEvidence =
       type: "url";
       label: string;
       url: string;
+    }
+  | {
+      type: "runtime_log";
+      label: string;
+      message: string;
+      source?: string;
     };
 
 // ---------------------------------------------------------------------------
