@@ -1054,10 +1054,11 @@ export type ExecutionMode = "execute" | "chat" | "plan" | "analyze" | "verified"
 export type ExecutionModeSource = "user" | "strategy" | "auto_promote";
 
 export type ExternalRuntimePermissionMode = "approve-reads" | "approve-all" | "deny-all";
+export type ExternalRuntimeAgent = "codex" | "claude";
 
 export interface ExternalRuntimeConfig {
   kind: "acpx";
-  agent: "codex";
+  agent: ExternalRuntimeAgent;
   sessionMode: "persistent";
   outputMode: "json";
   permissionMode: ExternalRuntimePermissionMode;
