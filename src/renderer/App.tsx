@@ -232,6 +232,7 @@ export function App() {
   const [missionControlInitialCompanyId, setMissionControlInitialCompanyId] = useState<string | null>(
     null,
   );
+  const [missionControlInitialIssueId, setMissionControlInitialIssueId] = useState<string | null>(null);
   const [browserUrl, setBrowserUrl] = useState<string>("");
   const [settingsTab, setSettingsTab] = useState<
     | "appearance"
@@ -318,6 +319,12 @@ export function App() {
     taskId: string;
     path: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (currentView !== "missionControl") {
+      setMissionControlInitialIssueId(null);
+    }
+  }, [currentView]);
 
   // Sidebar collapse state
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
@@ -2833,10 +2840,19 @@ export function App() {
             ) : currentView === "ideas" ? (
               <IdeasPanel onCreateTaskFromPrompt={handleCreateTaskFromIdea} />
             ) : currentView === "inboxAgent" ? (
-              <InboxAgentPanel />
+              <InboxAgentPanel
+                onOpenMissionControlIssue={(companyId, issueId) => {
+                  setMissionControlInitialCompanyId(companyId);
+                  setMissionControlInitialIssueId(issueId);
+                  setCurrentView("missionControl");
+                }}
+              />
             ) : currentView === "missionControl" ? (
               <main className="main-content mission-control-main">
-                <MissionControlPanel initialCompanyId={missionControlInitialCompanyId} />
+                <MissionControlPanel
+                  initialCompanyId={missionControlInitialCompanyId}
+                  initialIssueId={missionControlInitialIssueId}
+                />
               </main>
             ) : (
               <MainContent
