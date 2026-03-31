@@ -1050,7 +1050,7 @@ export interface SuccessCriteria {
  */
 export type AgentType = "main" | "sub" | "parallel";
 export type ConversationMode = "task" | "chat" | "hybrid" | "think";
-export type ExecutionMode = "execute" | "chat" | "plan" | "analyze" | "verified";
+export type ExecutionMode = "execute" | "chat" | "plan" | "analyze" | "verified" | "debug";
 export type ExecutionModeSource = "user" | "strategy" | "auto_promote";
 
 export type ExternalRuntimePermissionMode = "approve-reads" | "approve-all" | "deny-all";
@@ -1293,6 +1293,11 @@ export interface AgentConfig {
    * Video tools are strongly preferred; unrelated workflows are suppressed.
    */
   videoGenerationMode?: boolean;
+  /**
+   * Research critique workflow: draft → critique → refine with optional per-phase models.
+   * Defined after `ResearchWorkflowConfig` in this file.
+   */
+  researchWorkflow?: ResearchWorkflowConfig;
 }
 
 /**
@@ -1324,6 +1329,33 @@ export interface MultiLlmConfig {
   judgeProviderType: LLMProviderType;
   judgeModelKey: string;
   maxParallelParticipants?: number;
+}
+
+/**
+ * Optional per-phase model overrides for the research critique workflow.
+ * When omitted for a phase, the executor uses the task's default resolved model.
+ */
+export interface ResearchPhaseModelOverride {
+  providerType?: LLMProviderType;
+  modelKey?: string;
+}
+
+/**
+ * Research + critique MVP: staged draft → critique → refine with optional per-phase models.
+ * When `enabled` is true, strategy/apply merges sensible defaults (qualityPasses 3, deep work, etc.).
+ */
+export interface ResearchWorkflowConfig {
+  enabled: boolean;
+  /** Primary research/draft phase model (defaults to task model) */
+  researcher?: ResearchPhaseModelOverride;
+  /** Critique pass model (defaults to task model if unset) */
+  critic?: ResearchPhaseModelOverride;
+  /** Final refine pass model (defaults to task model if unset) */
+  refiner?: ResearchPhaseModelOverride;
+  /** Reserved for parallel multi-model synthesis; optional in sequential MVP */
+  judge?: ResearchPhaseModelOverride;
+  /** Emit executor events suitable for semantic timeline / progress UI */
+  emitSemanticProgress?: boolean;
 }
 
 export interface Task {
@@ -4204,6 +4236,15 @@ export const IPC_CHANNELS = {
   MAILBOX_MC_HANDOFF_PREVIEW: "mailbox:missionControlHandoffPreview",
   MAILBOX_MC_HANDOFF_CREATE: "mailbox:missionControlHandoffCreate",
   MAILBOX_MC_HANDOFF_LIST: "mailbox:missionControlHandoffList",
+  MAILBOX_SNIPPETS_LIST: "mailbox:snippetsList",
+  MAILBOX_SNIPPET_UPSERT: "mailbox:snippetUpsert",
+  MAILBOX_SNIPPET_DELETE: "mailbox:snippetDelete",
+  MAILBOX_SAVED_VIEWS_LIST: "mailbox:savedViewsList",
+  MAILBOX_SAVED_VIEW_CREATE: "mailbox:savedViewCreate",
+  MAILBOX_SAVED_VIEW_DELETE: "mailbox:savedViewDelete",
+  MAILBOX_SAVED_VIEW_PREVIEW_SIMILAR: "mailbox:savedViewPreviewSimilar",
+  MAILBOX_QUICK_REPLY_SUGGESTIONS: "mailbox:quickReplySuggestions",
+  MAILBOX_SAVED_VIEW_REVIEW_SCHEDULE: "mailbox:savedViewReviewSchedule",
   MAILBOX_IDENTITY_RESOLVE: "mailbox:identityResolve",
   MAILBOX_IDENTITY_GET: "mailbox:identityGet",
   MAILBOX_IDENTITY_LIST: "mailbox:identityList",
