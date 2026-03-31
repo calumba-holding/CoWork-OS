@@ -1207,6 +1207,50 @@ export class DatabaseManager {
         updated_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS mailbox_snippets (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        shortcut TEXT NOT NULL,
+        body_text TEXT NOT NULL,
+        subject_hint TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mailbox_saved_views (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        instructions TEXT NOT NULL,
+        seed_thread_id TEXT,
+        show_in_inbox INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mailbox_saved_view_threads (
+        view_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        score REAL,
+        PRIMARY KEY (view_id, thread_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS mailbox_triage_feedback (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        feedback_kind TEXT NOT NULL,
+        payload_json TEXT,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_mailbox_snippets_workspace ON mailbox_snippets(workspace_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_mailbox_snippets_workspace_shortcut ON mailbox_snippets(workspace_id, shortcut);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_saved_views_workspace ON mailbox_saved_views(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_saved_view_threads_thread ON mailbox_saved_view_threads(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_saved_view_threads_view ON mailbox_saved_view_threads(view_id);
+      CREATE INDEX IF NOT EXISTS idx_mailbox_triage_feedback_thread ON mailbox_triage_feedback(thread_id, created_at DESC);
+
       CREATE INDEX IF NOT EXISTS idx_mailbox_threads_account ON mailbox_threads(account_id);
       CREATE INDEX IF NOT EXISTS idx_mailbox_threads_priority ON mailbox_threads(priority_score DESC, urgency_score DESC, last_message_at DESC);
       CREATE INDEX IF NOT EXISTS idx_mailbox_threads_flags ON mailbox_threads(needs_reply, cleanup_candidate, stale_followup);
