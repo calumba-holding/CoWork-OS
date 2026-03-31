@@ -632,6 +632,8 @@ export class TaskExecutor {
   private paused = false;
   private taskCompleted = false; // Prevents any further processing after task completes
   private waitingForUserInput = false;
+  private debugRuntimeSessionStarted = false;
+  private debugRuntimeSessionFailed = false;
   // If the user confirms they want to proceed despite workspace preflight warnings,
   // we should not keep re-pausing on the same gate.
   private workspacePreflightAcknowledged = false;
@@ -5141,6 +5143,8 @@ ${transcript}
     request: Omit<LLMRequest, "signal">,
     timeoutMs: number,
     operation: string,
+    /** Optional per-phase provider/model for research critique workflow */
+    phaseRouting?: { provider: LLMProvider; modelId: string },
   ): Promise<Any> {
     this.refreshProviderIfSettingsChanged();
     const parentSignal = this.abortController.signal;
@@ -5153,8 +5157,10 @@ ${transcript}
       parentSignal.addEventListener("abort", onParentAbort, { once: true });
     }
 
+    const effectiveProvider = phaseRouting?.provider ?? this.provider;
+    const effectiveModelId = phaseRouting?.modelId ?? this.modelId;
     const shouldStream =
-      this.provider.type === "azure" && this.getEffectiveExecutionMode() === "chat";
+      effectiveProvider.type === "azure" && this.getEffectiveExecutionMode() === "chat";
     const onStreamProgress: StreamProgressCallback | undefined = shouldStream
       ? (progress) => {
           if (this.cancelled || this.taskCompleted) return;
@@ -5171,9 +5177,9 @@ ${transcript}
 
     try {
       return await withTimeout(
-        this.provider.createMessage({
+        effectiveProvider.createMessage({
           ...request,
-          model: this.modelId,
+          model: effectiveModelId,
           signal: requestAbort.signal,
           ...(onStreamProgress ? { onStreamProgress } : {}),
         }),
@@ -7433,7 +7439,7 @@ ${transcript}
     if (!shouldRequireExecutionEvidenceForDomain(this.getEffectiveTaskDomain())) {
       return false;
     }
-    if (this.getEffectiveExecutionMode() !== "execute") {
+    if (!this.isExecuteLikeToolMode()) {
       return false;
     }
     return this.followUpRequiresCommandExecution(prompt);
@@ -8819,6 +8825,7 @@ ${transcript}
       this.finalizeChatTurn();
       return;
     }
+    this.endDebugRuntimeSessionIfNeeded();
     this.stopProgressJournal();
     const finalResponseGuardError = this.getFinalResponseGuardError();
     if (finalResponseGuardError) {
@@ -9405,6 +9412,44 @@ ${transcript}
     );
   }
 
+  /** Modes where command/canvas follow-up enforcement behaves like full execution. */
+  private isExecuteLikeToolMode(): boolean {
+    const m = this.getEffectiveExecutionMode();
+    return m === "execute" || m === "debug" || m === "verified";
+  }
+
+  private isDebugMode(): boolean {
+    return this.getEffectiveExecutionMode() === "debug";
+  }
+
+  private async bootstrapDebugRuntimeIfNeeded(): Promise<void> {
+    if (this.debugRuntimeSessionStarted || this.debugRuntimeSessionFailed || !this.isDebugMode()) return;
+    this.debugRuntimeSessionStarted = true;
+    try {
+      const { startDebugModeSession } = await import("./debug/DebugModeOrchestrator");
+      await startDebugModeSession(this.task.id, (type, payload) => {
+        this.emitEvent(type, payload);
+      });
+    } catch (error) {
+      this.debugRuntimeSessionStarted = false;
+      this.debugRuntimeSessionFailed = true;
+      this.emitEvent("log", {
+        metric: "debug_runtime_session_failed",
+        taskId: this.task.id,
+        error: String((error as Any)?.message || error),
+      });
+    }
+  }
+
+  private endDebugRuntimeSessionIfNeeded(): void {
+    if (!this.debugRuntimeSessionStarted || !this.isDebugMode()) return;
+    void import("./debug/DebugModeOrchestrator")
+      .then((m) => m.endDebugModeSession(this.task.id))
+      .catch(() => {
+        // best-effort cleanup
+      });
+  }
+
   private getToolPolicyContext() {
     return {
       executionMode: this.getEffectiveExecutionMode(),
@@ -9548,7 +9593,7 @@ ${transcript}
   } {
     const mode = this.getEffectiveExecutionMode();
     const source = this.getEffectiveExecutionModeSource();
-    if (stepContract.mode !== "mutation_required" || mode === "execute") {
+    if (stepContract.mode !== "mutation_required" || mode === "execute" || mode === "debug") {
       return { status: "ok", blockedTools: [], mode, source };
     }
 
@@ -11385,7 +11430,7 @@ You are continuing a previous conversation. The context from the previous conver
     if (!shouldRequireExecutionEvidenceForDomain(this.getEffectiveTaskDomain())) {
       return false;
     }
-    if (this.getEffectiveExecutionMode() !== "execute") {
+    if (!this.isExecuteLikeToolMode()) {
       return false;
     }
 
@@ -11426,7 +11471,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private followUpRequiresCanvasAction(message: string): boolean {
-    if (this.getEffectiveExecutionMode() !== "execute") {
+    if (!this.isExecuteLikeToolMode()) {
       return false;
     }
 
@@ -15909,10 +15954,19 @@ You are continuing a previous conversation. The context from the previous conver
     return typeof value === "string" ? value.trim() : "";
   }
 
+  private getExplicitClaudeDelegationSource(): string {
+    const rawUserPrompt =
+      this.extractCurrentTaskText(this.task.rawPrompt) || this.extractCurrentTaskText(this.task.userPrompt);
+    if (!rawUserPrompt) return "";
+    const strategyIdx = rawUserPrompt.indexOf("[AGENT_STRATEGY_CONTEXT_V1]");
+    const preStrategySource = strategyIdx >= 0 ? rawUserPrompt.slice(0, strategyIdx) : rawUserPrompt;
+    return normalizePromptForContractsUtil(preStrategySource);
+  }
+
   private isExplicitClaudeChildTaskRequest(raw: string): boolean {
     const text = String(raw || "").trim().toLowerCase();
     if (!text) return false;
-    const mentionsClaude = /\bclaude(?:\s+code)?\b/.test(text);
+    const mentionsClaude = /\bclaude\s+code\b/.test(text);
     const requestsDelegation =
       /\b(child task|child agent|delegate|delegation|spawn agent|spawn a child|sub-?agent)\b/.test(text) ||
       /\bacpx\b/.test(text);
@@ -16012,15 +16066,17 @@ You are continuing a previous conversation. The context from the previous conver
       return false;
     }
 
+    const explicitDelegationSource = this.getExplicitClaudeDelegationSource();
+    if (!this.isExplicitClaudeChildTaskRequest(explicitDelegationSource)) {
+      return false;
+    }
+
     const sourceTitle = this.extractCurrentTaskText(this.task.title);
     const sourcePrompt =
       this.extractCurrentTaskText(this.task.rawPrompt) ||
       this.extractCurrentTaskText(this.task.userPrompt) ||
       this.extractCurrentTaskText(this.task.prompt) ||
       sourceTitle;
-    if (!this.isExplicitClaudeChildTaskRequest(`${sourceTitle}\n${sourcePrompt}`)) {
-      return false;
-    }
 
     const childTitle = this.deriveClaudeChildTaskTitle(sourceTitle, sourcePrompt);
     const childPrompt = this.deriveClaudeChildTaskPrompt(sourcePrompt, sourceTitle);
@@ -17172,6 +17228,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private shouldShortCircuitSimpleNonExecuteAnswer(): boolean {
+    if (this.isDebugMode()) return false;
     if (!this.shouldEmitAnswerFirst()) return false;
     if (this.getEffectiveExecutionMode() === "execute") {
       const intent = String(this.task.agentConfig?.taskIntent || "").toLowerCase();
@@ -17933,7 +17990,8 @@ You are continuing a previous conversation. The context from the previous conver
     );
 
     const infraContext = this.getInfraContextPrompt();
-    const shouldRequirePlanVerificationStep = this.getEffectiveExecutionMode() === "execute";
+    const shouldRequirePlanVerificationStep =
+      this.getEffectiveExecutionMode() === "execute" || this.getEffectiveExecutionMode() === "debug";
     const planningGuidance = `
 Canvas policy:
 - Use Live Canvas tools only when the user explicitly asks for a visual artifact, interactive UI, preview, or in-app browse experience.
@@ -23948,6 +24006,48 @@ TASK / CONVERSATION HISTORY:
     return [{ type: "text", text: message }, ...validImages];
   }
 
+  /**
+   * Resolve provider/model for research critique refine/critique passes when
+   * `agentConfig.researchWorkflow` has per-phase overrides.
+   */
+  private resolveResearchPhaseProvider(phase: "critic" | "refiner"): {
+    provider: LLMProvider;
+    modelId: string;
+  } {
+    const rw = this.task.agentConfig?.researchWorkflow;
+    if (!rw?.enabled) {
+      return { provider: this.provider, modelId: this.modelId };
+    }
+    const override = phase === "critic" ? rw.critic : rw.refiner;
+    if (!override?.modelKey && !override?.providerType) {
+      return { provider: this.provider, modelId: this.modelId };
+    }
+    const merged: AgentConfig = {
+      ...this.task.agentConfig,
+      ...(override.providerType ? { providerType: override.providerType } : {}),
+      ...(override.modelKey ? { modelKey: override.modelKey } : {}),
+    };
+    const selection = LLMProviderFactory.resolveTaskModelSelection(merged, {
+      isVerificationTask: this.isVerificationTaskRoute(),
+    });
+    return {
+      provider: LLMProviderFactory.createProvider({
+        type: selection.providerType,
+        model: selection.modelId,
+      }),
+      modelId: selection.modelId,
+    };
+  }
+
+  private maybeEmitResearchWorkflowPhase(phase: string, detail: string): void {
+    const rw = this.task.agentConfig?.researchWorkflow;
+    if (!rw?.enabled || rw.emitSemanticProgress === false) return;
+    this.emitEvent("log", {
+      message: `[Research] ${phase}: ${detail}`,
+      researchWorkflowPhase: phase,
+    });
+  }
+
   private async applyQualityPassesToDraft(opts: {
     passes: 2 | 3;
     contextLabel: string;
@@ -23964,6 +24064,11 @@ TASK / CONVERSATION HISTORY:
     const refineOnce = async (): Promise<{ text: string; accepted: boolean }> => {
       try {
         this.checkBudgets();
+        const refinerRouting = this.resolveResearchPhaseProvider("refiner");
+        this.maybeEmitResearchWorkflowPhase(
+          "refine",
+          `provider=${refinerRouting.provider.type} model=${refinerRouting.modelId}`,
+        );
         const response = await this.callLLMWithRetry(
           () =>
             this.createMessageWithTimeout(
@@ -23990,6 +24095,7 @@ TASK / CONVERSATION HISTORY:
               },
               LLM_TIMEOUT_MS,
               `Quality refine (${opts.contextLabel})`,
+              refinerRouting,
             ),
           `Quality refine (${opts.contextLabel})`,
         );
@@ -24022,6 +24128,11 @@ TASK / CONVERSATION HISTORY:
     let critique = "";
     try {
       this.checkBudgets();
+      const criticRouting = this.resolveResearchPhaseProvider("critic");
+      this.maybeEmitResearchWorkflowPhase(
+        "critique",
+        `provider=${criticRouting.provider.type} model=${criticRouting.modelId}`,
+      );
       const critiqueResp = await this.callLLMWithRetry(
         () =>
           this.createMessageWithTimeout(
@@ -24054,6 +24165,7 @@ TASK / CONVERSATION HISTORY:
             },
             LLM_TIMEOUT_MS,
             `Quality critique (${opts.contextLabel})`,
+            criticRouting,
           ),
         `Quality critique (${opts.contextLabel})`,
       );
@@ -24080,6 +24192,11 @@ TASK / CONVERSATION HISTORY:
 
     try {
       this.checkBudgets();
+      const secondRefinerRouting = this.resolveResearchPhaseProvider("refiner");
+      this.maybeEmitResearchWorkflowPhase(
+        "refine",
+        `provider=${secondRefinerRouting.provider.type} model=${secondRefinerRouting.modelId}`,
+      );
       const refineResp = await this.callLLMWithRetry(
         () =>
           this.createMessageWithTimeout(
@@ -24113,6 +24230,7 @@ TASK / CONVERSATION HISTORY:
             },
             LLM_TIMEOUT_MS,
             `Quality refine (${opts.contextLabel})`,
+            secondRefinerRouting,
           ),
         `Quality refine (${opts.contextLabel})`,
       );
@@ -24778,6 +24896,10 @@ TASK / CONVERSATION HISTORY:
     this.recoveryRequestActive = this.isRecoveryIntent(message);
     this.capabilityUpgradeRequested = this.isCapabilityUpgradeIntent(message);
     this.redirectRequested = this.isRedirectIntent(message);
+
+    if (!recoveredFromTurnLimit && this.isDebugMode() && !this.debugRuntimeSessionStarted) {
+      await this.bootstrapDebugRuntimeIfNeeded();
+    }
 
     if (this.lastPauseReason?.startsWith("shell_permission_")) {
       const decision = this.classifyShellPermissionDecision(message);
@@ -27071,6 +27193,8 @@ TASK / CONVERSATION HISTORY:
     this.cancelled = true;
     this.cancelReason = reason;
     this.taskCompleted = true; // Also mark as completed to prevent any further processing
+
+    this.endDebugRuntimeSessionIfNeeded();
 
     // Stop progress journal to avoid FK errors when task is deleted before next tick
     this.stopProgressJournal();
