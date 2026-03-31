@@ -635,6 +635,116 @@ export type TimelineEventActor = "system" | "agent" | "user" | "tool" | "subagen
 
 export type TimelineStage = "DISCOVER" | "BUILD" | "VERIFY" | "FIX" | "DELIVER";
 
+export type RuntimeToolConcurrencyClass =
+  | "exclusive"
+  | "read_parallel"
+  | "side_effect_parallel"
+  | "serial_only";
+
+export type RuntimeToolInterruptBehavior = "cancel" | "block";
+
+export type RuntimeToolApprovalKind =
+  | "none"
+  | "workspace_policy"
+  | "external_service"
+  | "destructive"
+  | "shell_sensitive";
+
+export type RuntimeToolSideEffectLevel = "none" | "low" | "medium" | "high";
+
+export type RuntimeToolResultKind =
+  | "generic"
+  | "read"
+  | "mutation"
+  | "search"
+  | "command"
+  | "browser"
+  | "artifact"
+  | "integration";
+
+export type RuntimeToolCapabilityTag =
+  | "core"
+  | "code"
+  | "research"
+  | "browser"
+  | "artifact"
+  | "integration"
+  | "memory"
+  | "system"
+  | "orchestration"
+  | "admin"
+  | "shell"
+  | "mcp";
+
+export interface RuntimeToolMetadata {
+  readOnly: boolean;
+  concurrencyClass: RuntimeToolConcurrencyClass;
+  interruptBehavior: RuntimeToolInterruptBehavior;
+  approvalKind: RuntimeToolApprovalKind;
+  sideEffectLevel: RuntimeToolSideEffectLevel;
+  deferLoad: boolean;
+  alwaysExpose: boolean;
+  resultKind: RuntimeToolResultKind;
+  supportsContextMutation: boolean;
+  capabilityTags: RuntimeToolCapabilityTag[];
+  exposure: "always" | "conditional" | "explicit_only";
+}
+
+export type ToolPolicyStage =
+  | "task_restrictions"
+  | "workspace_quick_access"
+  | "availability"
+  | "mode_and_domain"
+  | "workspace_script"
+  | "approval";
+
+export type ToolPolicyStageDecision = "allow" | "defer" | "deny" | "require_approval" | "skip";
+
+export interface ToolPolicyTraceEntry {
+  stage: ToolPolicyStage;
+  decision: ToolPolicyStageDecision;
+  reason?: string;
+  metadata?: Record<string, unknown>;
+  timestamp: number;
+}
+
+export interface ToolPolicyTrace {
+  toolName: string;
+  finalDecision: Exclude<ToolPolicyStageDecision, "skip">;
+  entries: ToolPolicyTraceEntry[];
+}
+
+export type ToolResultEnvelopeStatus =
+  | "queued"
+  | "running"
+  | "success"
+  | "error"
+  | "blocked"
+  | "cancelled"
+  | "discarded";
+
+export interface ToolResultEvidence {
+  type: "file" | "command" | "url" | "artifact" | "runtime_log";
+  label: string;
+  value: string;
+  extra?: Record<string, unknown>;
+}
+
+export interface ToolResultEnvelope {
+  toolUseId: string;
+  toolName: string;
+  status: ToolResultEnvelopeStatus;
+  modelPayload: string;
+  userSummary: string;
+  structuredData?: unknown;
+  evidence: ToolResultEvidence[];
+  retryable: boolean;
+  policyTrace?: ToolPolicyTrace;
+  contextMutation?: Record<string, unknown> | null;
+  uiHints?: Record<string, unknown>;
+  telemetry?: Record<string, unknown>;
+}
+
 export interface EvidenceRef {
   evidenceId: string;
   sourceType: "url" | "file" | "tool_output" | "user_input" | "other";
