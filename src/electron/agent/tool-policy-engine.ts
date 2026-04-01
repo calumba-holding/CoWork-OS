@@ -1,4 +1,10 @@
-import { ConversationMode, ExecutionMode, TaskDomain, ToolDecision } from "../../shared/types";
+import {
+  ConversationMode,
+  ExecutionMode,
+  TaskDomain,
+  ToolDecision,
+  type RuntimeToolMetadata,
+} from "../../shared/types";
 
 export type ToolLane =
   | "core"
@@ -225,7 +231,25 @@ function hasToolAffinity(toolName: string, tools?: Iterable<string>): boolean {
   return false;
 }
 
-function inferToolExposureMetadata(toolName: string): ToolExposureMetadata {
+function inferToolExposureMetadata(
+  toolName: string,
+  runtime?: RuntimeToolMetadata,
+): ToolExposureMetadata {
+  if (runtime) {
+    const primaryTag = runtime.capabilityTags[0];
+    const lane =
+      primaryTag === "shell"
+        ? "code"
+        : primaryTag === "mcp"
+          ? "integration"
+          : (primaryTag as ToolLane | undefined);
+    if (lane) {
+      return {
+        lane,
+        exposure: runtime.exposure,
+      };
+    }
+  }
   if (EXPLICIT_ONLY_TOOLS.has(toolName)) {
     return { lane: "admin", exposure: "explicit_only", overlapGroup: "admin_controls" };
   }
@@ -281,9 +305,10 @@ export function getToolExposureMetadata(toolName: string): ToolExposureMetadata 
 export function evaluateToolAvailability(
   toolName: string,
   ctx: ToolAvailabilityContext,
+  runtime?: RuntimeToolMetadata,
 ): ToolAvailabilityResult {
   const normalizedToolName = String(toolName || "").trim();
-  const metadata = inferToolExposureMetadata(normalizedToolName);
+  const metadata = inferToolExposureMetadata(normalizedToolName, runtime);
   if (!normalizedToolName) {
     return { decision: "defer", reason: "empty_tool_name", metadata };
   }
