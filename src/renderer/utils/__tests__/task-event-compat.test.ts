@@ -57,6 +57,17 @@ describe("getEffectiveTaskEventType", () => {
     ).toBe("task_completed");
   });
 
+  it("infers task_completed when semantic or verification summaries are present", () => {
+    expect(
+      getEffectiveTaskEventType(
+        makeEvent("timeline_step_finished", {
+          semanticSummary: "Read auth config",
+          verificationVerdict: "PASS",
+        }),
+      ),
+    ).toBe("task_completed");
+  });
+
   it("keeps regular step completion as step_completed", () => {
     expect(
       getEffectiveTaskEventType(
