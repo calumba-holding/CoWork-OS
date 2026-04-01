@@ -106,7 +106,6 @@ function applyExecutorFieldDefaults(executor: Any): void {
   executor.lastPreCompactionFlushAt = 0;
   executor.lastPreCompactionFlushTokenCount = 0;
   executor.observedOutputTokensPerSecond = null;
-  executor.unifiedCompatModeNotified = false;
   executor.journalIntervalHandle = undefined;
   executor.journalEntryCount = 0;
   executor.pendingFollowUps = [];
@@ -128,7 +127,6 @@ function applyExecutorFieldDefaults(executor: Any): void {
   executor.llmCallSequence = 0;
   executor.softDeadlineTriggered = false;
   executor.wrapUpRequested = false;
-  executor.useUnifiedTurnLoop = false;
   executor.logTag = "[Executor:test]";
   executor.infraContextProvider = {
     getStatus: () => ({ enabled: false }),
@@ -247,6 +245,18 @@ function createExecutorWithStubs(responses: LLMResponse[], toolResults: Record<s
       return { success: true };
     }),
   };
+  executor.toolExecutionCoordinator = {
+    executeTool: vi.fn(async (name: string, input: Any) => {
+      const result = await executor.toolRegistry.executeTool(name, input);
+      return {
+        result,
+        durationMs: 0,
+        resultJson: JSON.stringify(result),
+        envelope: undefined,
+        policyTrace: undefined,
+      };
+    }),
+  };
   executor.callLLMWithRetry = vi.fn().mockImplementation(async () => {
     const response = responses.shift();
     if (!response && fallbackTextResponse) {
@@ -325,6 +335,18 @@ function createExecutorWithLLMHandler(handler: (messages: Any[]) => LLMResponse)
   executor.toolResultMemoryLimit = 8;
   executor.toolRegistry = {
     executeTool: vi.fn(async () => ({ success: true })),
+  };
+  executor.toolExecutionCoordinator = {
+    executeTool: vi.fn(async (name: string, input: Any) => {
+      const result = await executor.toolRegistry.executeTool(name, input);
+      return {
+        result,
+        durationMs: 0,
+        resultJson: JSON.stringify(result),
+        envelope: undefined,
+        policyTrace: undefined,
+      };
+    }),
   };
   executor.provider = {
     createMessage: vi.fn(async (args: Any) => handler(args.messages)),
@@ -2774,6 +2796,21 @@ relationship_memory:
 
     const contractMode = (executor as Any).resolveStepArtifactContractMode(saveStep);
     expect(contractMode).toBe("artifact_write_required");
+  });
+
+  it("requires artifact_write_required for research steps that also specify a concrete output file", () => {
+    executor = createExecutorWithStubs([textResponse("OK")], {});
+
+    const researchWriteStep: Any = {
+      id: "research-write-file",
+      description:
+        "Review changes in this release, shortlist the useful ones for Cowork OS, and write the findings to research/cowork_os_showcase_shortlist.md.",
+      status: "pending",
+    };
+
+    expect((executor as Any).resolveStepArtifactContractMode(researchWriteStep)).toBe(
+      "artifact_write_required",
+    );
   });
 
   it("returns artifact_presence_required for compile-only steps even with a file target", () => {
