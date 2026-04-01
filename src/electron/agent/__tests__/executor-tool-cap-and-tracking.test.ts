@@ -115,8 +115,7 @@ describe("TaskExecutor adaptive tool cap + file tracking", () => {
 
   it("clears currentStepId after executeStep even when step runner throws", async () => {
     const executor = createExecutor("execution");
-    executor.useUnifiedTurnLoop = false;
-    executor.executeStepLegacy = vi.fn().mockRejectedValue(new Error("boom"));
+    executor.executeStepUnified = vi.fn().mockRejectedValue(new Error("boom"));
 
     await expect((executor as Any).executeStep({ id: "X", description: "x", status: "pending" })).rejects.toThrow(
       "boom",
