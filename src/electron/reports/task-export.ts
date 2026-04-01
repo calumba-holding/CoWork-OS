@@ -136,6 +136,9 @@ export function buildTaskExportItem(params: {
     ...(usage ? { usage } : {}),
     ...(files ? { files } : {}),
     ...(task.resultSummary ? { resultSummary: task.resultSummary } : {}),
+    ...(task.semanticSummary ? { semanticSummary: task.semanticSummary } : {}),
+    ...(task.verificationVerdict ? { verificationVerdict: task.verificationVerdict } : {}),
+    ...(task.verificationReport ? { verificationReport: task.verificationReport } : {}),
     ...(task.error ? { error: task.error } : {}),
   };
 }
