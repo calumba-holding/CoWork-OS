@@ -66,6 +66,10 @@ import {
   Issue,
   IssueFilters,
   LLMProviderType,
+  OrchestrationGraphRun,
+  OrchestrationNodeNotification,
+  WorkerRoleKind,
+  VerificationVerdict,
 } from "../../shared/types";
 import { parseSpawnAgentCount } from "../../shared/spawn-intent-detection";
 import {
@@ -88,10 +92,19 @@ import { PlaybookService } from "../memory/PlaybookService";
 import { UserProfileService } from "../memory/UserProfileService";
 import { RelationshipMemoryService } from "../memory/RelationshipMemoryService";
 import { AdaptiveStyleEngine } from "../memory/AdaptiveStyleEngine";
+import { MemoryConsolidator } from "../memory/MemoryConsolidator";
+import { TranscriptStore } from "../memory/TranscriptStore";
 import { getAwarenessService } from "../awareness/AwarenessService";
 import { PersonalityManager } from "../settings/personality-manager";
+import { MemoryFeaturesManager } from "../settings/memory-features-manager";
 import { IntentRoute, IntentRouter } from "./strategy/IntentRouter";
 import { DerivedTaskStrategy, TaskStrategyService } from "./strategy/TaskStrategyService";
+import {
+  resolveDefaultWorkerRoleKind,
+  resolveWorkerRoleAgentConfig,
+  resolveWorkerRoleKind,
+} from "./runtime/worker-role-registry";
+import { createVerificationRuntime } from "./runtime/VerificationRuntime";
 import type { AgentTeamOrchestrator } from "../agents/AgentTeamOrchestrator";
 import { AgentTeamItemRepository } from "../agents/AgentTeamItemRepository";
 import { AgentTeamRunRepository } from "../agents/AgentTeamRunRepository";
@@ -112,6 +125,8 @@ import {
 import { buildEntropySweepPrompt, collectBlastRadiusPaths } from "./post-task-entropy-sweep";
 import { isAutomatedTaskLike } from "../../shared/automated-task-detection";
 import { LLMProviderFactory } from "./llm/provider-factory";
+import { OrchestrationGraphEngine, type OrchestrationGraphNodeInput } from "./orchestration/OrchestrationGraphEngine";
+import { OrchestrationGraphRepository } from "./orchestration/OrchestrationGraphRepository";
 
 // Memory management constants
 const MAX_CACHED_EXECUTORS = 10; // Maximum number of completed task executors to keep in memory
@@ -194,6 +209,7 @@ function parseBooleanEnv(envName: string, fallback = false): boolean {
 
 const TASK_OVERRIDE_ALLOWLIST = new Set<keyof Task>([
   "assignedAgentRoleId",
+  "workerRole",
   "heartbeatRunId",
   "issueId",
   "companyId",
@@ -201,6 +217,11 @@ const TASK_OVERRIDE_ALLOWLIST = new Set<keyof Task>([
   "projectId",
   "requestDepth",
   "billingCode",
+  "sessionId",
+  "branchFromTaskId",
+  "branchFromEventId",
+  "branchLabel",
+  "resumeStrategy",
 ]);
 
 function sanitizeTaskOverrides(taskOverrides?: Partial<Task>): Partial<Task> | undefined {
@@ -257,6 +278,7 @@ export class AgentDaemon extends EventEmitter {
   private agentRoleRepo: AgentRoleRepository;
   private mentionRepo: MentionRepository;
   private teamOrchestrator: AgentTeamOrchestrator | null = null;
+  private orchestrationGraphEngine: OrchestrationGraphEngine;
   private activeTasks: Map<string, CachedExecutor> = new Map();
   private pendingApprovals: Map<
     string,
@@ -296,6 +318,7 @@ export class AgentDaemon extends EventEmitter {
    * When dequeued, these must resume via continuation flow, not normal execution.
    */
   private pendingContinuationTaskIds: Set<string> = new Set();
+  private pendingMemoryConsolidations: Set<string> = new Set();
   /** Git worktree manager for task isolation. */
   private worktreeManager: WorktreeManager;
   /** Comparison service for agent comparison mode. */
@@ -348,6 +371,32 @@ export class AgentDaemon extends EventEmitter {
 
     // Initialize worktree manager
     this.worktreeManager = new WorktreeManager(db);
+    this.orchestrationGraphEngine = new OrchestrationGraphEngine(db, {
+      createChildTask: (params) => this.createChildTask(params),
+      createRootTask: (params) =>
+        this.createTask({
+          title: params.title,
+          prompt: params.prompt,
+          workspaceId: params.workspaceId,
+          agentConfig: params.agentConfig,
+          source: params.source,
+          taskOverrides: params.assignedAgentRoleId
+            ? { assignedAgentRoleId: params.assignedAgentRoleId }
+            : undefined,
+        }),
+      getTaskById: (taskId) => this.getTaskById(taskId),
+      cancelTask: (taskId) => this.cancelTask(taskId),
+      getActiveAgentRoles: () => this.getActiveAgentRoles(),
+      emitRootEvent: (rootTaskId, eventType, payload) =>
+        this.taskRepo.findById(rootTaskId)
+          ? this.logEvent(rootTaskId, eventType as EventType, payload)
+          : undefined,
+    });
+    this.orchestrationGraphEngine.on("node_notification", (notification) => {
+      void this.handleOrchestrationNodeNotification(notification).catch((error) => {
+        console.error("[AgentDaemon] Orchestration notification handling failed:", error);
+      });
+    });
 
     // Start periodic cleanup of old executors
     this.cleanupIntervalHandle = setInterval(() => this.cleanupOldExecutors(), 5 * 60 * 1000); // Run every 5 minutes
@@ -370,6 +419,14 @@ export class AgentDaemon extends EventEmitter {
 
   getDatabase(): Database.Database {
     return this.dbManager.getDatabase();
+  }
+
+  getOrchestrationGraphEngine(): OrchestrationGraphEngine {
+    return this.orchestrationGraphEngine;
+  }
+
+  getOrchestrationGraphRepository(): OrchestrationGraphRepository {
+    return this.orchestrationGraphEngine.getRepository();
   }
 
   private isTransientRetryErrorMessage(message: unknown): boolean {
@@ -698,6 +755,8 @@ export class AgentDaemon extends EventEmitter {
    * Initialize the daemon - call after construction to set up queue
    */
   async initialize(): Promise<void> {
+    this.orchestrationGraphEngine.start();
+
     // Hard-switch migration: eagerly normalize active/incomplete task events to timeline v2.
     const activeAndIncompleteTasks = this.taskRepo.findByStatus([
       "queued",
@@ -825,6 +884,8 @@ export class AgentDaemon extends EventEmitter {
         this.resumeInterruptedTasks(tasksToResume);
       }, 2000);
     }
+
+    await this.orchestrationGraphEngine.resumeRunningRuns();
   }
 
   /**
@@ -1608,6 +1669,49 @@ export class AgentDaemon extends EventEmitter {
     this.launchContinuationExecution(effectiveTask, executor);
   }
 
+  async forkTaskSession(params: {
+    taskId: string;
+    prompt?: string;
+    branchLabel?: string;
+    fromEventId?: string;
+  }): Promise<Task> {
+    const sourceTask = this.taskRepo.findById(params.taskId);
+    if (!sourceTask) {
+      throw new Error(`Task ${params.taskId} not found`);
+    }
+    const branchLabel =
+      typeof params.branchLabel === "string" && params.branchLabel.trim().length > 0
+        ? params.branchLabel.trim()
+        : `fork-${new Date().toISOString().slice(11, 19).replace(/:/g, "-")}`;
+    const nextPrompt =
+      typeof params.prompt === "string" && params.prompt.trim().length > 0
+        ? params.prompt.trim()
+        : sourceTask.userPrompt || sourceTask.rawPrompt || sourceTask.prompt;
+
+    const forkedTask = await this.createTask({
+      title: `${sourceTask.title} (${branchLabel})`,
+      prompt: nextPrompt,
+      workspaceId: sourceTask.workspaceId,
+      agentConfig: sourceTask.agentConfig,
+      source: sourceTask.source || "manual",
+      taskOverrides: {
+        sessionId: crypto.randomUUID(),
+        branchFromTaskId: sourceTask.id,
+        branchFromEventId: params.fromEventId,
+        branchLabel,
+      },
+    });
+
+    this.logEvent(forkedTask.id, "log", {
+      message: "Session fork created",
+      sourceTaskId: sourceTask.id,
+      branchLabel,
+      branchFromEventId: params.fromEventId,
+    });
+
+    return forkedTask;
+  }
+
   /**
    * Create a new task in the database and start it
    * This is a convenience method used by the cron service
@@ -1651,6 +1755,25 @@ export class AgentDaemon extends EventEmitter {
       ...(params.source ? { source: params.source } : {}),
       ...(safeTaskOverrides || {}),
     });
+    const memoryFeatures = MemoryFeaturesManager.loadSettings();
+    const rootLineageUpdates: Partial<Task> = {
+      sessionId:
+        typeof safeTaskOverrides?.sessionId === "string" && safeTaskOverrides.sessionId.trim().length > 0
+          ? safeTaskOverrides.sessionId.trim()
+          : task.id,
+      resumeStrategy:
+        safeTaskOverrides?.resumeStrategy ||
+        (memoryFeatures.transcriptStoreEnabled ? "checkpoint" : "snapshot"),
+      ...(safeTaskOverrides?.branchFromTaskId
+        ? {
+            branchFromTaskId: safeTaskOverrides.branchFromTaskId,
+            branchFromEventId: safeTaskOverrides.branchFromEventId,
+            branchLabel: safeTaskOverrides.branchLabel,
+          }
+        : {}),
+    };
+    this.taskRepo.update(task.id, rootLineageUpdates);
+    Object.assign(task, rootLineageUpdates);
     this.logEvent(task.id, "log", {
       message:
         `Intent routed: ${derived.route.intent} | domain=${derived.route.domain} | ` +
@@ -1683,6 +1806,54 @@ export class AgentDaemon extends EventEmitter {
     return this.taskRepo.findByParent(parentTaskId);
   }
 
+  async createOrchestrationGraphRun(params: {
+    rootTaskId: string;
+    workspaceId: string;
+    kind: OrchestrationGraphRun["kind"];
+    maxParallel: number;
+    metadata?: Record<string, unknown>;
+    nodes: OrchestrationGraphNodeInput[];
+    edges?: Array<{ fromNodeKey: string; toNodeKey: string }>;
+  }) {
+    return this.orchestrationGraphEngine.createRun(params);
+  }
+
+  async appendOrchestrationGraphNodes(params: {
+    runId: string;
+    nodes: OrchestrationGraphNodeInput[];
+    edges?: Array<{ fromNodeId?: string; fromNodeKey?: string; toNodeId?: string; toNodeKey?: string }>;
+  }) {
+    return this.orchestrationGraphEngine.appendNodes(params);
+  }
+
+  getOrchestrationGraphSnapshot(runId: string) {
+    return this.getOrchestrationGraphRepository().findSnapshotByRunId(runId);
+  }
+
+  findLatestOrchestrationGraphByRootTask(rootTaskId: string) {
+    return this.getOrchestrationGraphRepository().findSnapshotByRootTaskId(rootTaskId);
+  }
+
+  listOrchestrationGraphsByRootTask(rootTaskId: string) {
+    return this.getOrchestrationGraphRepository().listSnapshotsByRootTaskId(rootTaskId);
+  }
+
+  findOrchestrationGraphByTeamRunId(teamRunId: string) {
+    return this.getOrchestrationGraphRepository().findSnapshotByTeamRunId(teamRunId);
+  }
+
+  findDelegatedNode(rootTaskId: string, handle: string) {
+    return this.orchestrationGraphEngine.resolveHandle(rootTaskId, handle);
+  }
+
+  async waitForDelegatedNode(rootTaskId: string, handle: string, timeoutSeconds: number) {
+    return this.orchestrationGraphEngine.waitForHandle(rootTaskId, handle, timeoutSeconds);
+  }
+
+  async cancelDelegatedNode(rootTaskId: string, handle: string): Promise<boolean> {
+    return this.orchestrationGraphEngine.cancelHandle(rootTaskId, handle);
+  }
+
   /**
    * Create a child task (sub-agent or parallel agent)
    */
@@ -1696,6 +1867,7 @@ export class AgentDaemon extends EventEmitter {
     agentConfig?: AgentConfig;
     depth?: number;
     assignedAgentRoleId?: string;
+    workerRole?: WorkerRoleKind;
     boardColumn?: BoardColumn;
     priority?: number;
     budgetTokens?: number;
@@ -1839,7 +2011,7 @@ export class AgentDaemon extends EventEmitter {
       );
     }
 
-    const mergedAgentConfig: AgentConfig | undefined = (() => {
+    let mergedAgentConfig: AgentConfig | undefined = (() => {
       const next: AgentConfig = params.agentConfig ? { ...params.agentConfig } : {};
       if (mergedGatewayContext) {
         next.gatewayContext = mergedGatewayContext;
@@ -1859,6 +2031,9 @@ export class AgentDaemon extends EventEmitter {
       return Object.keys(next).length > 0 ? next : undefined;
     })();
 
+    const workerRole = resolveWorkerRoleKind(params.workerRole) || resolveDefaultWorkerRoleKind();
+    mergedAgentConfig = resolveWorkerRoleAgentConfig(workerRole, mergedAgentConfig);
+
     const task = this.taskRepo.create({
       title: params.title,
       prompt: params.prompt,
@@ -1869,12 +2044,20 @@ export class AgentDaemon extends EventEmitter {
       parentTaskId: params.parentTaskId,
       agentType: params.agentType,
       agentConfig: mergedAgentConfig,
+      workerRole,
       depth: params.depth ?? 0,
       budgetTokens: params.budgetTokens,
       budgetCost: params.budgetCost,
     });
     // Apply agent squad metadata before starting so role context is available immediately.
-    const initialUpdates: Partial<Task> = {};
+    const memoryFeatures = MemoryFeaturesManager.loadSettings();
+    const initialUpdates: Partial<Task> = {
+      sessionId: parent?.sessionId || params.parentTaskId,
+      branchFromTaskId: parent?.branchFromTaskId,
+      branchFromEventId: parent?.branchFromEventId,
+      branchLabel: parent?.branchLabel,
+      resumeStrategy: memoryFeatures.transcriptStoreEnabled ? "checkpoint" : "snapshot",
+    };
     if (
       typeof params.assignedAgentRoleId === "string" &&
       params.assignedAgentRoleId.trim().length > 0
@@ -2934,7 +3117,6 @@ export class AgentDaemon extends EventEmitter {
       eventId,
       seq,
     });
-
     // Stage machine: DISCOVER -> BUILD -> VERIFY -> FIX -> DELIVER
     const shouldInferStageFromEvent =
       !isTimelineEventType(type) ||
@@ -2992,6 +3174,91 @@ export class AgentDaemon extends EventEmitter {
       legacyType,
       legacyPayload,
     });
+    const persistTranscriptArtifacts = (this as Any).persistTranscriptArtifacts;
+    if (typeof persistTranscriptArtifacts === "function") {
+      void persistTranscriptArtifacts.call(this, taskId, timelineEvent, legacyType, legacyPayload);
+    }
+  }
+
+  private async persistTranscriptArtifacts(
+    taskId: string,
+    timelineEvent: TaskEvent,
+    legacyType: string | undefined,
+    legacyPayload: Record<string, unknown>,
+  ): Promise<void> {
+    let features;
+    try {
+      features = MemoryFeaturesManager.loadSettings();
+    } catch {
+      return;
+    }
+
+    if (!features.transcriptStoreEnabled && !features.backgroundConsolidationEnabled) {
+      return;
+    }
+
+    const task = this.taskRepo.findById(taskId);
+    if (!task) return;
+    const workspace = this.workspaceRepo.findById(task.workspaceId);
+    if (!workspace?.path) return;
+
+    if (features.transcriptStoreEnabled) {
+      const legacyEvent: TaskEvent = {
+        ...timelineEvent,
+        type: (legacyType as EventType) || timelineEvent.type,
+        payload: legacyPayload,
+        legacyType: (legacyType as EventType) || timelineEvent.legacyType,
+      };
+      await TranscriptStore.appendEvent(workspace.path, legacyEvent).catch(() => undefined);
+      if (legacyType === "conversation_snapshot") {
+        await TranscriptStore.writeCheckpoint(workspace.path, taskId, {
+          ...(legacyPayload as Record<string, unknown>),
+          sourceEventId: timelineEvent.eventId,
+          sourceTimestamp: timelineEvent.timestamp,
+          resumeStrategy: "checkpoint",
+        }).catch(() => undefined);
+      }
+    }
+
+    if (features.backgroundConsolidationEnabled && legacyType === "task_completed") {
+      this.scheduleMemoryConsolidation(task);
+    }
+  }
+
+  private scheduleMemoryConsolidation(task: Task): void {
+    if (this.pendingMemoryConsolidations.has(task.workspaceId)) {
+      return;
+    }
+    const workspace = this.workspaceRepo.findById(task.workspaceId);
+    if (!workspace?.path) {
+      return;
+    }
+    this.pendingMemoryConsolidations.add(task.workspaceId);
+    setTimeout(() => {
+      void MemoryConsolidator.run({
+        workspaceId: task.workspaceId,
+        workspacePath: workspace.path,
+        taskId: task.id,
+        taskPrompt: task.prompt,
+      })
+        .then((result) => {
+          this.logEvent(task.id, "log", {
+            message: result.skipped
+              ? "Memory consolidation skipped"
+              : "Memory consolidation completed",
+            consolidation: result,
+          });
+        })
+        .catch((error) => {
+          this.logEvent(task.id, "error", {
+            error: error instanceof Error ? error.message : String(error),
+            source: "memory_consolidation",
+          });
+        })
+        .finally(() => {
+          this.pendingMemoryConsolidations.delete(task.workspaceId);
+        });
+    }, 1000);
   }
 
   private normalizeArtifactEventPayload(
@@ -3413,6 +3680,59 @@ export class AgentDaemon extends EventEmitter {
     }
   }
 
+  private async handleOrchestrationNodeNotification(
+    notification: OrchestrationNodeNotification,
+  ): Promise<void> {
+    const repo = this.getOrchestrationGraphRepository();
+    const node = repo.findNodeById(notification.nodeId);
+    if (!node?.teamItemId || !node.teamRunId) return;
+
+    const itemRepo = new AgentTeamItemRepository(this.dbManager.getDatabase());
+    const existing = itemRepo.findById(node.teamItemId);
+    if (!existing) return;
+
+    const nextStatus =
+      notification.status === "completed"
+        ? "done"
+        : notification.status === "failed"
+          ? "failed"
+          : notification.status === "cancelled"
+            ? "blocked"
+            : "in_progress";
+
+    const updated = itemRepo.update({
+      id: existing.id,
+      sourceTaskId: node.taskId || existing.sourceTaskId,
+      status: nextStatus,
+      resultSummary:
+        notification.status === "running"
+          ? existing.resultSummary
+          : notification.result || notification.summary,
+    });
+    if (!updated) return;
+
+    if (notification.status === "running" && node.taskId) {
+      this.emitTeamRunEvent({
+        type: "team_item_spawned",
+        timestamp: Date.now(),
+        runId: node.teamRunId,
+        item: updated,
+        spawnedTaskId: node.taskId,
+      });
+      return;
+    }
+
+    this.emitTeamRunEvent({
+      type: "team_item_updated",
+      timestamp: Date.now(),
+      teamRunId: node.teamRunId,
+      item: updated,
+    });
+    if (this.teamOrchestrator && notification.status !== "running") {
+      await this.teamOrchestrator.tickRun(node.teamRunId, "graph_node_notification");
+    }
+  }
+
   /**
    * Broadcast a team thought event to all renderer windows.
    */
@@ -3740,6 +4060,30 @@ export class AgentDaemon extends EventEmitter {
           description: task.title,
         };
       case "task_completed":
+        {
+          const summary = [
+            typeof payload?.resultSummary === "string" ? payload.resultSummary.trim() : "",
+            typeof payload?.semanticSummary === "string" ? payload.semanticSummary.trim() : "",
+          ]
+            .filter((value) => value.length > 0)
+            .join(" · ");
+          const verificationVerdict =
+            typeof payload?.verificationVerdict === "string"
+              ? payload.verificationVerdict.trim()
+              : "";
+          const verificationReport =
+            typeof payload?.verificationReport === "string"
+              ? payload.verificationReport.trim()
+              : "";
+          const verificationSuffix =
+            verificationVerdict || verificationReport
+              ? [
+                  verificationVerdict ? `Verification: ${verificationVerdict}` : "",
+                  verificationReport ? verificationReport : "",
+                ]
+                  .filter((value) => value.length > 0)
+                  .join(" — ")
+              : "";
         return {
           workspaceId: task.workspaceId,
           taskId: task.id,
@@ -3747,8 +4091,15 @@ export class AgentDaemon extends EventEmitter {
           actorType,
           activityType,
           title: "Task completed",
-          description: task.title,
+          description:
+            [summary, verificationSuffix].filter((value) => value.length > 0).join(" · ") ||
+            task.title,
+          metadata: {
+            ...(payload || {}),
+            activityKind: "task_completed",
+          },
         };
+        }
       case "learning_progress":
         return {
           workspaceId: task.workspaceId,
@@ -3869,7 +4220,11 @@ export class AgentDaemon extends EventEmitter {
           activityType: "error",
           title: type === "error" ? "Task error" : "Execution issue",
           description:
-            payload?.error || payload?.message || payload?.step?.description || task.title,
+            payload?.report ||
+            payload?.error ||
+            payload?.message ||
+            payload?.step?.description ||
+            task.title,
         };
       case "verification_pending_user_action":
         return {
@@ -3889,7 +4244,7 @@ export class AgentDaemon extends EventEmitter {
           actorType,
           activityType: "info",
           title: "Verification passed",
-          description: payload?.message || task.title,
+          description: payload?.report || payload?.message || task.title,
         };
       case "file_created":
         return {
@@ -5181,92 +5536,48 @@ export class AgentDaemon extends EventEmitter {
     verificationEvidenceBundle?: TaskVerificationEvidenceBundle,
     timeoutMs = 120_000,
   ): Promise<void> {
-    // Guard: verifier should only run for top-level tasks.
     if (parentTask.parentTaskId || (parentTask.agentType ?? "main") !== "main") return;
-
     const currentDepth = parentTask.depth ?? 0;
     if (currentDepth >= 3) return;
 
-    const bundleBlock =
-      verificationEvidenceBundle && verificationEvidenceBundle.entries.length > 0
-        ? JSON.stringify(verificationEvidenceBundle.entries.slice(0, 40), null, 2)
-        : "(no structured verification evidence — rely on files and summary)";
-
-    const verificationPrompt = [
-      "You are an independent post-completion verification agent.",
-      "Audit the deliverables and detect missing work, regressions, or unsafe assumptions.",
-      "",
-      "## Original Task",
-      `Title: ${parentTask.title}`,
-      `Prompt: ${parentTask.rawPrompt || parentTask.userPrompt || parentTask.prompt}`,
-      "",
-      "## Parent Summary",
-      parentSummary || "(no summary)",
-      "",
-      "## Deterministic verification evidence (from verified mode)",
-      bundleBlock,
-      "",
-      "## Instructions",
-      "1. Inspect files and outputs using read/search tools only.",
-      "2. Check whether the original request was actually satisfied.",
-      "3. Start the final answer with exactly VERDICT: PASS or VERDICT: FAIL.",
-      "4. Then provide concise bullet findings focused on gaps and evidence.",
-      "5. Do not modify files.",
-    ].join("\n");
-
-    const childTask = await this.createChildTask({
-      title: `Verify: ${parentTask.title}`.slice(0, 200),
-      prompt: verificationPrompt,
-      workspaceId: parentTask.workspaceId,
-      parentTaskId: parentTask.id,
-      agentType: "sub",
-      depth: currentDepth + 1,
-      agentConfig: {
-        autonomousMode: true,
-        allowUserInput: false,
-        retainMemory: false,
-        maxTurns: 12,
-        conversationMode: "task",
-        llmProfile: "strong",
-        llmProfileForced: true,
-        verificationAgent: false,
-        reviewPolicy: "off",
-        toolRestrictions: ["group:write", "group:destructive", "group:image"],
-      },
+    const verificationRuntime = createVerificationRuntime({
+      runReadOnlyChildTaskAndWait: (params) =>
+        this.runReadOnlyChildTaskAndWait({
+          ...params,
+          workerRole: "verifier",
+        }),
     });
-
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const child = this.taskRepo.findById(childTask.id);
-      if (!child) break;
-      if (child.status === "completed" || child.status === "failed" || child.status === "cancelled") {
-        const verdict = child.resultSummary || "";
-        const passed = /VERDICT:\s*PASS/i.test(verdict);
-        this.logEvent(parentTask.id, passed ? "verification_passed" : "verification_failed", {
-          source: "post_completion_review_gate",
-          childTaskId: childTask.id,
-          message: passed
-            ? "Post-completion verifier confirmed deliverables."
-            : "Post-completion verifier found issues.",
-          verdict: verdict.slice(0, 2000),
-        });
-
-        if (!passed) {
-          this.taskRepo.update(parentTask.id, {
-            terminalStatus: "partial_success",
-            failureClass: "contract_error",
-          });
-        }
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-
-    this.logEvent(parentTask.id, "verification_failed", {
-      source: "post_completion_review_gate",
-      message: "Post-completion verifier timed out.",
+    const result = await verificationRuntime.run({
+      parentTask,
+      parentSummary,
+      verificationEvidenceBundle,
       timeoutMs,
     });
+    if (!result.gated) return;
+
+    const eventType = result.verdict === "PASS" ? "verification_passed" : "verification_failed";
+    this.logEvent(parentTask.id, eventType, {
+      source: "post_completion_review_gate",
+      childTaskId: result.childTaskId,
+      message:
+        result.verdict === "PASS"
+          ? "Post-completion verifier confirmed deliverables."
+          : "Post-completion verifier found issues.",
+      report: result.report.slice(0, 2000),
+      verificationVerdict: result.verdict,
+    });
+
+    const taskUpdates: Partial<Task> = {
+      verificationVerdict: result.verdict,
+      verificationReport: result.report,
+    };
+    if (result.verdict === "FAIL" || (result.verdict === "PARTIAL" && result.shouldBlock)) {
+      taskUpdates.terminalStatus = "failed";
+      taskUpdates.failureClass = "required_verification";
+    } else if (result.verdict === "PARTIAL") {
+      taskUpdates.terminalStatus = "partial_success";
+    }
+    this.taskRepo.update(parentTask.id, taskUpdates);
   }
 
   /**
@@ -5294,61 +5605,109 @@ export class AgentDaemon extends EventEmitter {
       resultSummary: params.parentSummary,
     });
 
-    const childTask = await this.createChildTask({
+    const result = await this.runReadOnlyChildTaskAndWait({
+      parentTask,
       title: `Entropy sweep: ${parentTask.title}`.slice(0, 200),
       prompt: sweepPrompt,
-      workspaceId: parentTask.workspaceId,
-      parentTaskId: parentTask.id,
-      agentType: "sub",
-      depth: currentDepth + 1,
+      timeoutMs,
+      workerRole: "researcher",
       agentConfig: {
-        autonomousMode: true,
-        allowUserInput: false,
-        retainMemory: false,
         maxTurns: 14,
-        conversationMode: "task",
         llmProfile: "strong",
         llmProfileForced: true,
         verificationAgent: false,
         reviewPolicy: "off",
         entropySweepPolicy: "off",
-        toolRestrictions: ["group:write", "group:destructive", "group:image"],
       },
     });
-
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const child = this.taskRepo.findById(childTask.id);
-      if (!child) break;
-      if (child.status === "completed") {
-        const text = child.resultSummary || "";
-        const clean = /ENTROPY:\s*CLEAN/i.test(text) || /\bNO_ISSUES_FOUND\b/i.test(text);
-        this.logEvent(parentTask.id, "entropy_sweep_completed", {
-          source: "post_completion_entropy_sweep",
-          childTaskId: childTask.id,
-          blastRadiusCount: blastRadius.length,
-          clean,
-          summary: text.slice(0, 2000),
-        });
-        return;
-      }
-      if (child.status === "failed" || child.status === "cancelled") {
-        this.logEvent(parentTask.id, "entropy_sweep_failed", {
-          source: "post_completion_entropy_sweep",
-          childTaskId: childTask.id,
-          message: `Entropy sweep ${child.status}.`,
-          summary: String(child.resultSummary || "").slice(0, 2000),
-        });
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (result.status === "completed") {
+      const text = result.summary || "";
+      const clean = /ENTROPY:\s*CLEAN/i.test(text) || /\bNO_ISSUES_FOUND\b/i.test(text);
+      this.logEvent(parentTask.id, "entropy_sweep_completed", {
+        source: "post_completion_entropy_sweep",
+        childTaskId: result.childTaskId,
+        blastRadiusCount: blastRadius.length,
+        clean,
+        summary: text.slice(0, 2000),
+      });
+      return;
+    }
+    if (result.status === "failed" || result.status === "cancelled") {
+      this.logEvent(parentTask.id, "entropy_sweep_failed", {
+        source: "post_completion_entropy_sweep",
+        childTaskId: result.childTaskId,
+        message: `Entropy sweep ${result.status}.`,
+        summary: String(result.summary || "").slice(0, 2000),
+      });
+      return;
     }
 
     this.logEvent(parentTask.id, "entropy_sweep_failed", {
       source: "post_completion_entropy_sweep",
+      childTaskId: result.childTaskId,
       message: "Entropy sweep timed out.",
       timeoutMs,
     });
+  }
+
+  async runReadOnlyChildTaskAndWait(params: {
+    parentTask: Task;
+    title: string;
+    prompt: string;
+    timeoutMs?: number;
+    agentConfig?: AgentConfig;
+    workerRole?: WorkerRoleKind;
+  }): Promise<{
+    childTaskId: string;
+    status: "completed" | "failed" | "cancelled" | "timeout" | "missing";
+    summary: string;
+  }> {
+    const timeoutMs = params.timeoutMs ?? 120_000;
+    const currentDepth = params.parentTask.depth ?? 0;
+    const childTask = await this.createChildTask({
+      title: params.title,
+      prompt: params.prompt,
+      workspaceId: params.parentTask.workspaceId,
+      parentTaskId: params.parentTask.id,
+      agentType: "sub",
+      depth: currentDepth + 1,
+        agentConfig: {
+          autonomousMode: true,
+          allowUserInput: false,
+          retainMemory: false,
+          conversationMode: "task",
+          verificationAgent: false,
+          toolRestrictions: ["group:write", "group:destructive", "group:image"],
+          ...(params.agentConfig || {}),
+        },
+        workerRole: params.workerRole,
+      });
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const child = this.taskRepo.findById(childTask.id);
+      if (!child) {
+        return {
+          childTaskId: childTask.id,
+          status: "missing",
+          summary: "",
+        };
+      }
+      if (child.status === "completed" || child.status === "failed" || child.status === "cancelled") {
+        return {
+          childTaskId: childTask.id,
+          status: child.status,
+          summary: String(child.resultSummary || ""),
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    return {
+      childTaskId: childTask.id,
+      status: "timeout",
+      summary: "",
+    };
   }
 
   /**
@@ -5376,6 +5735,9 @@ export class AgentDaemon extends EventEmitter {
       verificationMessage?: string;
       /** Deterministic checks run in verified mode (shell, files, http, etc.) */
       verificationEvidenceBundle?: TaskVerificationEvidenceBundle;
+      semanticSummary?: string;
+      verificationVerdict?: VerificationVerdict;
+      verificationReport?: string;
     },
   ): void {
     const existingTask = this.taskRepo.findById(taskId);
@@ -5995,6 +6357,13 @@ export class AgentDaemon extends EventEmitter {
       budgetUsage: metadata?.budgetUsage,
       riskLevel: risk.level,
       ...(trimmedSummary ? { resultSummary: trimmedSummary } : {}),
+      ...(typeof metadata?.semanticSummary === "string" && metadata.semanticSummary.trim().length > 0
+        ? { semanticSummary: metadata.semanticSummary.trim() }
+        : {}),
+      ...(metadata?.verificationVerdict ? { verificationVerdict: metadata.verificationVerdict } : {}),
+      ...(typeof metadata?.verificationReport === "string" && metadata.verificationReport.trim().length > 0
+        ? { verificationReport: metadata.verificationReport.trim() }
+        : {}),
     };
     this.taskRepo.update(taskId, updates);
     this.clearRetryState(taskId);
@@ -6024,6 +6393,13 @@ export class AgentDaemon extends EventEmitter {
       ...(bestKnownOutcome ? { bestKnownOutcome } : {}),
       ...(metadata?.budgetUsage ? { budgetUsage: metadata.budgetUsage } : {}),
       ...(metadata?.outputSummary ? { outputSummary: metadata.outputSummary } : {}),
+      ...(typeof metadata?.semanticSummary === "string" && metadata.semanticSummary.trim().length > 0
+        ? { semanticSummary: metadata.semanticSummary.trim() }
+        : {}),
+      ...(metadata?.verificationVerdict ? { verificationVerdict: metadata.verificationVerdict } : {}),
+      ...(typeof metadata?.verificationReport === "string" && metadata.verificationReport.trim().length > 0
+        ? { verificationReport: metadata.verificationReport.trim() }
+        : {}),
       ...(metadata?.verificationOutcome ? { verificationOutcome: metadata.verificationOutcome } : {}),
       ...(metadata?.verificationScope ? { verificationScope: metadata.verificationScope } : {}),
       ...(metadata?.verificationEvidenceMode
@@ -6459,6 +6835,7 @@ export class AgentDaemon extends EventEmitter {
    */
   async shutdown(): Promise<void> {
     console.log("Shutting down agent daemon...");
+    this.orchestrationGraphEngine.stop();
 
     // Clear the cleanup interval
     if (this.cleanupIntervalHandle) {
