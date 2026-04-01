@@ -233,15 +233,43 @@ export class ChannelGateway {
     const onTaskCompleted = (data: {
       taskId: string;
       resultSummary?: string;
+      semanticSummary?: string;
+      verificationVerdict?: string;
+      verificationReport?: string;
       message?: string;
     }) => {
-      // Prefer an explicit result summary if provided by the daemon.
-      // Otherwise, fall back to the best streamed assistant message.
       const messageResult =
         typeof data.message === "string" && data.message.trim() !== "Task completed successfully"
-          ? data.message
+          ? data.message.trim()
           : undefined;
-      const result = (data.resultSummary || lastMessages.get(data.taskId) || messageResult)?.trim();
+      const resultSummary =
+        typeof data.resultSummary === "string" ? data.resultSummary.trim() : "";
+      const semanticSummary =
+        typeof data.semanticSummary === "string" ? data.semanticSummary.trim() : "";
+      const verificationVerdict =
+        typeof data.verificationVerdict === "string" ? data.verificationVerdict.trim() : "";
+      const verificationReport =
+        typeof data.verificationReport === "string" ? data.verificationReport.trim() : "";
+      const fallbackMessage = lastMessages.get(data.taskId) || messageResult || "";
+      const summaryPieces = [resultSummary, semanticSummary].filter(
+        (value): value is string => Boolean(value && value.length > 0),
+      );
+      let result = summaryPieces.join("\n\n").trim();
+      if (!result) {
+        result = fallbackMessage;
+      }
+      if (verificationVerdict || verificationReport) {
+        const verificationLines = [
+          verificationVerdict ? `Verification: ${verificationVerdict}` : "",
+          verificationReport ? verificationReport : "",
+        ]
+          .filter((value) => value.length > 0)
+          .join("\n");
+        result = [result, verificationLines].filter((value) => value.length > 0).join("\n\n").trim();
+      }
+      if (!result) {
+        result = fallbackMessage;
+      }
       this.router.handleTaskCompletion(data.taskId, result);
       lastMessages.delete(data.taskId);
       followUpMessagesSent.delete(data.taskId);
@@ -443,6 +471,9 @@ export class ChannelGateway {
           onTaskCompleted({
             taskId,
             resultSummary: payload.resultSummary as string,
+            semanticSummary: payload.semanticSummary as string,
+            verificationVerdict: payload.verificationVerdict as string,
+            verificationReport: payload.verificationReport as string,
             message: payload.message as string,
           });
           return;
