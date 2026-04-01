@@ -19,41 +19,25 @@ describe("TaskExecutor entrypoint guards", () => {
     expect(executor.sendMessageUnlocked).toHaveBeenCalledWith("hi", undefined);
   });
 
-  it("routes executeStep through the feature-flagged unified branch", async () => {
+  it("routes executeStep through the unified branch", async () => {
     const executor = Object.create(TaskExecutor.prototype) as Any;
     const step = { id: "s1", description: "do work", status: "pending" };
 
-    executor.useUnifiedTurnLoop = true;
     executor.executeStepUnified = vi.fn(async () => undefined);
     executor.executeStepLegacy = vi.fn(async () => undefined);
     await executor.executeStep(step);
     expect(executor.executeStepUnified).toHaveBeenCalledWith(step);
     expect(executor.executeStepLegacy).not.toHaveBeenCalled();
-
-    executor.useUnifiedTurnLoop = false;
-    executor.executeStepUnified = vi.fn(async () => undefined);
-    executor.executeStepLegacy = vi.fn(async () => undefined);
-    await executor.executeStep(step);
-    expect(executor.executeStepLegacy).toHaveBeenCalledWith(step);
-    expect(executor.executeStepUnified).not.toHaveBeenCalled();
   });
 
-  it("routes sendMessageUnlocked through the feature-flagged unified branch", async () => {
+  it("routes sendMessageUnlocked through the unified branch", async () => {
     const executor = Object.create(TaskExecutor.prototype) as Any;
 
-    executor.useUnifiedTurnLoop = true;
     executor.sendMessageUnified = vi.fn(async () => undefined);
     executor.sendMessageLegacy = vi.fn(async () => undefined);
     await executor.sendMessageUnlocked("hello");
     expect(executor.sendMessageUnified).toHaveBeenCalledWith("hello", undefined);
     expect(executor.sendMessageLegacy).not.toHaveBeenCalled();
-
-    executor.useUnifiedTurnLoop = false;
-    executor.sendMessageUnified = vi.fn(async () => undefined);
-    executor.sendMessageLegacy = vi.fn(async () => undefined);
-    await executor.sendMessageUnlocked("hello");
-    expect(executor.sendMessageLegacy).toHaveBeenCalledWith("hello", undefined);
-    expect(executor.sendMessageUnified).not.toHaveBeenCalled();
   });
 
   it("routes sendMessageUnlocked through the acpx runtime branch when configured", async () => {
@@ -73,15 +57,14 @@ describe("TaskExecutor entrypoint guards", () => {
     executor.isAcpxExternalRuntimeTask = vi.fn(() => true);
     executor.sendMessageWithAcpxRuntime = vi.fn(async () => undefined);
     executor.disableExternalRuntimeForFallback = vi.fn();
-    executor.useUnifiedTurnLoop = false;
     executor.sendMessageUnified = vi.fn(async () => undefined);
     executor.sendMessageLegacy = vi.fn(async () => undefined);
 
     await executor.sendMessageUnlocked("hello");
 
     expect(executor.sendMessageWithAcpxRuntime).toHaveBeenCalledWith("hello", undefined);
-    expect(executor.sendMessageLegacy).not.toHaveBeenCalled();
     expect(executor.sendMessageUnified).not.toHaveBeenCalled();
+    expect(executor.sendMessageLegacy).not.toHaveBeenCalled();
   });
 
   it("falls back to native sendMessage flow when acpx is unavailable", async () => {
@@ -103,14 +86,13 @@ describe("TaskExecutor entrypoint guards", () => {
       throw new AcpxRuntimeUnavailableError();
     });
     executor.disableExternalRuntimeForFallback = vi.fn();
-    executor.useUnifiedTurnLoop = false;
     executor.sendMessageUnified = vi.fn(async () => undefined);
     executor.sendMessageLegacy = vi.fn(async () => undefined);
 
     await executor.sendMessageUnlocked("hello");
 
     expect(executor.disableExternalRuntimeForFallback).toHaveBeenCalledTimes(1);
-    expect(executor.sendMessageLegacy).toHaveBeenCalledWith("hello", undefined);
+    expect(executor.sendMessageUnified).toHaveBeenCalledWith("hello", undefined);
   });
 
   it("deterministically delegates explicit Claude child-task requests via spawn_agent", async () => {
@@ -245,7 +227,6 @@ describe("TaskExecutor entrypoint guards", () => {
       throw new AcpxRuntimeUnavailableError();
     });
     executor.disableExternalRuntimeForFallback = vi.fn();
-    executor.useUnifiedTurnLoop = false;
     executor.sendMessageUnified = vi.fn(async () => undefined);
     executor.sendMessageLegacy = vi.fn(async () => undefined);
     executor.getAcpxExternalRuntimeConfig = vi.fn(
@@ -256,6 +237,64 @@ describe("TaskExecutor entrypoint guards", () => {
       "Claude Code acpx runtime unavailable for follow-up",
     );
     expect(executor.disableExternalRuntimeForFallback).not.toHaveBeenCalled();
-    expect(executor.sendMessageLegacy).not.toHaveBeenCalled();
+    expect(executor.sendMessageUnified).not.toHaveBeenCalled();
+  });
+
+  it("finalizeFollowUpCompletion syncs task row and in-memory task state", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      id: "task-follow-up",
+      status: "executing",
+      error: "old error",
+      terminalStatus: "failed",
+      failureClass: "contract_error",
+      resultSummary: "older summary",
+      semanticSummary: "Opened canvas",
+    };
+    executor.bestKnownOutcome = {
+      summary: "fresh summary",
+      terminalStatus: "ok",
+      failureClass: undefined,
+      outputSummary: { outputCount: 1, fileCount: 1, files: [] },
+    };
+    executor.buildResultSummary = vi.fn(() => "fresh summary");
+    executor.getContentFallback = vi.fn(() => "");
+    executor.daemon = {
+      updateTask: vi.fn(),
+    };
+    executor.emitEvent = vi.fn();
+
+    (TaskExecutor as Any).prototype.finalizeFollowUpCompletion.call(
+      executor,
+      "Follow-up completed (24 tool calls)",
+      { clearTerminalFailure: true },
+    );
+
+    expect(executor.task.status).toBe("completed");
+    expect(typeof executor.task.completedAt).toBe("number");
+    expect(executor.task.error).toBeUndefined();
+    expect(executor.task.terminalStatus).toBeUndefined();
+    expect(executor.task.failureClass).toBeUndefined();
+    expect(executor.task.resultSummary).toBe("fresh summary");
+    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
+      "task-follow-up",
+      expect.objectContaining({
+        status: "completed",
+        error: null,
+        terminalStatus: undefined,
+        failureClass: undefined,
+        resultSummary: "fresh summary",
+        semanticSummary: "Opened canvas",
+        bestKnownOutcome: executor.bestKnownOutcome,
+      }),
+    );
+    expect(executor.emitEvent).toHaveBeenCalledWith(
+      "task_completed",
+      expect.objectContaining({
+        message: "Follow-up completed (24 tool calls)",
+        resultSummary: "fresh summary",
+        semanticSummary: "Opened canvas",
+      }),
+    );
   });
 });
