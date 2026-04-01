@@ -6,6 +6,7 @@ export interface PromptSection {
   text: string;
   maxTokens?: number;
   required?: boolean;
+  layerKind?: "always" | "optional" | "on_demand";
   // Larger value means drop earlier when total budget is exceeded.
   dropPriority?: number;
 }
@@ -91,6 +92,7 @@ export function composePromptSections(
         ...section,
         index,
         required: section.required !== false,
+        layerKind: section.layerKind || (section.required === false ? "optional" : "always"),
         dropPriority: section.dropPriority ?? 0,
         text,
         tokens: estimateTokens(text),
@@ -113,7 +115,7 @@ export function composePromptSections(
 
   if (totalTokens > totalBudgetTokens) {
     const removable = working
-      .filter((section) => !section.required)
+      .filter((section) => !section.required && section.layerKind !== "always")
       .sort((a, b) => {
         if (a.dropPriority !== b.dropPriority) return b.dropPriority - a.dropPriority;
         return b.index - a.index;
