@@ -62,4 +62,15 @@ describe("sanitizeToolCallTextFromAssistant", () => {
     expect(result.text).toBe("I ran git status locally and the working tree is clean.");
     expect(result.hadToolCallText).toBe(false);
   });
+
+  it("removes inline tool json plus generic tool tags from mixed progress text", () => {
+    const result = sanitizeToolCallTextFromAssistant(
+      'Tackling: {"id":"call_skill_list","tool":"skill_list","input":{}} <tool name="skill_list">{}</tool>\n{"tool_name":"list_directory","arguments":"{\\"path\\":\\".\\"}"} {"description":"Assuming the goal is a publication-safe analysis","steps":[]}',
+    );
+
+    expect(result.text).toBe(
+      'Tackling:\n{"description":"Assuming the goal is a publication-safe analysis","steps":[]}',
+    );
+    expect(result.hadToolCallText).toBe(true);
+  });
 });
