@@ -616,6 +616,7 @@ rateLimiter.configure(IPC_CHANNELS.TASK_SEND_MESSAGE, RATE_LIMIT_CONFIGS.expensi
 rateLimiter.configure(IPC_CHANNELS.TASK_STEP_FEEDBACK, RATE_LIMIT_CONFIGS.limited);
 rateLimiter.configure(IPC_CHANNELS.TASK_WRAP_UP, RATE_LIMIT_CONFIGS.limited);
 rateLimiter.configure(IPC_CHANNELS.TASK_CONTINUE, RATE_LIMIT_CONFIGS.limited);
+rateLimiter.configure(IPC_CHANNELS.TASK_FORK_SESSION, RATE_LIMIT_CONFIGS.limited);
 rateLimiter.configure(IPC_CHANNELS.TASK_PIN, RATE_LIMIT_CONFIGS.limited);
 rateLimiter.configure(IPC_CHANNELS.TASK_EXPORT_JSON, RATE_LIMIT_CONFIGS.standard);
 rateLimiter.configure(IPC_CHANNELS.LLM_SAVE_SETTINGS, RATE_LIMIT_CONFIGS.limited);
@@ -761,6 +762,11 @@ export async function setupIpcHandlers(
     createChildTask: (params) => agentDaemon.createChildTask(params as Any),
     cancelTask: (taskId: string) => agentDaemon.cancelTask(taskId),
     wrapUpTask: (taskId: string) => agentDaemon.wrapUpTask(taskId),
+    createOrchestrationGraphRun: (params) => agentDaemon.createOrchestrationGraphRun(params as Any),
+    appendOrchestrationGraphNodes: (params) =>
+      agentDaemon.appendOrchestrationGraphNodes(params as Any),
+    findOrchestrationGraphByTeamRunId: (teamRunId: string) =>
+      agentDaemon.findOrchestrationGraphByTeamRunId(teamRunId),
     completeRootTask: (taskId, status, summary) => {
       taskRepo.update(taskId, { status, resultSummary: summary, completedAt: Date.now() });
       emitTaskStatusEvent(taskId, status, { resultSummary: summary });
@@ -2636,6 +2642,27 @@ export async function setupIpcHandlers(
     const validated = validateInput(UUIDSchema, id, "task ID");
     await agentDaemon.continueTask(validated);
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.TASK_FORK_SESSION,
+    async (
+      _,
+      data: { taskId: string; prompt?: string; branchLabel?: string; fromEventId?: string },
+    ) => {
+      checkRateLimit(IPC_CHANNELS.TASK_FORK_SESSION);
+      const taskId = validateInput(UUIDSchema, data.taskId, "task ID");
+      const fromEventId =
+        typeof data.fromEventId === "string" && data.fromEventId.trim().length > 0
+          ? data.fromEventId.trim()
+          : undefined;
+      return agentDaemon.forkTaskSession({
+        taskId,
+        ...(typeof data.prompt === "string" ? { prompt: data.prompt } : {}),
+        ...(typeof data.branchLabel === "string" ? { branchLabel: data.branchLabel } : {}),
+        ...(fromEventId ? { fromEventId } : {}),
+      });
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.TASK_STEP_FEEDBACK, async (_, data) => {
     checkRateLimit(IPC_CHANNELS.TASK_STEP_FEEDBACK);
