@@ -47,13 +47,38 @@ vi.mock("../../../settings/personality-manager", () => ({
 let mockSkills: Map<string, CustomSkill> = new Map();
 
 function matchesSkillRoutingQuery(skill: CustomSkill, query: string): boolean {
-  const keywords = skill.metadata?.routing?.keywords;
-  if (!Array.isArray(keywords) || keywords.length === 0) return true;
-
   const normalizedQuery = String(query || "")
     .toLowerCase()
-    .replace(/\s+/g, " ")
+    .replace(/[-_\s]+/g, " ")
     .trim();
+
+  if (skill.id === "codex-cli") {
+    if (!normalizedQuery) return false;
+
+    const activationCue =
+      /\b(?:use|run|call|invoke|activate|apply|launch|start|enable|turn on|work on|help with|help me with)\b/;
+    const skillCue = /\bskill\b/;
+    if (!activationCue.test(normalizedQuery) && !skillCue.test(normalizedQuery)) {
+      return false;
+    }
+
+    const targets = [skill.id, skill.name]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .map((value) => value.toLowerCase().replace(/[-_\s]+/g, " ").trim());
+
+    return targets.some((target) => {
+      const escaped = target
+        .split(" ")
+        .filter(Boolean)
+        .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("\\s+");
+
+      return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "i").test(normalizedQuery);
+    });
+  }
+
+  const keywords = skill.metadata?.routing?.keywords;
+  if (!Array.isArray(keywords) || keywords.length === 0) return true;
 
   if (!normalizedQuery) return false;
 
@@ -535,7 +560,7 @@ describe("use_skill tool", () => {
       expect(result.missing_tools).toContain("run_command");
     });
 
-    it('should reject codex-cli without the keyword "codex" in the task', async () => {
+    it("should reject codex-cli unless the task explicitly invokes the skill", async () => {
       const skill = createTestSkill({
         id: "codex-cli",
         name: "Codex CLI Agent",
@@ -559,10 +584,10 @@ describe("use_skill tool", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain("not available for this task");
-      expect(result.reason).toContain("specific keywords");
+      expect(result.reason).toContain("explicit");
     });
 
-    it('should allow codex-cli when the task includes the keyword "codex"', async () => {
+    it("should allow codex-cli when the task explicitly invokes the skill", async () => {
       const skill = createTestSkill({
         id: "codex-cli",
         name: "Codex CLI Agent",
@@ -577,8 +602,8 @@ describe("use_skill tool", () => {
       mockSkills.set("codex-cli", skill);
       mockDaemon.getTaskById.mockResolvedValue({
         id: "test-task-123",
-        title: "Please use codex",
-        prompt: "Use codex to review this change",
+        title: "Use the Codex CLI Agent skill",
+        prompt: "Use the Codex CLI Agent skill to review this change",
       });
 
       const result = await registry.executeTool("use_skill", {
@@ -608,9 +633,9 @@ describe("use_skill tool", () => {
       mockSkills.set("codex-cli", skill);
       mockDaemon.getTaskById.mockResolvedValue({
         id: "test-task-123",
-        title: "Review workspace diff",
+        title: "Use the Codex CLI Agent skill for review",
         prompt:
-          'Review the current workspace changes by spawning a child agent titled "Codex review" and have it inspect the diff.',
+          'Use the Codex CLI Agent skill to review the current workspace changes by spawning a child agent titled "Codex review" and have it inspect the diff.',
       });
 
       try {
@@ -622,7 +647,7 @@ describe("use_skill tool", () => {
         expect(result.expanded_prompt).toContain("spawn_agent");
         expect(result.expanded_prompt).toContain('`runtime`: `"acpx"`');
         expect(result.expanded_prompt).toContain('`runtime_agent`: `"codex"`');
-        expect(result.expanded_prompt).toContain("Review the current workspace changes and inspect the diff.");
+        expect(result.expanded_prompt).toContain("review the current workspace changes and inspect the diff.");
         expect(result.expanded_prompt).not.toContain("legacy prompt should be bypassed");
         expect(result.expanded_prompt).not.toContain("Phase 0");
         expect(result.expanded_prompt).not.toContain("Read `{baseDir}/SKILL.md`");
@@ -649,8 +674,8 @@ describe("use_skill tool", () => {
       mockSkills.set("codex-cli", skill);
       mockDaemon.getTaskById.mockResolvedValue({
         id: "test-task-123",
-        title: "Use codex to fix the failing test",
-        prompt: "Use codex to fix the failing test in the current workspace",
+        title: "Use the Codex CLI Agent skill to fix the failing test",
+        prompt: "Use the Codex CLI Agent skill to fix the failing test in the current workspace",
       });
 
       try {
