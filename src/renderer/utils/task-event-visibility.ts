@@ -4,6 +4,7 @@ import { getEffectiveTaskEventType } from "./task-event-compat";
 export const IMPORTANT_EVENT_TYPES: EventType[] = [
   "task_created",
   "task_completed",
+  "follow_up_completed",
   "task_cancelled",
   "plan_created",
   "step_started",
@@ -280,12 +281,25 @@ function buildVerboseDuplicateKey(event: TaskEvent): string | null {
 
 function isLowValueVerboseLifecycleEvent(event: TaskEvent): boolean {
   const message = getEventMessage(event);
+  const effectiveType = getEffectiveTaskEventType(event);
 
   // timeline_step_updated events are internal executor status beacons.
-  // Meaningful data (tool calls, plan creation, etc.) is also emitted as
-  // dedicated event types, so these are always redundant noise.
+  // Preserve non-internal assistant messages, which are persisted as
+  // timeline_step_updated + legacyType=assistant_message in timeline v2.
   if (event.type === "timeline_step_updated") {
+    if (effectiveType === "assistant_message") {
+      const payload = asObject(event.payload);
+      return payload.internal === true;
+    }
     return true;
+  }
+
+  if (event.type === "timeline_group_started") {
+    const payload = asObject(event.payload);
+    const stage = typeof payload.stage === "string" ? payload.stage.trim().toUpperCase() : "";
+    if (stage === "DELIVER") {
+      return true;
+    }
   }
 
   // timeline_step_finished events echo tool/step completion that is already
