@@ -11,6 +11,7 @@ import type {
   LlmProfile,
   UpdateAgentTeamItemRequest,
   MultiLlmParticipant,
+  WorkerRoleKind,
 } from "../../shared/types";
 import { IPC_CHANNELS, MULTI_LLM_PROVIDER_DISPLAY as _MULTI_LLM_PROVIDER_DISPLAY } from "../../shared/types";
 import {
@@ -18,6 +19,8 @@ import {
   resolvePersonalityPreference,
 } from "../../shared/agent-preferences";
 import { LLMProviderFactory } from "../agent/llm/provider-factory";
+import type { OrchestrationGraphNodeInput } from "../agent/orchestration/OrchestrationGraphEngine";
+import type { OrchestrationGraphSnapshot } from "../agent/orchestration/OrchestrationGraphRepository";
 import { AgentTeamRepository } from "./AgentTeamRepository";
 import { AgentTeamRunRepository } from "./AgentTeamRunRepository";
 import { AgentTeamItemRepository } from "./AgentTeamItemRepository";
@@ -62,10 +65,26 @@ export type AgentTeamOrchestratorDeps = {
     agentConfig?: AgentConfig;
     depth?: number;
     assignedAgentRoleId?: string;
+    workerRole?: WorkerRoleKind;
   }) => Promise<Task>;
   cancelTask: (taskId: string) => Promise<void>;
   wrapUpTask?: (taskId: string) => Promise<void>;
   completeRootTask?: (taskId: string, status: "completed" | "failed", summary: string) => void;
+  createOrchestrationGraphRun?: (params: {
+    rootTaskId: string;
+    workspaceId: string;
+    kind: "team";
+    maxParallel: number;
+    metadata?: Record<string, unknown>;
+    nodes: OrchestrationGraphNodeInput[];
+    edges?: Array<{ fromNodeKey: string; toNodeKey: string }>;
+  }) => Promise<OrchestrationGraphSnapshot | undefined>;
+  appendOrchestrationGraphNodes?: (params: {
+    runId: string;
+    nodes: OrchestrationGraphNodeInput[];
+    edges?: Array<{ fromNodeId?: string; fromNodeKey?: string; toNodeId?: string; toNodeKey?: string }>;
+  }) => Promise<OrchestrationGraphSnapshot | undefined>;
+  findOrchestrationGraphByTeamRunId?: (teamRunId: string) => OrchestrationGraphSnapshot | undefined;
 };
 
 function getAllElectronWindows(): Any[] {
@@ -267,13 +286,10 @@ export class AgentTeamOrchestrator {
         return;
       }
 
-      const maxParallel = Math.max(1, Number(team.maxParallelAgents || 1));
-      const slots = Math.max(0, maxParallel - inProgress.length);
-      if (slots <= 0) return;
-
       const candidates = refreshedItems
         .filter((i) => i.status === "todo" && !i.sourceTaskId)
         .sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt);
+      if (candidates.length === 0) return;
 
       // Resolve multi-LLM participants from root task config
       const multiLlmParticipants: MultiLlmParticipant[] | undefined =
@@ -281,13 +297,11 @@ export class AgentTeamOrchestrator {
           ? rootTask.agentConfig.multiLlmConfig.participants
           : undefined;
 
-      const toSpawn = candidates.slice(0, slots);
+      const toSpawn = candidates;
       const useProfileRouting = this.shouldUseProfileRouting(rootTask);
-      for (let spawnIdx = 0; spawnIdx < toSpawn.length; spawnIdx++) {
-        const item = toSpawn[spawnIdx];
-        const depth = (typeof rootTask.depth === "number" ? rootTask.depth : 0) + 1;
-
-        // Multi-LLM mode: override provider/model per child task
+      const depth = (typeof rootTask.depth === "number" ? rootTask.depth : 0) + 1;
+      const graphNodes: OrchestrationGraphNodeInput[] = [];
+      for (const item of toSpawn) {
         if (run.multiLlmMode && multiLlmParticipants) {
           const participantIndex = refreshedItems
             .filter((candidate) => candidate.title !== SYNTHESIS_ITEM_TITLE)
@@ -296,53 +310,28 @@ export class AgentTeamOrchestrator {
           const participant =
             participantIndex >= 0 ? multiLlmParticipants[participantIndex] : undefined;
           if (!participant) continue;
-
-          const childPrompt = this.buildMultiLlmItemPrompt(participant, rootTask);
-          const agentConfig: AgentConfig = {
-            retainMemory: false,
-            bypassQueue: false,
-            providerType: participant.providerType,
-            modelKey: participant.modelKey,
-            llmProfile: "cheap",
-          };
-
-          const child = await this.deps.createChildTask({
+          graphNodes.push({
+            key: item.id,
             title: `${participant.displayName} Analysis`,
-            prompt: childPrompt,
-            workspaceId: rootTask.workspaceId,
+            prompt: this.buildMultiLlmItemPrompt(participant, rootTask),
+            kind: "team_work_item" as const,
+            dispatchTarget: "native_child_task" as const,
             parentTaskId: rootTask.id,
-            agentType: "sub",
-            agentConfig,
-            depth,
-          });
-
-          this.itemRepo.update({
-            id: item.id,
-            sourceTaskId: child.id,
-            status: "in_progress",
-          });
-
-          emitTeamEvent({
-            type: "team_item_spawned",
-            timestamp: Date.now(),
-            runId: run.id,
-            item: this.itemRepo.listBySourceTaskId(child.id)[0] || item,
-            spawnedTaskId: child.id,
+            teamRunId: run.id,
+            teamItemId: item.id,
+            agentConfig: {
+              retainMemory: false,
+              bypassQueue: false,
+              providerType: participant.providerType,
+              modelKey: participant.modelKey,
+              llmProfile: "cheap",
+            },
+            metadata: { depth },
           });
           continue;
         }
 
-        // Standard collaborative/team mode
-        const childTitle = item.title;
-        const childPrompt = this.buildItemPrompt(
-          team.name,
-          rootTask,
-          item.title,
-          item.description,
-          run.collaborativeMode,
-        );
         const assignedRoleId = item.ownerAgentRoleId || team.leadAgentRoleId;
-
         const agentConfig: AgentConfig = {
           retainMemory: false,
           bypassQueue: false,
@@ -354,31 +343,114 @@ export class AgentTeamOrchestrator {
         }
         const personalityId = resolvePersonalityPreference(team.defaultPersonality);
         if (personalityId) agentConfig.personalityId = personalityId;
-
-        const child = await this.deps.createChildTask({
-          title: childTitle,
-          prompt: childPrompt,
-          workspaceId: rootTask.workspaceId,
+        graphNodes.push({
+          key: item.id,
+          title: item.title,
+          prompt: this.buildItemPrompt(
+            team.name,
+            rootTask,
+            item.title,
+            item.description,
+            run.collaborativeMode,
+          ),
+          kind: "team_work_item" as const,
+          dispatchTarget: "local_role" as const,
           parentTaskId: rootTask.id,
-          agentType: "sub",
-          agentConfig,
-          depth,
           assignedAgentRoleId: assignedRoleId,
+          workerRole: "researcher",
+          teamRunId: run.id,
+          teamItemId: item.id,
+          agentConfig,
+          metadata: { depth },
         });
+      }
 
+      if (!this.deps.createOrchestrationGraphRun && !this.deps.appendOrchestrationGraphNodes) {
+        for (const item of toSpawn) {
+          const node = graphNodes.find((candidate) => candidate.teamItemId === item.id);
+          if (!node) continue;
+          const childTask = await this.deps.createChildTask({
+            title: node.title,
+            prompt: node.prompt,
+            workspaceId: rootTask.workspaceId,
+            parentTaskId: rootTask.id,
+            agentType: "sub",
+            agentConfig: node.agentConfig,
+            depth,
+            assignedAgentRoleId: node.assignedAgentRoleId,
+            workerRole: node.workerRole,
+          });
+          const updatedItem = this.itemRepo.update({
+            id: item.id,
+            sourceTaskId: childTask.id,
+            status: "in_progress",
+          });
+          if (updatedItem) {
+            emitTeamEvent({
+              type: "team_item_spawned",
+              timestamp: Date.now(),
+              runId: run.id,
+              item: updatedItem,
+              spawnedTaskId: childTask.id,
+            });
+          }
+        }
+
+        if (run.collaborativeMode && toSpawn.length > 0) {
+          const currentPhase = run.phase || "dispatch";
+          if (currentPhase === "dispatch") {
+            const updated = this.runRepo.update(run.id, { phase: "think" });
+            if (updated) {
+              emitTeamEvent({
+                type: "team_run_updated",
+                timestamp: Date.now(),
+                run: updated,
+                reason: "phase_transition_think",
+              });
+            }
+          }
+        }
+        return;
+      }
+
+      const existingGraph = this.deps.findOrchestrationGraphByTeamRunId?.(run.id);
+      const graphSnapshot = existingGraph
+        ? await this.deps.appendOrchestrationGraphNodes?.({
+            runId: existingGraph.run.id,
+            nodes: graphNodes,
+          })
+        : await this.deps.createOrchestrationGraphRun?.({
+            rootTaskId: rootTask.id,
+            workspaceId: rootTask.workspaceId,
+            kind: "team",
+            maxParallel: Math.max(1, Number(team.maxParallelAgents || 1)),
+            metadata: { teamRunId: run.id, collaborativeMode: run.collaborativeMode, multiLlmMode: run.multiLlmMode },
+            nodes: graphNodes,
+          });
+
+      const effectiveNodes = graphSnapshot?.nodes || [];
+      for (const item of toSpawn) {
+        const node = effectiveNodes.find((candidate: Any) => candidate.teamItemId === item.id);
+        const nextStatus: AgentTeamItemStatus =
+          node?.status === "completed"
+            ? "done"
+            : node?.status === "failed"
+              ? "failed"
+              : node?.status === "cancelled" || node?.status === "blocked"
+                ? "blocked"
+                : "in_progress";
         const updatedItem = this.itemRepo.update({
           id: item.id,
-          sourceTaskId: child.id,
-          status: "in_progress",
+          sourceTaskId: node?.taskId,
+          status: nextStatus,
         });
-
-        if (updatedItem) {
+      if (updatedItem && node?.taskId) {
           emitTeamEvent({
             type: "team_item_spawned",
             timestamp: Date.now(),
             runId: run.id,
             item: updatedItem,
-            spawnedTaskId: child.id,
+            spawnedTaskId: node.taskId,
           });
         }
       }
@@ -651,11 +723,11 @@ export class AgentTeamOrchestrator {
 
     // Spawn a synthesis task assigned to the leader (or judge in multi-LLM mode)
     const depth = (typeof rootTask.depth === "number" ? rootTask.depth : 0) + 1;
-    const agentConfig: AgentConfig = {
-      retainMemory: false,
-      bypassQueue: true,
-      conversationMode: "chat", // Skip planning/steps — single-turn text synthesis
-      qualityPasses: 1,
+      const agentConfig: AgentConfig = {
+        retainMemory: false,
+        bypassQueue: true,
+        conversationMode: "chat", // Skip planning/steps — single-turn text synthesis
+        qualityPasses: 1,
       llmProfile: rootTask.agentConfig?.llmProfileHint || "strong",
     };
 
@@ -673,26 +745,74 @@ export class AgentTeamOrchestrator {
       if (personalityId) agentConfig.personalityId = personalityId;
     }
 
-    const child = await this.deps.createChildTask({
-      title: SYNTHESIS_ITEM_TITLE,
-      prompt: synthesisPrompt,
-      workspaceId: rootTask.workspaceId,
-      parentTaskId: rootTask.id,
-      agentType: "sub",
-      agentConfig,
-      depth,
-      assignedAgentRoleId: team.leadAgentRoleId,
-    });
-
-    // Create a team item linked to the synthesis task so onTaskTerminal
-    // can find it and transition the run to "complete" when synthesis finishes.
-    this.itemRepo.create({
+    const synthesisItem = this.itemRepo.create({
       teamRunId: run.id,
       title: SYNTHESIS_ITEM_TITLE,
       ownerAgentRoleId: team.leadAgentRoleId,
-      sourceTaskId: child.id,
-      status: "in_progress",
+      status: "todo",
       sortOrder: 9999,
+    });
+
+    if (!this.deps.appendOrchestrationGraphNodes || !this.deps.findOrchestrationGraphByTeamRunId) {
+      const synthesisTask = await this.deps.createChildTask({
+        title: SYNTHESIS_ITEM_TITLE,
+        prompt: synthesisPrompt,
+        workspaceId: rootTask.workspaceId,
+        parentTaskId: rootTask.id,
+        agentType: "sub",
+        agentConfig,
+        depth,
+        assignedAgentRoleId: team.leadAgentRoleId,
+        workerRole: "synthesizer",
+      });
+      this.itemRepo.update({
+        id: synthesisItem.id,
+        sourceTaskId: synthesisTask.id,
+        status: "in_progress",
+      });
+      return;
+    }
+
+    const existingGraph = this.deps.findOrchestrationGraphByTeamRunId?.(run.id);
+    if (!existingGraph?.run?.id || !this.deps.appendOrchestrationGraphNodes) {
+      return;
+    }
+    const predecessorNodes = (existingGraph?.nodes || []).filter(
+      (node: Any) => node.teamRunId === run.id && node.teamItemId && node.teamItemId !== synthesisItem.id,
+    );
+    const appended = await this.deps.appendOrchestrationGraphNodes({
+      runId: existingGraph.run.id,
+      nodes: [
+        {
+          key: synthesisItem.id,
+          title: SYNTHESIS_ITEM_TITLE,
+          prompt: synthesisPrompt,
+          kind: "synthesis",
+          dispatchTarget: "local_role",
+          parentTaskId: rootTask.id,
+          assignedAgentRoleId: team.leadAgentRoleId,
+          workerRole: "synthesizer",
+          teamRunId: run.id,
+          teamItemId: synthesisItem.id,
+          agentConfig,
+          metadata: { depth },
+        },
+      ],
+      edges: predecessorNodes.map((node: Any) => ({
+        fromNodeId: node.id,
+        toNodeKey: synthesisItem.id,
+      })),
+    });
+    const synthesisNode = appended?.nodes.find((node: Any) => node.teamItemId === synthesisItem.id);
+    this.itemRepo.update({
+      id: synthesisItem.id,
+      sourceTaskId: synthesisNode?.taskId,
+      status:
+        synthesisNode?.status === "completed"
+          ? "done"
+          : synthesisNode?.status === "failed"
+            ? "failed"
+            : "in_progress",
     });
   }
 
