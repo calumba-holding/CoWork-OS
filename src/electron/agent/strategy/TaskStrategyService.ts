@@ -548,6 +548,16 @@ export class TaskStrategyService {
       );
     }
 
+    if (["execution", "mixed", "workflow", "deep_work"].includes(route.intent)) {
+      lines.push(
+        "checklist_contract:",
+        "- For non-trivial multi-step execution tasks, create a session checklist with task_list_create.",
+        "- Maintain the checklist during execution with task_list_update and keep at most one item in_progress.",
+        "- Mark checklist progress immediately when work starts or completes.",
+        "- Before final completion, add and run a verification checklist item when verification is appropriate.",
+      );
+    }
+
     if (
       strategy.executionMode === "chat" ||
       strategy.executionMode === "plan" ||
