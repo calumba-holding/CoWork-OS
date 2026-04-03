@@ -2475,6 +2475,8 @@ function registerTaskAndWorkspaceMethods(
     const task = taskRepo.create({
       title: validated.title,
       prompt: validated.prompt,
+      rawPrompt: validated.prompt,
+      userPrompt: validated.prompt,
       status: "pending",
       workspaceId: validated.workspaceId,
       agentConfig: normalizedAgentConfig,
@@ -2504,11 +2506,7 @@ function registerTaskAndWorkspaceMethods(
     try {
       await agentDaemon.startTask(task);
     } catch (error: any) {
-      taskRepo.update(task.id, {
-        status: "failed",
-        error: error?.message || "Failed to start task",
-        completedAt: Date.now(),
-      });
+      agentDaemon.failTask(task.id, error?.message || "Failed to start task");
       throw {
         code: ErrorCodes.METHOD_FAILED,
         message: error?.message || "Failed to start task. Check LLM provider settings.",
