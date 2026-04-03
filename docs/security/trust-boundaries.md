@@ -143,21 +143,25 @@ Even after authentication, capabilities vary by context:
 |           Tool Execution                  |
 +------------------------------------------+
          |
-         | Risk Level Check
+         | Permission Engine
          v
 +------------------------------------------+
 |         Policy Manager                    |
-|  - Is tool allowed?                       |
-|  - Requires approval?                     |
-|  - Blocked by guardrails?                 |
+|  - Hard restrictions / denylist           |
+|  - Guardrails / dangerous commands        |
+|  - Workspace capability gates             |
+|  - Workspace policy script                |
+|  - Explicit permission rules              |
+|  - Mode defaults and fallback escalation  |
 +------------------------------------------+
          |
-         | Approval Gate (if needed)
+         | Allow / Deny / Ask
          v
 +------------------------------------------+
-|         User Approval                     |
-|  - Review tool call                       |
-|  - Approve or deny                        |
+|         User Approval / Rule Persistence   |
+|  - Review exact reason and scope           |
+|  - Approve or deny                         |
+|  - Persist session/workspace/profile rules |
 +------------------------------------------+
          |
          v
@@ -171,22 +175,27 @@ Even after authentication, capabilities vary by context:
 | Risk Level | Examples | Behavior |
 |------------|----------|----------|
 | Read | read_file, list_directory | Auto-allowed if read permission |
-| Write | write_file, create_directory | Auto-allowed if write permission |
-| Destructive | delete_file, run_command | Always requires approval |
+| Write | write_file, create_directory | Auto-allowed if write permission and no rule blocks it |
+| Destructive | delete_file, run_command | Usually prompts unless a rule or mode changes the outcome |
 | System | screenshot, clipboard | Context-dependent |
-| Network | browser_navigate | Requires network permission |
+| Network | browser_navigate | Requires network permission and may still prompt under default mode |
 
 ### Approval Gates
 
-Some operations always require user approval:
+Some operations usually require user approval:
 - Shell command execution
 - File deletion
 - Destructive operations
+- External side effects without matching allow rules
 
 The approval shows:
 - Tool name and description
 - Parameters being used
+- Exact reason and matched rule when available
 - Allows user to approve or deny
+
+Workspace-local rules can also be browsed and removed from Settings so the current policy is
+visible without waiting for the next prompt.
 
 ## Trust Hierarchy
 
