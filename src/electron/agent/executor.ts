@@ -9427,13 +9427,14 @@ ${transcript}
   }
 
   private getContractPrompt(): string {
-    const rawPrompt = String(this.task.rawPrompt || "").trim();
+    const task = this.task || ({} as Any);
+    const rawPrompt = String(task.rawPrompt || "").trim();
     if (rawPrompt) return rawPrompt;
 
-    const userPrompt = String(this.task.userPrompt || "").trim();
+    const userPrompt = String(task.userPrompt || "").trim();
     if (userPrompt) return userPrompt;
 
-    return String(this.task.prompt || "");
+    return String(task.prompt || "");
   }
 
   private appendTaskContextNote(label: string, content: string): void {
@@ -9442,15 +9443,17 @@ ${transcript}
     if (!normalizedLabel || !normalizedContent) return;
 
     const block = `${normalizedLabel}\n${normalizedContent}`;
-    if (this.taskContextNotes.includes(block)) {
+    const notes = (this.taskContextNotes ||= []);
+    if (notes.includes(block)) {
       return;
     }
-    this.taskContextNotes.push(block);
+    notes.push(block);
   }
 
   private buildAppliedSkillContext(): string {
-    if (this.appliedSkills.length === 0) return "";
-    return this.appliedSkills
+    const appliedSkills = this.appliedSkills || [];
+    if (appliedSkills.length === 0) return "";
+    return appliedSkills
       .map((application) => {
         const lines = [
           `APPLIED SKILL: ${application.skillName} (${application.skillId})`,
@@ -9465,8 +9468,9 @@ ${transcript}
 
   private getExecutionTaskPrompt(): string {
     const sections = [this.getContractPrompt()];
-    if (this.taskContextNotes.length > 0) {
-      sections.push(this.taskContextNotes.join("\n\n"));
+    const contextNotes = this.taskContextNotes || [];
+    if (contextNotes.length > 0) {
+      sections.push(contextNotes.join("\n\n"));
     }
     const appliedSkillContext = this.buildAppliedSkillContext();
     if (appliedSkillContext) {
@@ -9487,7 +9491,8 @@ ${transcript}
     }
 
     const normalizedParameters = JSON.stringify(application.parameters || {});
-    const duplicate = this.appliedSkills.find(
+    const appliedSkills = (this.appliedSkills ||= []);
+    const duplicate = appliedSkills.find(
       (existing) =>
         existing.skillId === application.skillId &&
         JSON.stringify(existing.parameters || {}) === normalizedParameters,
@@ -9510,7 +9515,7 @@ ${transcript}
           ? application.appliedAt
           : Date.now(),
     };
-    this.appliedSkills.push(normalizedApplication);
+    appliedSkills.push(normalizedApplication);
 
     const directives = normalizedApplication.contextDirectives;
     if (directives?.toolRestrictions?.length) {
@@ -9787,7 +9792,7 @@ ${transcript}
     }
 
     const bestEffortCandidate = String(
-      this.buildResultSummary() || this.getContentFallback() || this.task.resultSummary || "",
+      this.buildResultSummary() || this.getContentFallback() || this.task?.resultSummary || "",
     ).trim();
     const isBestEffortFinalization =
       (this.softDeadlineTriggered || this.wrapUpRequested || this.shouldPreferBestEffortCompletion()) &&
@@ -10421,7 +10426,7 @@ ${transcript}
 
   private getDefaultPermissionMode(): PermissionMode {
     const configuredDefault = PermissionSettingsManager.loadSettings().defaultMode;
-    const executionMode = this.task.agentConfig?.executionMode;
+    const executionMode = this.task?.agentConfig?.executionMode;
     if (executionMode === "plan" || executionMode === "analyze") {
       return "plan";
     }
@@ -13375,11 +13380,16 @@ You are continuing a previous conversation. The context from the previous conver
       }
     }
 
+    const taskPrompt =
+      typeof this.getContractPrompt === "function"
+        ? this.getContractPrompt()
+        : String(this.task?.rawPrompt || this.task?.userPrompt || this.task?.prompt || "");
+
     return preflightWorkspaceCheckUtil({
       shouldPauseForQuestions: this.shouldPauseForQuestions,
       workspacePreflightAcknowledged: this.workspacePreflightAcknowledged,
       capabilityUpgradeRequested: this.capabilityUpgradeRequested,
-      taskPrompt: this.getContractPrompt(),
+      taskPrompt,
       workspace: this.workspace,
       isTempWorkspaceId,
       preflightShellExecutionCheck: () => this.preflightShellExecutionCheck(),
@@ -17581,11 +17591,11 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private shouldEmitAnswerFirst(): boolean {
-    return /\banswer_first=true\b/i.test(String(this.task.prompt || ""));
+    return /\banswer_first=true\b/i.test(String(this.task?.prompt || ""));
   }
 
   private shouldPreferBestEffortCompletion(): boolean {
-    return /\btimeout_finalize_bias=true\b/i.test(String(this.task.prompt || ""));
+    return /\btimeout_finalize_bias=true\b/i.test(String(this.task?.prompt || ""));
   }
 
   private shouldEmitPreflight(): boolean {

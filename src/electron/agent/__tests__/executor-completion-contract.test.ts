@@ -163,11 +163,7 @@ describe("TaskExecutor completion contract integration", () => {
     expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
   });
 
-  it("completes with partial success when a direct answer is required but missing and an artifact was created", async () => {
-    // "Task missing direct answer" no longer hard-blocks completion: when a task is resumed
-    // after an app restart with no snapshot the answer may have already been delivered.
-    // If substantive evidence exists (e.g. a created file) the executor completes via
-    // partial success rather than failing outright.
+  it("fails when a direct answer is required but missing", async () => {
     const executor = createExecuteHarness({
       title: "Video decision",
       prompt:
@@ -179,14 +175,12 @@ describe("TaskExecutor completion contract integration", () => {
 
     await (executor as Any).execute();
 
-    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
+    expect(executor.daemon.completeTask).not.toHaveBeenCalled();
+    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
       "task-1",
-      expect.any(String),
       expect.objectContaining({
-        bestKnownOutcome: expect.objectContaining({
-          terminalStatus: "partial_success",
-          failureClass: "contract_error",
-        }),
+        status: "failed",
+        error: expect.stringContaining("missing direct answer"),
       }),
     );
   });
@@ -212,7 +206,7 @@ describe("TaskExecutor completion contract integration", () => {
     );
   });
 
-  it("does not complete web-app shipping tasks when Playwright QA never ran", async () => {
+  it("fails web-app shipping tasks before Playwright QA when artifact evidence is missing", async () => {
     const executor = createExecuteHarness({
       title: "Build a simple todo app in React",
       prompt: "Build a simple todo app in React, test it to catch any bugs before shipping.",
@@ -229,12 +223,12 @@ describe("TaskExecutor completion contract integration", () => {
       "task-1",
       expect.objectContaining({
         status: "failed",
-        error: expect.stringContaining("Playwright visual QA"),
+        error: expect.stringContaining("missing artifact evidence"),
       }),
     );
   });
 
-  it("does not enforce Playwright QA when no web-app artifacts were materialized", async () => {
+  it("does not reach Playwright QA when no web-app artifacts were materialized", async () => {
     const executor = createExecuteHarness({
       title: "Build a simple todo app in React",
       prompt: "Build a simple todo app in React, test it to catch any bugs before shipping.",
@@ -246,12 +240,12 @@ describe("TaskExecutor completion contract integration", () => {
 
     await (executor as Any).execute();
 
-    expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
-    expect(executor.daemon.updateTask).not.toHaveBeenCalledWith(
+    expect(executor.daemon.completeTask).not.toHaveBeenCalled();
+    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
       "task-1",
       expect.objectContaining({
         status: "failed",
-        error: expect.stringContaining("Playwright visual QA"),
+        error: expect.stringContaining("missing artifact evidence"),
       }),
     );
   });
@@ -308,10 +302,7 @@ DOCUMENT CREATION BEST PRACTICES:
     );
   });
 
-  it("completes canvas build tasks with partial success when canvas_push evidence is missing but an artifact was created", async () => {
-    // "Task missing required tool evidence" no longer hard-blocks completion.
-    // When a file artifact was created the executor falls through to partial success
-    // rather than failing, matching the same semantics as the direct-answer case.
+  it("fails canvas build tasks when required tool evidence is missing", async () => {
     const executor = createExecuteHarness({
       title: "Competition demo",
       prompt: "Build something to win this competition and show it in canvas.",
@@ -323,13 +314,12 @@ DOCUMENT CREATION BEST PRACTICES:
 
     await (executor as Any).execute();
 
-    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
+    expect(executor.daemon.completeTask).not.toHaveBeenCalled();
+    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
       "task-1",
-      expect.any(String),
       expect.objectContaining({
-        bestKnownOutcome: expect.objectContaining({
-          terminalStatus: "partial_success",
-        }),
+        status: "failed",
+        error: expect.stringContaining("missing required tool evidence"),
       }),
     );
   });
@@ -847,9 +837,6 @@ DOCUMENT CREATION BEST PRACTICES:
       expect.objectContaining({
         terminalStatus: "partial_success",
         failureClass: "contract_unmet_write_required",
-        outputSummary: expect.objectContaining({
-          outputCount: 2,
-        }),
       }),
     );
     expect(executor.daemon.updateTask).not.toHaveBeenCalledWith(

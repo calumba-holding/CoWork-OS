@@ -52,6 +52,7 @@ function createDaemonLike() {
       evidenceGateFails: 0,
     },
     logEvent: vi.fn(),
+    failTask: AgentDaemon.prototype.failTask,
     runQuickQualityPass: vi.fn().mockReturnValue({
       passed: true,
       issues: [],

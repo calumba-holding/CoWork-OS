@@ -6,6 +6,7 @@ describe("AgentDaemon.createChildTask", () => {
   it("persists the original child prompt as rawPrompt", async () => {
     const taskRepo = {
       findById: vi.fn().mockReturnValue(undefined),
+      update: vi.fn(),
       create: vi.fn((task: Any) => ({
         id: "child-task-1",
         createdAt: Date.now(),
@@ -35,4 +36,3 @@ describe("AgentDaemon.createChildTask", () => {
     expect(child.rawPrompt).toBe("Build the public portal and constitution.");
   });
 });
-

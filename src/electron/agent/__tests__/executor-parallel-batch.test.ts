@@ -72,6 +72,9 @@ function createParallelExecutorFixture(
   executor.recordFileOperation = vi.fn();
   executor.recordToolUsage = vi.fn();
   executor.recordToolResult = vi.fn();
+  executor.toolBatchSummaryGenerator = {
+    generateSummary: vi.fn(async () => ({ semanticSummary: "", source: "fallback" })),
+  };
   executor.getToolFailureReason = vi.fn((result: Any, fallback: string) =>
     typeof result?.error === "string" ? result.error : fallback,
   );

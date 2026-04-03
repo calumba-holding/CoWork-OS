@@ -228,20 +228,15 @@ describe("TaskExecutor chat mode", () => {
     ).toContain("<cowork_compaction_summary>");
   });
 
-  it("routes long sub-agent chat synthesis through the shared text turn kernel continuation flow", async () => {
+  it("routes long sub-agent chat synthesis through the shared text turn kernel flow", async () => {
     const executor = Object.create(TaskExecutor.prototype) as Any;
-    const createMessageWithTimeout = vi
-      .fn()
-      .mockResolvedValueOnce({
-        content: [{ type: "text", text: "Part one. " }],
-        stopReason: "max_tokens",
-        usage: { inputTokens: 10, outputTokens: 20, cachedTokens: 0 },
-      })
-      .mockResolvedValueOnce({
-        content: [{ type: "text", text: "Part two." }],
-        stopReason: "end_turn",
-        usage: { inputTokens: 5, outputTokens: 8, cachedTokens: 0 },
-      });
+    const runTextTurnKernel = vi.fn().mockResolvedValue({
+      assistantText: "Part one. Part two.",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Synthesis prompt" }] },
+        { role: "assistant", content: [{ type: "text", text: "Part one. Part two." }] },
+      ],
+    });
 
     executor.task = {
       id: "task-sub-chat",
@@ -271,19 +266,25 @@ describe("TaskExecutor chat mode", () => {
     executor.emitEvent = vi.fn();
     executor.getRoleContextPrompt = vi.fn().mockReturnValue("");
     executor.buildUserContent = vi.fn().mockResolvedValue("Synthesis prompt");
-    executor.callLLMWithRetry = vi.fn(async (fn: Any) => fn());
-    executor.createMessageWithTimeout = createMessageWithTimeout;
+    executor.runTextTurnKernel = runTextTurnKernel;
     executor.updateTracking = vi.fn();
-    executor.extractTextFromLLMContent = vi
-      .fn()
-      .mockImplementation((content: Any[]) => content?.map((item) => item.text || "").join("") || "");
     executor.updateConversationHistory = vi.fn();
     executor.buildResultSummary = vi.fn().mockReturnValue("summary");
     executor.finalizeTaskBestEffort = vi.fn();
 
-    await (TaskExecutor as Any).prototype.handleCompanionPrompt.call(executor);
+    await (TaskExecutor as Any).prototype.handleSubAgentChatMode.call(executor, "x".repeat(2200));
 
-    expect(createMessageWithTimeout).toHaveBeenCalledTimes(2);
+    expect(runTextTurnKernel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [{ role: "user", content: [{ type: "text", text: "Synthesis prompt" }] }],
+        systemPrompt: expect.stringContaining("Respond thoroughly and completely"),
+        initialMaxTokens: 16000,
+        continuationMaxTokens: 1200,
+        mode: "follow_up",
+        operationLabel: "Sub-agent chat response",
+        allowContinuation: true,
+      }),
+    );
     expect(executor.updateConversationHistory).toHaveBeenCalledWith([
       { role: "user", content: [{ type: "text", text: "Synthesis prompt" }] },
       { role: "assistant", content: [{ type: "text", text: "Part one. Part two." }] },

@@ -50,7 +50,7 @@ describe("normalizeTurnTranscript", () => {
     ).toBe(true);
   });
 
-  it("removes incomplete tool rounds but preserves assistant text blocks", () => {
+  it("removes incomplete tool rounds entirely", () => {
     const normalized = normalizeTurnTranscript([
       {
         role: "assistant",
@@ -67,16 +67,7 @@ describe("normalizeTurnTranscript", () => {
       { role: "assistant", content: "Recovered later." },
     ]);
 
-    expect(normalized.messages).toEqual([
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "Fetching sources." }],
-      },
-      {
-        role: "assistant",
-        content: "Recovered later.",
-      },
-    ]);
+    expect(normalized.messages).toEqual([{ role: "assistant", content: "Recovered later." }]);
     expect(normalized.issues.some((issue) => issue.kind === "missing_tool_result")).toBe(true);
   });
 });

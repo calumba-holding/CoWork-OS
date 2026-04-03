@@ -185,6 +185,9 @@ function getToolResultTokenBudget(parsed: Any | null): number {
  * Truncate tool result content if too large
  */
 export function truncateToolResult(result: string): string {
+  if (typeof result !== "string") {
+    return "";
+  }
   // For JSON results, try to preserve structure
   const parsed = safeJsonParse(result);
   const tokenBudget = getToolResultTokenBudget(parsed);
