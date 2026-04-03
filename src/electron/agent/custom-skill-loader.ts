@@ -582,6 +582,23 @@ export class CustomSkillLoader {
       .trim();
   }
 
+  private sanitizeRoutingQuery(query: string): string {
+    return String(query || "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`[^`\n]*`/g, " ")
+      .replace(/https?:\/\/\S+/gi, " ")
+      .replace(/(^|\n)\s*>\s.*$/gm, " ")
+      .replace(
+        /\b(?:[A-Za-z]:)?(?:\/|\.\/|\.\.\/)?[\w.-]+(?:\/[\w.-]+)+\b/g,
+        " ",
+      )
+      .replace(
+        /\b[\w.-]+\.(?:ts|tsx|js|jsx|json|md|txt|html|css|scss|py|rb|go|rs|java|c|cpp|h|hpp|docx?|pdf|xlsx?|pptx?|ya?ml)\b/gi,
+        " ",
+      )
+      .replace(/["“”'‘’][^"“”'‘’]{1,160}["“”'‘’]/g, " ");
+  }
+
   private escapeRegExp(text: string): string {
     return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
@@ -609,7 +626,7 @@ export class CustomSkillLoader {
   }
 
   private matchesExplicitSkillInvocation(skill: CustomSkill, query: string): boolean {
-    const normalizedQuery = this.normalizeRoutingPhrase(query);
+    const normalizedQuery = this.normalizeRoutingPhrase(this.sanitizeRoutingQuery(query));
     if (!normalizedQuery) return false;
 
     const activationCue =
@@ -629,20 +646,38 @@ export class CustomSkillLoader {
   }
 
   matchesSkillRoutingQuery(skill: CustomSkill, query: string): boolean {
+    const explicitMatch = this.matchesExplicitSkillInvocation(skill, query);
     if (this.requiresExplicitSkillInvocation(skill)) {
-      const matched = this.matchesExplicitSkillInvocation(skill, query);
-      if (!matched) {
+      if (!explicitMatch) {
         logger.debug(
           `Explicit invocation gate BLOCKED skill "${skill.id}" for query "${query.slice(0, 80)}"`,
         );
       }
-      return matched;
+      return explicitMatch;
     }
 
-    const keywords = skill.metadata?.routing?.keywords;
+    if (explicitMatch) {
+      return true;
+    }
+
+    const routing = skill.metadata?.routing;
+    const hasRoutingMetadata =
+      Boolean(routing?.useWhen) ||
+      Boolean(routing?.dontUseWhen) ||
+      Boolean(routing?.outputs) ||
+      Boolean(routing?.successCriteria) ||
+      (Array.isArray(routing?.expectedArtifacts) && routing.expectedArtifacts.length > 0) ||
+      (Array.isArray(routing?.keywords) && routing.keywords.length > 0) ||
+      (Array.isArray(routing?.examples?.positive) && routing.examples.positive.length > 0) ||
+      (Array.isArray(routing?.examples?.negative) && routing.examples.negative.length > 0);
+    if (!hasRoutingMetadata) {
+      return false;
+    }
+
+    const keywords = routing?.keywords;
     if (!Array.isArray(keywords) || keywords.length === 0) return true;
 
-    const normalizedQuery = this.normalizeRoutingPhrase(query);
+    const normalizedQuery = this.normalizeRoutingPhrase(this.sanitizeRoutingQuery(query));
     if (!normalizedQuery) return false;
 
     const matched = keywords.some(
@@ -700,7 +735,7 @@ export class CustomSkillLoader {
   }
 
   private rankSkillsForQuery(skills: CustomSkill[], query: string): RankedSkillMatch[] {
-    const normalizedQuery = String(query || "").trim();
+    const normalizedQuery = this.sanitizeRoutingQuery(String(query || "")).trim();
     if (!normalizedQuery) {
       return skills.map((skill) => ({ skill, score: 1 }));
     }
@@ -813,7 +848,7 @@ export class CustomSkillLoader {
     confidence: number;
     totalEligible: number;
   } {
-    const normalizedQuery = String(query || "").trim();
+    const normalizedQuery = this.sanitizeRoutingQuery(String(query || "")).trim();
 
     // Hard gate: skills with routing keywords are hidden from the model unless a keyword matches.
     // This prevents keyword-gated skills (e.g. codex-cli) from appearing in the
