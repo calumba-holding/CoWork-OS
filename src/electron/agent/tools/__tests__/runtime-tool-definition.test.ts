@@ -39,4 +39,17 @@ describe("runtime tool definition metadata", () => {
     expect(tool.runtime?.deferLoad).toBe(true);
     expect(tool.runtime?.alwaysExpose).toBe(false);
   });
+
+  it("marks session checklist tools with the expected approval and concurrency metadata", () => {
+    const createMetadata = getDefaultRuntimeToolMetadata("task_list_create");
+    const listMetadata = getDefaultRuntimeToolMetadata("task_list_list");
+
+    expect(createMetadata.concurrencyClass).toBe("serial_only");
+    expect(createMetadata.readOnly).toBe(false);
+    expect(createMetadata.approvalKind).toBe("none");
+
+    expect(listMetadata.concurrencyClass).toBe("read_parallel");
+    expect(listMetadata.readOnly).toBe(true);
+    expect(listMetadata.approvalKind).toBe("none");
+  });
 });
