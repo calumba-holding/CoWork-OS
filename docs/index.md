@@ -15,8 +15,17 @@ hero:
       text: Features
       link: /features
     - theme: alt
+      text: Session Runtime
+      link: /session-runtime
+    - theme: alt
+      text: Permission System
+      link: /permission-system
+    - theme: alt
       text: Runtime Visibility
       link: /operator-runtime-visibility
+    - theme: alt
+      text: Skills Runtime
+      link: /skills-runtime-model
     - theme: alt
       text: Release Notes 0.5.21
       link: /release-notes-0.5.21
@@ -48,9 +57,9 @@ features:
   - title: Runtime Visibility
     details: Visible learning progression after each task, unified recall across tasks/messages/files, persistent shell sessions, and live provider routing/fallback status.
   - title: Runtime Orchestration
-    details: Shared turn kernel, metadata-driven tool scheduler, graph-backed delegation, typed worker roles, and semantic batch summaries keep execution, verification, and follow-up work coherent.
+    details: SessionRuntime owns task-session state, session checklists, resume snapshots, and task projection while the turn kernel handles each active turn; metadata-driven tool scheduler, graph-backed delegation, typed worker roles, semantic batch summaries, and terminal-state-safe resume logic keep execution, verification, and follow-up work coherent.
   - title: Latest Release 0.5.21
-    details: Repackages the shared turn kernel, metadata-driven tool scheduling, graph-backed delegation, typed worker roles, verification/runtime summaries, debug tooling, inbox/mailbox updates, and a much richer completion surface.
+    details: Includes the shared turn kernel, metadata-driven tool scheduling, graph-backed delegation, typed worker roles, session checklists, verification/runtime summaries, debug tooling, inbox/mailbox updates, and a much richer completion surface.
   - title: Inbox Agent
     details: Local-first email triage with AI classification, action-needed and commitment queues, draft review, and resync-safe background sync.
   - title: Managed Devices
@@ -61,6 +70,8 @@ features:
     details: Default two-lane background automation with cheap Pulse checks, selective Dispatch escalation, signal compression, and truthful Mission Control state.
   - title: 137 Built-in Skills
     details: Document creation, web research, code generation, image analysis, and more. Extensible via custom skills, ClawHub installs, external skill imports, and optional read-only external skill directories.
+  - title: Additive Skill Routing
+    details: Skills can still be proactively shortlisted from the task, but they add context and scoped runtime directives instead of replacing the canonical user request.
   - title: Profiles & Portability
     details: Separate CoWork profiles isolate app data, credentials, channels, and sessions, with export/import flows for moving or cloning a setup safely.
   - title: Agent Teams
@@ -70,7 +81,7 @@ features:
   - title: Federated Agents
     details: Discover ACP agents, delegate to local or remote specialists, persist ACP task state locally, and invoke A2A-compatible endpoints under shared approvals and endpoint-validation rules.
   - title: Security First
-    details: Local-first architecture, sandboxed execution, guardrails, approval workflows, encrypted storage, and 4,500+ automated tests.
+    details: Local-first architecture, sandboxed execution, layered permission rules, workspace-local policy files, guardrails, approval workflows, encrypted storage, and 4,500+ automated tests.
   - title: Best-Fit Operational Workflows
     details: Purpose-built packs for Support Ops, IT Ops, and Sales Ops — governed outcome delivery for the workflows where AI assistance has the clearest ROI. See the Best-Fit Workflows guide.
   - title: Zero-Human Company Ops
