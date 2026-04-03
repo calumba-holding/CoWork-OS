@@ -8,20 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Session checklist primitive**: execution-style tasks can create a session-local ordered checklist via `task_list_create`, maintain it with `task_list_update`, inspect it with `task_list_list`, and surface it read-only in the task UI with verification nudge state.
 - **Shared turn/runtime kernel**: task steps, follow-ups, subagents, and verification now run through a canonical `TurnKernel` instead of duplicated loop bodies.
 - **Metadata-driven tool scheduling**: concurrency-safe reads batch together automatically, scoped writes serialize, and post-batch result ordering stays stable through a single `ToolScheduler`.
 - **Graph-backed delegation**: spawned agents, collaborative runs, workflow phases, and ACP task delegation now resolve through a normalized orchestration graph engine.
 - **Typed worker roles**: built-in `researcher`, `implementer`, `verifier`, and `synthesizer` worker roles drive delegation, prompts, and hard tool scopes.
 - **Semantic tool summaries**: completed tool batches now carry concise semantic labels for timeline rows and completion relays.
+- **Debug/runtime orchestration**: debug-mode flows and the supporting runtime helpers now expose the same orchestration, projection, and completion surfaces as normal tasks.
+- **Mailbox / inbox visibility**: inbox and mailbox completion handoff paths now keep follow-up triggers and terminal state in sync with the task timeline.
 
 ### Changed
+- **SessionRuntime ownership**: runtime state now includes the session checklist bucket, replayable checklist events, and the non-blocking verification nudge algorithm for implementation-first tasks.
 - **Completion projection**: task completion relays now compose from `resultSummary`, semantic batch labels, and verifier verdict/report fields.
 - **Follow-up visibility**: follow-up completion events now preserve the triggering user text so the timeline can surface orphaned follow-ups explicitly.
 - **Canvas / visual refinement UX**: screenshot-heavy refinement loops render more compactly in summary mode to keep the feed readable.
+- **ACP / control plane**: ACP and control-plane handlers now project delegated work from graph-backed state instead of maintaining parallel orchestration logic.
+- **Renderer surfaces**: debug, session, timeline, and completion views were updated to reflect the richer runtime state and completion payloads.
+- **Shared contracts**: shared types, detection, sanitization, and timeline-event contracts were updated for the new history and projection model.
+- **Tool plumbing**: search, middleware, registry, and envelope handling were tightened to fit the new runtime and scheduler contracts.
+- **Build / packaging**: packaging scripts and branding assets were refreshed so release artifacts and UI branding stay aligned with the current build.
 
 ### Fixed
+- **Resume race on terminal tasks**: approval- or follow-up-driven resume handling no longer overwrites a freshly completed task row back to `executing`; resume now re-checks canonical persisted task state before applying active status.
 - **Stale completion state**: follow-up completion now persists terminal task state together with the completion payload, preventing sidebar/task-detail divergence after a task finishes.
 - **Hidden follow-up triggers**: session follow-up messages now remain visible in the timeline rather than collapsing behind later action blocks.
+- **Orchestration regressions**: graph-backed delegation, workflow phases, and ACP task state no longer depend on the old duplicated runtime paths.
+- **Test coverage gaps**: the runtime, ACP, inbox/mailbox, debug, renderer, and build paths now have significantly broader regression coverage.
 
 ## [0.5.19] - 2026-03-30
 
