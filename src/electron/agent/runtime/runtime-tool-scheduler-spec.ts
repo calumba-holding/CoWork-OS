@@ -74,6 +74,7 @@ const READ_PARALLEL_TOOLS = new Set([
   "git_blame",
   "git_refs",
   "task_history",
+  "task_list_list",
   "search_memories",
   "scratchpad_read",
 ]);
@@ -117,6 +118,7 @@ const IDEMPOTENT_TOOLS = new Set([
   "git_blame",
   "git_refs",
   "task_history",
+  "task_list_list",
   "search_memories",
   "scratchpad_read",
 ]);
