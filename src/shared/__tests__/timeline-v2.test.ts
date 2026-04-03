@@ -55,6 +55,9 @@ describe("timeline v2 helpers", () => {
     expect(inferTimelineStageForLegacyType("task_created")).toBe("DISCOVER");
     expect(inferTimelineStageForLegacyType("tool_call")).toBe("BUILD");
     expect(inferTimelineStageForLegacyType("verification_passed")).toBe("VERIFY");
+    expect(inferTimelineStageForLegacyType("task_list_created")).toBe("BUILD");
+    expect(inferTimelineStageForLegacyType("task_list_updated")).toBe("BUILD");
+    expect(inferTimelineStageForLegacyType("task_list_verification_nudged")).toBe("VERIFY");
     expect(inferTimelineStageForLegacyType("step_failed")).toBe("FIX");
     expect(inferTimelineStageForLegacyType("verification_mode_selected")).toBe("FIX");
     expect(inferTimelineStageForLegacyType("verification_preflight_policy_applied")).toBe("FIX");
@@ -85,6 +88,8 @@ describe("timeline v2 helpers", () => {
   it("returns sub-stage labels for FIX-stage events", () => {
     expect(inferTimelineSubStageLabel("workspace_path_alias_normalized")).toBe("Preparing workspace");
     expect(inferTimelineSubStageLabel("task_path_root_pinned")).toBe("Preparing workspace");
+    expect(inferTimelineSubStageLabel("task_list_created")).toBe("Updating checklist");
+    expect(inferTimelineSubStageLabel("task_list_verification_nudged")).toBe("Preparing verification");
     expect(inferTimelineSubStageLabel("verification_preflight_policy_applied")).toBe(
       "Preparing verification",
     );
