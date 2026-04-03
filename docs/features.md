@@ -31,10 +31,13 @@
 
 - **Ideas Panel**: Curated launch panel accessible from the sidebar above Sessions. Pre-written prompts organized by category let you start common workflows in one click. See [Ideas Panel: Supported Capabilities](ideas-capabilities.md) for the full list of tools each prompt uses and their graceful fallbacks.
 - **Task-Based Workflow**: Multi-step execution with plan-execute-observe loops
-- **Runtime Orchestration**: Shared turn kernel, metadata-driven tool scheduling, graph-backed delegation, typed worker roles, verifier verdicts, and semantic tool-batch summaries keep delegated work coherent across tasks, follow-ups, teams, and ACP runs.
+- **Runtime Orchestration**: SessionRuntime owns task-session state, session checklists, resume snapshots, recovery state, and task projection while the turn kernel handles each individual step, follow-up, or text turn; metadata-driven tool scheduling, graph-backed delegation, typed worker roles, verifier verdicts, semantic tool-batch summaries, and terminal-state reconciliation keep delegated work coherent across tasks, follow-ups, teams, and ACP runs.
+- **Session Checklist Primitive**: execution-style tasks can create a session-local ordered checklist with `task_list_create`, maintain it with `task_list_update`, inspect it with `task_list_list`, and surface it read-only in the task UI. The runtime can issue a non-blocking verification nudge when implementation items are done but no verification item exists yet.
+- **Permission Engine**: layered tool approvals combine explicit modes, per-tool/path/command-prefix/MCP-server rules, session grants, workspace-local rules, profile rules, and hard guardrails; the active workspace can browse and remove its own rules in Settings.
 - **Live Terminal**: Shell commands run in a real-time terminal view — see output as it happens, stop execution, or provide interactive input (e.g. `y`/`n` prompts)
 - **Dynamic Re-Planning**: Agent can revise its plan mid-execution
 - **139+ Built-in Skills**: GitHub, Slack, Notion, Spotify, Apple Notes, Unity, Unreal, Terraform, Kubernetes, financial analysis, and more. Optional CLI-based skills (e.g. [aurl](skills/aurl.md) for OpenAPI/GraphQL APIs) appear when the binary is installed.
+- **Additive Skill Runtime**: Skills can still be proactively shortlisted from task semantics, but they now apply as additive context and scoped runtime directives. They never replace the original task prompt. See [Skills Runtime Model](skills-runtime-model.md).
 - **Chat Mode**: Direct LLM chat with no tools, no step timeline, same-session follow-ups, chat-only streaming for supported providers, and a fixed high output budget for explicit `executionMode: "chat"` sessions. See [Chat Mode](chat-mode.md).
 - **Document Creation**: Excel, Word, PDF, PowerPoint with professional formatting
 - **Document Editing Sessions**: Inline PDF region editing and DOCX block replacement. Open a document from the Files panel or task artifact surface to enter an editing session with version browsing and document-aware controls.
@@ -54,6 +57,7 @@
 - **Wrap-Up Task**: Gracefully wrap up running tasks instead of hard-cancelling
 - **Capability Matcher**: Auto-select the best agents for a task
 - **Completion Output Confidence UX**: When tasks finish with file outputs, users get high-signal completion toasts with direct actions (`Open file`, `Show in Finder`, `View in Files`), automatic right-panel focus for the active task, unseen-output badges when reviewing another task/view, and richer completion text composed from semantic summaries plus verifier verdict/report when available.
+- **Completion/Resume Coherence**: terminal task state is persisted before terminal events are emitted, and approval- or follow-up-driven resume paths re-check canonical persisted status before writing `executing`, preventing completed tasks from regressing to an in-progress row state.
 - **Artifact-First Output Visibility**: Artifact-only tasks are treated the same as file-created outputs across progress, timeline, and Files panel surfaces.
 - **Performance Reviews**: Score and review agent-role outcomes with autonomy-level recommendations
 - **Vision**: Analyze workspace images via `analyze_image` tool (OpenAI, Anthropic, Gemini, or Bedrock)
@@ -66,6 +70,8 @@
 - **Parallel Tool Timeline**: Concurrent read-only tool bursts are grouped into lane-based timeline cards instead of flooding the event feed; screenshot-heavy refinement loops stay more compact in summary mode
 - **Renderer Performance**: In the `CoWork-OS/CoWork-OS` repo, the renderer uses `@chenglou/pretext` for text-heavy sidebar/timeline measurement, with flattened visible sidebar rows and post-render height reconciliation for expanded timeline cards
 - **Adaptive Runtime Recovery**: Execute tasks use adaptive turn budgets, bounded follow-up recovery, and safety-stop escalation instead of hard window failure by default
+- **Session Snapshot Resume**: SessionRuntime prefers `session_runtime_v2` checkpoint and event payloads, falls back to legacy `conversationHistory` payloads or event-derived history, and rewrites legacy resumes to V2 on the next checkpoint
+- **Workspace Rule Manager**: Settings can list and remove workspace-local permission rules directly, and approval prompts can persist new workspace or profile rules with explicit reasons and scope previews.
 - **Path Drift Repair**: `/workspace/...` aliases and drifted relative paths can be normalized back into the active workspace or pinned task root, with strict-fail policies when hard enforcement is preferred
 - **Action-First Planning**: Agent prioritizes direct action over excessive pre-planning
 - **Operator Runtime Visibility**: Task completion now surfaces the learning progression, unified recall spans tasks/messages/files/workspace notes/memory/KG, persistent shell sessions keep operator state, and live provider routing/fallback decisions are visible in the task UI and Mission Control.
@@ -300,8 +306,9 @@ CoWork OS supports external skill installation through the desktop GUI, not just
 - **Optional external directories**: Add one or more absolute read-only skill folders in Settings so shared team skills can load without being copied into CoWork
 - **Clear precedence**: Workspace skills override managed installs, managed installs override external directories, and external directories override bundled defaults
 - **Cross-ecosystem support**: Other external skill stores are supported when they expose Git repos, raw manifests, or raw `SKILL.md` bundle entry points
+- **Shared runtime contract**: Once loaded, external skills follow the same additive execution model as bundled skills. They can add context and scoped directives, but they cannot replace the canonical task prompt.
 
-Access from **Settings** > **Skills** > **Skill Store**. See [Skill Store & External Skills](skill-store-and-external-skills.md) for detailed documentation.
+Access from **Settings** > **Skills** > **Skill Store**. See [Skill Store & External Skills](skill-store-and-external-skills.md) for install/import behavior and [Skills Runtime Model](skills-runtime-model.md) for execution semantics.
 
 ---
 
@@ -455,10 +462,11 @@ CoWork OS now exposes the learning loop as a visible operator surface instead of
 | **Unified recall** | One “search everything” surface across tasks, messages, files, workspace notes, memory entries, and knowledge-graph context, with shared ranking/dedup logic for UI and prompt injection. |
 | **Persistent shell sessions** | Long-lived shell state per task/workspace with retained cwd, env deltas, aliases, reset controls, and one-shot fallback for incompatible commands. |
 | **Model routing visibility** | Live active provider/model, routing reason, fallback chain, and retry/fallback state in the task UI and settings surfaces. |
+| **Applied skills visibility** | The task header keeps the canonical request visible and shows applied skills separately, including trigger/reason metadata from runtime events. |
 
 This layer is intentionally additive. It makes learning and routing legible while preserving the desktop control plane, channels, inbox, devices, and governed automation that define CoWork OS.
 
-See [Operator Runtime Visibility](operator-runtime-visibility.md) for the cross-surface implementation summary.
+See [Operator Runtime Visibility](operator-runtime-visibility.md) for the cross-surface implementation summary and [Skills Runtime Model](skills-runtime-model.md) for the skill-specific runtime contract.
 
 ---
 
