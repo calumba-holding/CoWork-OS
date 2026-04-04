@@ -216,6 +216,90 @@ describe("AgentDaemon.requestApproval auto-approve controls", () => {
     expect(daemonLike.pendingApprovals.size).toBe(1);
   });
 
+  it("does not overwrite terminal task state when an approval times out late", async () => {
+    vi.useFakeTimers();
+
+    const approvalRepo = {
+      create: vi.fn().mockReturnValue({ id: "approval-timeout" }),
+      update: vi.fn(),
+    };
+    const evaluatePermissionRequest = vi.fn().mockReturnValue({
+      evaluation: {
+        decision: "ask",
+        reason: { type: "mode", mode: "default", summary: "Prompt for this action." },
+      },
+      promptDetails: {
+        reason: { type: "mode", mode: "default", summary: "Prompt for this action." },
+        scopePreview: "tool x402_fetch",
+        suggestedActions: [],
+      },
+      scope: { kind: "tool", toolName: "x402_fetch" },
+      trackingKey: "tool x402_fetch",
+      runtime: null,
+      workspace: undefined,
+    });
+    const updateTask = vi.fn();
+    const logEvent = vi.fn();
+
+    const daemonLike = {
+      sessionAutoApproveAll: false,
+      approvalRepo,
+      logEvent,
+      updateTask,
+      evaluatePermissionRequest,
+      taskRepo: {
+        findById: vi.fn().mockReturnValue({
+          id: "task-timeout",
+          status: "completed",
+          completedAt: Date.now(),
+          terminalStatus: "ok",
+        }),
+      },
+      pendingApprovals: new Map(),
+    } as Any;
+
+    const approvalPromise = AgentDaemon.prototype.requestApproval.call(
+      daemonLike,
+      "task-timeout",
+      "external_service",
+      "Approve action",
+      { tool: "x402_fetch" },
+    );
+
+    expect(updateTask).toHaveBeenCalledWith(
+      "task-timeout",
+      expect.objectContaining({
+        status: "blocked",
+        terminalStatus: "awaiting_approval",
+      }),
+    );
+
+    const rejection = expect(approvalPromise).rejects.toThrow(
+      "Approval request timed out after task completion",
+    );
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+    await rejection;
+    expect(approvalRepo.update).toHaveBeenCalledWith("approval-timeout", "denied");
+    expect(updateTask).not.toHaveBeenCalledWith(
+      "task-timeout",
+      expect.objectContaining({
+        status: "paused",
+        terminalStatus: "needs_user_action",
+        error: "Approval request timed out",
+      }),
+    );
+    expect(logEvent).not.toHaveBeenCalledWith(
+      "task-timeout",
+      "approval_denied",
+      expect.objectContaining({
+        approvalId: "approval-timeout",
+        reason: "timeout",
+      }),
+    );
+    expect(daemonLike.pendingApprovals.size).toBe(0);
+  });
+
   it("persists workspace approval rules and resolves the pending approval", async () => {
     const runtime = {
       recordPermissionSuccess: vi.fn(),
