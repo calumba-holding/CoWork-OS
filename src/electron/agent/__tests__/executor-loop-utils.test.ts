@@ -5,6 +5,7 @@ import {
   handleMaxTokensRecovery,
   maybeInjectLowProgressNudge,
   maybeInjectStopReasonNudge,
+  shouldRetryEmptyFollowUpEndTurn,
   shouldForceStopAfterSkippedToolOnlyTurns,
   shouldLockFollowUpToolCalls,
   type ToolLoopCall,
@@ -283,5 +284,25 @@ describe("executor-loop-utils guardrails", () => {
     expect(decision.allToolsFailed).toBe(true);
     expect(decision.shouldStopFromFailures).toBe(false);
     expect(decision.shouldInjectRecoveryHint).toBe(true);
+  });
+
+  it("retries empty follow-up end_turn responses instead of silently finalizing", () => {
+    expect(
+      shouldRetryEmptyFollowUpEndTurn({
+        wantsToEnd: true,
+        hasTextInThisResponse: false,
+        hasProvidedTextResponse: false,
+        hadToolCalls: false,
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldRetryEmptyFollowUpEndTurn({
+        wantsToEnd: true,
+        hasTextInThisResponse: true,
+        hasProvidedTextResponse: true,
+        hadToolCalls: false,
+      }),
+    ).toBe(false);
   });
 });
