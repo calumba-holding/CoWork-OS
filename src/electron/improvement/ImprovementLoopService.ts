@@ -775,6 +775,7 @@ export class ImprovementLoopService {
             (await worktreeManager.shouldUseWorktree(
               executionWorkspace.path,
               executionWorkspace.isTemp,
+              requireWorktree,
             ))));
       if (!promotable) {
         this.candidateService.recordCandidateSkip(
@@ -1281,7 +1282,7 @@ export class ImprovementLoopService {
     if (!requireWorktree) return false;
     const worktreeManager = this.agentDaemon?.getWorktreeManager();
     if (!worktreeManager) return false;
-    return await worktreeManager.shouldUseWorktree(workspacePath, isTemp);
+    return await worktreeManager.shouldUseWorktree(workspacePath, isTemp, true);
   }
 
   private canPromoteVariant(variant: ImprovementVariantRun, task: Task | undefined): boolean {
