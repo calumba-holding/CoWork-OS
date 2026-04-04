@@ -30,8 +30,8 @@ hero:
       text: Skills Runtime
       link: /skills-runtime-model
     - theme: alt
-      text: Release Notes 0.5.22
-      link: /release-notes-0.5.22
+      text: Release Notes 0.5.23
+      link: /release-notes-0.5.23
     - theme: alt
       text: Heartbeat v3
       link: /heartbeat-v3
@@ -61,8 +61,8 @@ features:
     details: Visible learning progression after each task, unified recall across tasks/messages/files, persistent shell sessions, and live provider routing/fallback status.
   - title: Runtime Orchestration
     details: SessionRuntime owns task-session state, session checklists, visible-tool render caching, prompt-cache state, resume snapshots, and task projection while the turn kernel handles each active turn; sectioned prompts, stable-prefix prompt caching, graph-backed delegation, typed worker roles, semantic batch summaries, and terminal-state-safe resume logic keep execution, verification, and follow-up work coherent.
-  - title: Latest Release 0.5.22
-    details: Includes the session runtime ownership split, layered permission engine, workspace rule management, session checklists, metadata-driven tool scheduling, graph-backed delegation, typed worker roles, and refreshed completion and UI surfaces.
+  - title: Latest Release 0.5.23
+    details: Includes the subconscious reflective loop, provider-aware prompt caching, adaptive output budgeting, managed import security, richer Usage Insights, and refreshed settings, approval, and task feedback surfaces.
   - title: Inbox Agent
     details: Local-first email triage with AI classification, action-needed and commitment queues, draft review, and resync-safe background sync.
   - title: Managed Devices
@@ -84,7 +84,7 @@ features:
   - title: Federated Agents
     details: Discover ACP agents, delegate to local or remote specialists, persist ACP task state locally, and invoke A2A-compatible endpoints under shared approvals and endpoint-validation rules.
   - title: Security First
-    details: Local-first architecture, sandboxed execution, layered permission rules, workspace-local policy files, guardrails, approval workflows, encrypted storage, import scanning/quarantine for managed capability bundles, and 4,500+ automated tests.
+    details: Local-first architecture, sandboxed execution, layered permission rules, workspace-local policy files, guardrails, approval workflows, encrypted storage, import scanning/quarantine for managed capability bundles, and a verified suite of 4,932 automated tests across 390 test files.
   - title: Best-Fit Operational Workflows
     details: Purpose-built packs for Support Ops, IT Ops, and Sales Ops — governed outcome delivery for the workflows where AI assistance has the clearest ROI. See the Best-Fit Workflows guide.
   - title: Zero-Human Company Ops
