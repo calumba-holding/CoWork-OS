@@ -582,11 +582,11 @@ describe("SessionRuntime", () => {
 
     harness.runtime.getAvailableTools();
     harness.runtime.getAvailableTools();
-    expect(initialRegistry.getTools).toHaveBeenCalledTimes(2);
+    expect(initialRegistry.getTools).toHaveBeenCalledTimes(1);
 
     catalogVersion = "catalog:v2";
     harness.runtime.getAvailableTools();
-    expect(initialRegistry.getTools).toHaveBeenCalledTimes(3);
+    expect(initialRegistry.getTools).toHaveBeenCalledTimes(2);
 
     const updatedRegistry = {
       getTools: vi.fn(() => [{ name: "browser_navigate" }]),
