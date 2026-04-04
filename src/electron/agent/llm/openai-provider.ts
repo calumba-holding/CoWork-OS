@@ -12,15 +12,21 @@ import {
   LLMResponse,
   LLMContent,
   LLMMessage,
+  LLMSystemBlock,
   LLMTool,
   LLMToolResult,
 } from "./types";
 import { OpenAIOAuth, OpenAIOAuthTokens } from "./openai-oauth";
 import { imageToTextFallback } from "./image-utils";
 import { loadPiAiModule } from "./pi-ai-loader";
+import { toOpenAICompatibleMessages } from "./openai-compatible";
+import { resolveOutputTokenParamName } from "./output-token-policy";
+import { buildOpenAIPromptCacheFields, extractOpenAICompatibleCacheUsage } from "./prompt-cache";
+import { createLogger } from "../../utils/logger";
 
 // Default model for openai-codex (ChatGPT backend)
 const DEFAULT_CODEX_MODEL = "gpt-5.1-codex-mini";
+const logger = createLogger("OpenAI");
 
 type OpenAIProviderErrorPhase = "api_key" | "oauth";
 
@@ -51,57 +57,32 @@ export class OpenAIProvider implements LLMProvider {
     this.model = config.model;
 
     if (accessToken && refreshToken) {
-      const resolvedTokenExpiresAt = this.resolveOAuthTokenExpiry(tokenExpiresAt, accessToken);
-
       // Use OAuth - will use pi-ai SDK for API calls
       this.oauthTokens = {
         access_token: accessToken,
         refresh_token: refreshToken,
-        // Fallback to JWT-derived expiry when persisted expiry is missing.
-        expires_at: resolvedTokenExpiresAt || 0,
+        expires_at:
+          typeof tokenExpiresAt === "number" &&
+          Number.isFinite(tokenExpiresAt) &&
+          tokenExpiresAt > 0
+            ? tokenExpiresAt
+            : 0,
       };
       this.authMethod = "oauth";
-      console.log(
-        `[OpenAI] Using OAuth authentication with pi-ai SDK (token expires: ${resolvedTokenExpiresAt ? new Date(resolvedTokenExpiresAt).toISOString() : "unknown"})`,
+      logger.info(
+        `Using OAuth authentication with pi-ai SDK (token expires: ${
+          this.oauthTokens.expires_at
+            ? new Date(this.oauthTokens.expires_at).toISOString()
+            : "unknown"
+        })`,
       );
     } else if (apiKey) {
       // Use API key - standard OpenAI SDK
       this.client = new OpenAI({ apiKey });
       this.authMethod = "api_key";
-      console.log("[OpenAI] Using API key authentication");
+      logger.info("Using API key authentication");
     } else {
       throw new Error("OpenAI authentication required. Use API key or sign in with ChatGPT.");
-    }
-  }
-
-  private resolveOAuthTokenExpiry(
-    tokenExpiresAt: number | undefined,
-    accessToken: string | undefined,
-  ): number | undefined {
-    if (typeof tokenExpiresAt === "number" && Number.isFinite(tokenExpiresAt) && tokenExpiresAt > 0) {
-      return tokenExpiresAt;
-    }
-    if (!accessToken) {
-      return undefined;
-    }
-    return this.getJwtExpiry(accessToken);
-  }
-
-  private getJwtExpiry(token: string): number | undefined {
-    try {
-      const parts = token.split(".");
-      if (parts.length < 2) return undefined;
-      const payload = parts[1];
-      const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
-      const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
-      const decoded = Buffer.from(padded, "base64").toString("utf8");
-      const claims = JSON.parse(decoded) as { exp?: number };
-      if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp) || claims.exp <= 0) {
-        return undefined;
-      }
-      return claims.exp * 1000;
-    } catch {
-      return undefined;
     }
   }
 
@@ -153,19 +134,31 @@ export class OpenAIProvider implements LLMProvider {
       throw new Error("OpenAI client not initialized");
     }
 
-    const messages = this.convertMessages(request.messages, request.system);
+    const messages = this.convertMessages(request.messages, request.system, request.systemBlocks);
     const tools = request.tools ? this.convertTools(request.tools) : undefined;
 
     try {
-      console.log(`[OpenAI] Calling API with model: ${request.model}`);
+      logger.debug(`Calling API with model: ${request.model}`);
+      const tokenField = resolveOutputTokenParamName({
+        providerType: this.type,
+        modelId: request.model || this.model || "gpt-4o",
+        apiMode: "chat_completions",
+      });
 
+      const body: Any = {
+        model: request.model,
+        [tokenField]: request.maxTokens,
+        messages,
+        ...(tools && tools.length > 0
+          ? {
+              tools,
+              tool_choice: request.toolChoice || "auto",
+            }
+          : {}),
+        ...buildOpenAIPromptCacheFields(request.promptCache),
+      };
       const response = await this.client.chat.completions.create(
-        {
-          model: request.model,
-          max_tokens: request.maxTokens,
-          messages,
-          ...(tools && tools.length > 0 && { tools }),
-        },
+        body,
         request.signal ? { signal: request.signal } : undefined,
       );
 
@@ -173,11 +166,11 @@ export class OpenAIProvider implements LLMProvider {
     } catch (error: Any) {
       // Handle abort errors gracefully
       if (error.name === "AbortError" || error.message?.includes("aborted")) {
-        console.log(`[OpenAI] Request aborted`);
+        logger.info("Request aborted");
         throw new Error("Request cancelled");
       }
 
-      console.error(`[OpenAI] API error:`, {
+      logger.error("API error:", {
         status: error.status,
         message: error.message,
         type: error.type || error.name,
@@ -220,8 +213,8 @@ export class OpenAIProvider implements LLMProvider {
       const { getModels, complete: piAiComplete } = await loadPiAiModule();
       // Map model ID to ChatGPT internal model
       const codexModelId = this.mapToCodexModel(request.model);
-      console.log(
-        `[OpenAI] Calling ChatGPT backend with model: ${codexModelId} (requested: ${request.model})`,
+      logger.debug(
+        `Calling ChatGPT backend with model: ${codexModelId} (requested: ${request.model})`,
       );
 
       // Get the model object from pi-ai SDK
@@ -234,13 +227,13 @@ export class OpenAIProvider implements LLMProvider {
           model = found;
         } else {
           // Use default if not found
-          console.log(
-            `[OpenAI] Model ${codexModelId} not found, using default: ${DEFAULT_CODEX_MODEL}`,
+          logger.info(
+            `Model ${codexModelId} not found, using default: ${DEFAULT_CODEX_MODEL}`,
           );
           model = availableModels.find((m) => m.id === DEFAULT_CODEX_MODEL) || availableModels[0];
         }
       } catch (e) {
-        console.error("[OpenAI] Failed to get model from pi-ai SDK:", e);
+        logger.error("Failed to get model from pi-ai SDK:", e);
         throw new Error(`Model not available: ${codexModelId}`);
       }
 
@@ -289,11 +282,11 @@ export class OpenAIProvider implements LLMProvider {
     } catch (error: Any) {
       // Handle abort errors gracefully
       if (error.name === "AbortError" || error.message?.includes("aborted")) {
-        console.log(`[OpenAI] Request aborted`);
+        logger.info("Request aborted");
         throw new Error("Request cancelled");
       }
 
-      console.error(`[OpenAI] ChatGPT API error:`, {
+      logger.error("ChatGPT API error:", {
         message: error.message,
         type: error.type || error.name,
       });
@@ -361,7 +354,7 @@ export class OpenAIProvider implements LLMProvider {
   async getAvailableModels(): Promise<Array<{ id: string; name: string; description: string }>> {
     // For OAuth authentication, use pi-ai SDK's model list
     if (this.authMethod === "oauth") {
-      console.log("[OpenAI] Using OAuth - fetching models from pi-ai SDK...");
+      logger.info("Using OAuth - fetching models from pi-ai SDK...");
 
       try {
         const { getModels } = await loadPiAiModule();
@@ -388,10 +381,10 @@ export class OpenAIProvider implements LLMProvider {
           return priority(a.id) - priority(b.id);
         });
 
-        console.log(`[OpenAI] Found ${models.length} models via pi-ai SDK`);
+        logger.info(`Found ${models.length} models via pi-ai SDK`);
         return models;
       } catch (error) {
-        console.error("[OpenAI] Failed to get models from pi-ai SDK:", error);
+        logger.error("Failed to get models from pi-ai SDK:", error);
         // Return defaults on error
         return this.getDefaultCodexModels();
       }
@@ -421,7 +414,7 @@ export class OpenAIProvider implements LLMProvider {
           });
         return models;
       } catch (error: Any) {
-        console.error("Failed to fetch OpenAI models:", error);
+        logger.error("Failed to fetch OpenAI models:", error);
       }
     }
 
@@ -674,6 +667,7 @@ export class OpenAIProvider implements LLMProvider {
             inputTokens: response.usage.input || 0,
             outputTokens: response.usage.output || 0,
             cachedTokens: response.usage.cacheRead || undefined,
+            cacheWriteTokens: response.usage.cacheWrite || undefined,
           }
         : undefined,
     };
@@ -685,114 +679,12 @@ export class OpenAIProvider implements LLMProvider {
   private convertMessages(
     messages: LLMMessage[],
     system?: string,
+    systemBlocks?: LLMSystemBlock[],
   ): OpenAI.ChatCompletionMessageParam[] {
-    const result: OpenAI.ChatCompletionMessageParam[] = [];
-
-    // Add system message first if provided
-    if (system) {
-      result.push({
-        role: "system",
-        content: system,
-      });
-    }
-
-    for (const msg of messages) {
-      if (typeof msg.content === "string") {
-        result.push({
-          role: msg.role,
-          content: msg.content,
-        });
-      } else if (Array.isArray(msg.content)) {
-        // Check if this is a tool result array
-        const toolResults = msg.content.filter(
-          (item): item is LLMToolResult => item.type === "tool_result",
-        );
-
-        if (toolResults.length > 0) {
-          // Convert tool results to OpenAI format
-          for (const toolResult of toolResults) {
-            result.push({
-              role: "tool",
-              tool_call_id: toolResult.tool_use_id,
-              content: toolResult.content,
-            });
-          }
-          // If there are also image/text blocks alongside tool_results, emit them separately
-          const nonToolItems = msg.content.filter((item) => item.type !== "tool_result");
-          const hasImages = nonToolItems.some((item) => item.type === "image");
-          if (hasImages) {
-            const contentParts: Array<
-              { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }
-            > = [];
-            for (const item of nonToolItems) {
-              if (item.type === "text") {
-                contentParts.push({ type: "text", text: item.text });
-              } else if (item.type === "image") {
-                contentParts.push({
-                  type: "image_url",
-                  image_url: { url: `data:${item.mimeType};base64,${item.data}` },
-                });
-              }
-            }
-            if (contentParts.length > 0) {
-              result.push({ role: "user", content: contentParts } as Any);
-            }
-          }
-        } else {
-          // Handle mixed content (text, tool_use, image)
-          const hasImages = msg.content.some((item) => item.type === "image");
-          const textContent = msg.content
-            .filter((item) => item.type === "text")
-            .map((item) => (item as { type: "text"; text: string }).text)
-            .join("\n");
-
-          const toolUses = msg.content.filter((item) => item.type === "tool_use");
-
-          if (msg.role === "assistant") {
-            const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
-              role: "assistant",
-              content: textContent || null,
-            };
-
-            if (toolUses.length > 0) {
-              assistantMsg.tool_calls = toolUses.map((tool) => ({
-                id: (tool as Any).id,
-                type: "function" as const,
-                function: {
-                  name: (tool as Any).name,
-                  arguments: JSON.stringify((tool as Any).input),
-                },
-              }));
-            }
-
-            result.push(assistantMsg);
-          } else if (hasImages) {
-            // Build multi-part content array with text and image_url blocks
-            const contentParts: Array<
-              { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }
-            > = [];
-            for (const item of msg.content) {
-              if (item.type === "text") {
-                contentParts.push({ type: "text", text: item.text });
-              } else if (item.type === "image") {
-                contentParts.push({
-                  type: "image_url",
-                  image_url: { url: `data:${item.mimeType};base64,${item.data}` },
-                });
-              }
-            }
-            result.push({ role: "user", content: contentParts } as Any);
-          } else {
-            result.push({
-              role: msg.role,
-              content: textContent,
-            });
-          }
-        }
-      }
-    }
-
-    return result;
+    return toOpenAICompatibleMessages(messages, system, {
+      supportsImages: true,
+      systemBlocks,
+    }) as OpenAI.ChatCompletionMessageParam[];
   }
 
   private convertTools(tools: LLMTool[]): OpenAI.ChatCompletionTool[] {
@@ -840,7 +732,7 @@ export class OpenAIProvider implements LLMProvider {
         ? {
             inputTokens: response.usage.prompt_tokens,
             outputTokens: response.usage.completion_tokens,
-            cachedTokens: response.usage.prompt_tokens_details?.cached_tokens || undefined,
+            ...extractOpenAICompatibleCacheUsage(response.usage),
           }
         : undefined,
     };
