@@ -140,6 +140,7 @@ describe("TaskExecutor /schedule slash command handling", () => {
 describe("TaskExecutor /simplify and /batch normalization", () => {
   function createExecutor(prompt: string, toolImpl: (name: string, input: Any) => Any) {
     const executor = Object.create(TaskExecutor.prototype) as Any;
+    const resolvedInvocations = new Map<string, Any>();
 
     executor.task = {
       id: "task-2",
@@ -166,7 +167,22 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     };
 
     executor.toolRegistry = {
-      executeTool: vi.fn(async (name: string, input: Any) => toolImpl(name, input)),
+      executeTool: vi.fn(async (name: string, input: Any) => {
+        const output = await toolImpl(name, input);
+        if (output && typeof output === "object" && "result" in output && "resolvedSkill" in output) {
+          const result = output.result as Any;
+          if (typeof result?.skill_invocation_id === "string") {
+            resolvedInvocations.set(result.skill_invocation_id, output.resolvedSkill);
+          }
+          return result;
+        }
+        return output;
+      }),
+      takeResolvedSkillInvocation: vi.fn((invocationId: string) => {
+        const resolved = resolvedInvocations.get(invocationId) || null;
+        resolvedInvocations.delete(invocationId);
+        return resolved;
+      }),
     };
 
     executor.saveConversationSnapshot = vi.fn();
@@ -179,33 +195,46 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     executor.emitEvent = vi.fn();
 
     return executor as TaskExecutor & {
-      toolRegistry: { executeTool: ReturnType<typeof vi.fn> };
+      toolRegistry: {
+        executeTool: ReturnType<typeof vi.fn>;
+        takeResolvedSkillInvocation: ReturnType<typeof vi.fn>;
+      };
       emitEvent: ReturnType<typeof vi.fn>;
     };
   }
 
-  it("normalizes `/simplify` into deterministic use_skill execution", async () => {
+  function buildSkillToolSuccess(application: Any, invocationId = "skill-invocation-1") {
+    return {
+      result: {
+        success: true,
+        skill: application.skillId,
+        skill_name: application.skillName,
+        skill_invocation_id: invocationId,
+        message: `Loaded skill '${application.skillName}' for this task.`,
+      },
+      resolvedSkill: application,
+    };
+  }
+
+  it("normalizes `/simplify` into deterministic Skill execution", async () => {
     const originalPrompt = "/simplify";
     const executor = createExecutor("/simplify", (name, input) => {
-      expect(name).toBe("use_skill");
+      expect(name).toBe("Skill");
       expect(input).toEqual({
-        skill_id: "simplify",
-        parameters: {},
+        skill: "simplify",
+        args: "",
         trigger: "slash",
       });
-      return {
-        success: true,
-        content: "Simplify prompt expanded",
-        skill_application: {
+      return buildSkillToolSuccess({
           skillId: "simplify",
           skillName: "Simplify",
           trigger: "slash",
+          args: "",
           parameters: {},
           content: "Simplify prompt expanded",
           reason: "Applied via /simplify",
           appliedAt: Date.now(),
-        },
-      };
+        });
     });
 
     const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
@@ -225,30 +254,23 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     );
   });
 
-  it("normalizes `/batch` with flags into deterministic use_skill execution", async () => {
+  it("normalizes `/batch` with flags into deterministic Skill execution", async () => {
     const originalPrompt =
       "/batch migrate docs to template --parallel 6 --domain writing --external confirm";
     const executor = createExecutor(
       originalPrompt,
       (name, input) => {
-        expect(name).toBe("use_skill");
+        expect(name).toBe("Skill");
         expect(input).toEqual({
-          skill_id: "batch",
-          parameters: {
-            objective: "migrate docs to template",
-            parallel: 6,
-            domain: "writing",
-            external: "confirm",
-          },
+          skill: "batch",
+          args: "migrate docs to template --parallel 6 --domain writing --external confirm",
           trigger: "slash",
         });
-        return {
-          success: true,
-          content: "Batch prompt expanded",
-          skill_application: {
+        return buildSkillToolSuccess({
             skillId: "batch",
             skillName: "Batch",
             trigger: "slash",
+            args: "migrate docs to template --parallel 6 --domain writing --external confirm",
             parameters: {
               objective: "migrate docs to template",
               parallel: 6,
@@ -258,8 +280,7 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
             content: "Batch prompt expanded",
             reason: "Applied via /batch",
             appliedAt: Date.now(),
-          },
-        };
+          });
       },
     );
 
@@ -282,22 +303,17 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
   it("enforces `/batch` external policy default to confirm when omitted", async () => {
     const originalPrompt = "/batch migrate docs";
     const executor = createExecutor("/batch migrate docs", (name, input) => {
-      expect(name).toBe("use_skill");
+      expect(name).toBe("Skill");
       expect(input).toEqual({
-        skill_id: "batch",
-        parameters: {
-          objective: "migrate docs",
-          external: "confirm",
-        },
+        skill: "batch",
+        args: "migrate docs --external confirm",
         trigger: "slash",
       });
-      return {
-        success: true,
-        content: "Batch prompt expanded",
-        skill_application: {
+      return buildSkillToolSuccess({
           skillId: "batch",
           skillName: "Batch",
           trigger: "slash",
+          args: "migrate docs --external confirm",
           parameters: {
             objective: "migrate docs",
             external: "confirm",
@@ -305,8 +321,7 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
           content: "Batch prompt expanded",
           reason: "Applied via /batch",
           appliedAt: Date.now(),
-        },
-      };
+        });
     });
 
     const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
@@ -319,7 +334,7 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
 
   it("rejects `/batch` without an objective", async () => {
     const executor = createExecutor("/batch", (_name, _input) => {
-      throw new Error("use_skill should not be called");
+      throw new Error("Skill should not be called");
     });
 
     await expect(
@@ -329,22 +344,17 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
 
   it("applies `external=none` by restricting side-effect external tools", async () => {
     const executor = createExecutor("/batch migrate docs --external none", (name, input) => {
-      expect(name).toBe("use_skill");
+      expect(name).toBe("Skill");
       expect(input).toEqual({
-        skill_id: "batch",
-        parameters: {
-          objective: "migrate docs",
-          external: "none",
-        },
+        skill: "batch",
+        args: "migrate docs --external none",
         trigger: "slash",
       });
-      return {
-        success: true,
-        content: "Batch prompt expanded",
-        skill_application: {
+      return buildSkillToolSuccess({
           skillId: "batch",
           skillName: "Batch",
           trigger: "slash",
+          args: "migrate docs --external none",
           parameters: {
             objective: "migrate docs",
             external: "none",
@@ -352,8 +362,7 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
           content: "Batch prompt expanded",
           reason: "Applied via /batch",
           appliedAt: Date.now(),
-        },
-      };
+        });
     });
 
     const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
@@ -430,22 +439,19 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
 
   it("supports inline `then run /simplify` chaining", async () => {
     const executor = createExecutor("Refactor this module then run /simplify", (name, input) => {
-      expect(name).toBe("use_skill");
-      expect(input.skill_id).toBe("simplify");
+      expect(name).toBe("Skill");
+      expect(input.skill).toBe("simplify");
       expect(input.trigger).toBe("slash");
-      return {
-        success: true,
-        content: "Expanded simplify workflow",
-        skill_application: {
+      return buildSkillToolSuccess({
           skillId: "simplify",
           skillName: "Simplify",
           trigger: "slash",
+          args: "",
           parameters: {},
           content: "Expanded simplify workflow",
           reason: "Applied via /simplify",
           appliedAt: Date.now(),
-        },
-      };
+        });
     });
 
     const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
