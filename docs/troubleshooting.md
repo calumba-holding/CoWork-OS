@@ -186,45 +186,45 @@ Notes:
 - If strict cached provider behavior is unavailable, runtime falls back to `live` and emits `web_search_mode_fallback_live`.
 - Domain filtering emits `web_search_domain_filtered_result_count`. If all results are filtered, `web_search` returns a structured policy error.
 
-## Self-improvement startup warnings in development
+## Subconscious startup warnings in development
 
 If `npm run dev` or `npm run dev:log` shows warnings like:
 
 ```text
 [AgentDaemon] Task requires git worktree isolation, but worktrees are unavailable for this workspace.
-[AgentDaemon] Memory capture failed: Error: [MemoryService] Not initialized. Call MemoryService.initialize() first.
-[AgentDaemon] Error emitting legacy alias event error: Error [ERR_UNHANDLED_ERROR]: Unhandled error.
+[Main] Failed to initialize SubconsciousLoopService: SqliteError: no such column: workspace_id
+[Main] Failed to initialize SubconsciousLoopService: SqliteError: FOREIGN KEY constraint failed
 ```
 
-these messages come from the autonomous self-improvement loop, not from the main Electron boot path itself.
+those messages come from the `Subconscious` reflective loop, not from the main Electron boot path itself.
 
 ### What the warnings mean
 
 `Task requires git worktree isolation, but worktrees are unavailable for this workspace.`
 
-- An autonomous improvement task was created with `requireWorktree: true`.
-- Its target workspace was not eligible for worktree use.
-- Common reasons: the workspace is not a git repo, it is temporary, or worktree support is disabled/unavailable.
+- A `code_change_task` dispatch was considered for a target that requires isolated git execution.
+- The target workspace was not eligible for worktree use.
+- Common reasons: the workspace is not a real git repo, it is temporary, or worktree support is disabled/unavailable.
 
-`Memory capture failed: Error: [MemoryService] Not initialized. Call MemoryService.initialize() first.`
+`SqliteError: no such column: workspace_id`
 
-- The improvement loop started early enough that task-event persistence attempted `MemoryService.capture(...)` before `MemoryService.initialize(...)` finished.
-- This was a startup-order race and usually did not stop the rest of the app from starting.
+- An earlier build queried legacy rows with an outdated column assumption during subconscious target collection.
+- Startup could continue, but `SubconsciousLoopService` would fail to initialize.
 
-`ERR_UNHANDLED_ERROR`
+`SqliteError: FOREIGN KEY constraint failed`
 
-- This was secondary log noise.
-- The daemon emitted a legacy event alias literally named `"error"`.
-- In Node's `EventEmitter`, `"error"` is special and throws if there is no listener.
-- The underlying problem was still the worktree requirement failure; this log line just made it look scarier.
+- An earlier migration path could fail while rekeying legacy improvement records into subconscious target history.
+- This was a migration bug, not a sign that the feature requires manual owner enrollment or a separate approval step.
 
 ### Current fix
 
-Current builds address the issue in three places:
+Current builds harden the startup path in several places:
 
-1. `ImprovementLoopService` now starts after `MemoryService` has been initialized.
-2. When autonomous improvement requires worktrees, candidate selection skips workspaces that cannot use worktrees.
-3. The daemon no longer emits the legacy `"error"` alias when no `error` listener is registered.
+1. `SubconsciousLoopService` starts after memory services are initialized.
+2. Code dispatch only targets real git-backed repositories, and canonical code targets resolve from the repository remote instead of from transient workspace noise.
+3. Legacy improvement rows are migrated into subconscious target state without breaking foreign keys.
+4. Worktree settings persist in secure settings so code dispatch can still require isolation after restart.
+5. Recommendation-only runs still complete successfully when a target has no valid executor mapping.
 
 ### How to verify
 
@@ -240,69 +240,34 @@ Then inspect:
 logs/dev-latest.log
 ```
 
-You should no longer see the self-improvement task start before memory initialization, and you should no longer see the legacy `ERR_UNHANDLED_ERROR` line for this case.
+Healthy startup should include:
+
+- `SubconsciousLoopService initialized`
+- no `Failed to initialize SubconsciousLoopService` line
+- no early worktree failure for a non-git temporary workspace unless a real code target was incorrectly selected
 
 ### If you still see the worktree warning
 
-The autonomous loop is still finding a candidate in a workspace that cannot support isolated git execution. Check:
+Check:
 
-1. The workspace path is inside a real git repository.
-2. The workspace is not temporary.
-3. Git worktree support is enabled.
-4. The repository is usable from the app's runtime environment.
+1. the workspace path is inside a real git repository
+2. the repo remote resolves to the intended repository
+3. git worktree support is enabled
+4. the repository is usable from the app runtime environment
 
-If you intentionally use non-git workspaces, either:
+If you use non-git workspaces, `Subconscious` can still run on task, mailbox, schedule, trigger, and briefing targets. Only code-change dispatch requires the git/worktree path.
 
-- leave self-improvement enabled and let it operate only on git-backed workspaces
-- or disable/self-limit the improvement loop for that environment
+### If you still see SQLite initialization errors
 
-### If you still see memory initialization warnings
-
-That indicates a different startup-order regression. Capture the latest log and compare the relative timestamps for:
+Capture a fresh log and compare the relative timestamps for:
 
 - `MemoryService` initialization
-- `ImprovementLoopService initialized`
-- the first `Improve:` task startup line
+- `SubconsciousLoopService initialized`
+- the first subconscious target refresh or run line
 
-If the task starts before memory initialization, treat it as a bug and inspect the startup sequence in `src/electron/main.ts`.
-
-## Self-improvement fails to initialize with `SqliteError: 27 values for 28 columns`
-
-If `logs/dev-latest.log` shows something like:
-
-```text
-[Main] Failed to initialize ImprovementLoopService: SqliteError: 27 values for 28 columns
-```
-
-the failure is coming from the self-improvement candidate repository, not from eligibility checks.
-
-### What it means
-
-- `ImprovementCandidateRepository.create()` built an `INSERT` statement for `improvement_candidates`
-- the listed column count and placeholder count drifted out of sync
-- startup could still continue, but `ImprovementLoopService` would fail to initialize and candidate ingestion would be disabled
-
-### Current fix
-
-Current builds align the `INSERT` placeholder count with the 28-column `improvement_candidates` schema.
-
-### How to verify
-
-Capture a fresh log:
-
-```bash
-npm run dev:log
-```
-
-Then inspect:
-
-```bash
-logs/dev-latest.log
-```
-
-You should no longer see the `27 values for 28 columns` initialization failure.
+If initialization still fails on a current build, inspect the local database migration path before looking at renderer or approval code.
 
 See also:
 
 - [Development Guide](development.md)
-- [Self-Improving Agent Architecture](self-improving-agent.md)
+- [Subconscious Reflective Loop](subconscious-loop.md)
