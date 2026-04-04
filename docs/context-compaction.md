@@ -22,7 +22,7 @@ Task starts → Context grows with each LLM turn
 
 ### Trigger Threshold
 
-Compaction triggers at **90% context utilization** — aligned with OpenAI Codex CLI's threshold. Claude Code uses ~95%. The 90% threshold balances context preservation with leaving enough room for a rich summary.
+Compaction triggers at **90% context utilization** — aligned with OpenAI Codex CLI's threshold. Some desktop coding tools use ~95%. The 90% threshold balances context preservation with leaving enough room for a rich summary.
 
 | Model | Context Window | Trigger Point |
 |-------|---------------|---------------|
@@ -149,7 +149,7 @@ Compaction behavior is controlled by constants in `src/electron/agent/executor-h
 
 ## Comparison with Other Tools
 
-| Feature | CoWork OS | Codex CLI | Claude Code |
+| Feature | CoWork OS | Codex CLI | Higher-threshold CLI |
 |---|---|---|---|
 | Trigger threshold | 90% | 90% | ~95% |
 | Summary budget | 4,096 tokens | Unlimited | Undisclosed (~3-5K observed) |
