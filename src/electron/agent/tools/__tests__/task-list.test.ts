@@ -45,6 +45,8 @@ describe("ToolRegistry task_list_*", () => {
         getTaskById: vi.fn().mockResolvedValue({ agentConfig: { executionMode: "execute" } }),
       },
       getTaskExecutionMode: (ToolRegistry as Any).prototype.getTaskExecutionMode,
+      withImmediateTaskListReminder:
+        (ToolRegistry as Any).prototype.withImmediateTaskListReminder,
       taskListHandler: {
         create,
         update,
@@ -65,6 +67,7 @@ describe("ToolRegistry task_list_*", () => {
     ]);
     expect(created.verificationNudgeNeeded).toBe(false);
     expect(updated.verificationNudgeNeeded).toBe(true);
+    expect(updated.immediateReminder).toContain("CHECKLIST REMINDER");
   });
 
   it("returns the current checklist state from task_list_list", async () => {
