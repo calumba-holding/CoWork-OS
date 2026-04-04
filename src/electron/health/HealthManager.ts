@@ -861,8 +861,11 @@ async function generateWorkflowFromLLM(
   dashboard: HealthDashboard,
   request: HealthWorkflowRequest,
 ): Promise<HealthWorkflow | null> {
+  let providerType = "";
+  let modelId = "";
   try {
     const provider = LLMProviderFactory.createProvider();
+    providerType = provider.type;
     const relevantSources = request.sourceIds?.length
       ? dashboard.sources.filter((source) => request.sourceIds?.includes(source.id))
       : dashboard.sources;
@@ -923,7 +926,7 @@ async function generateWorkflowFromLLM(
       },
     ];
 
-    const modelId = LLMProviderFactory.loadSettings().modelKey || "sonnet-4-5";
+    modelId = LLMProviderFactory.loadSettings().modelKey || "sonnet-4-5";
     const response = await provider.createMessage({
       model: modelId,
       maxTokens: 800,
@@ -934,7 +937,7 @@ async function generateWorkflowFromLLM(
       {
         sourceKind: "health_workflow",
         sourceId: request.workflowType,
-        providerType: provider.type,
+        providerType,
         modelKey: modelId,
         modelId,
       },
@@ -978,6 +981,9 @@ async function generateWorkflowFromLLM(
       {
         sourceKind: "health_workflow",
         sourceId: request.workflowType,
+        providerType,
+        modelKey: modelId,
+        modelId,
       },
       err,
     );
