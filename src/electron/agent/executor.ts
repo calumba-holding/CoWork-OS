@@ -231,6 +231,7 @@ import {
   maybeInjectStopReasonNudge as maybeInjectStopReasonNudgeUtil,
   maybeInjectToolLoopBreak as maybeInjectToolLoopBreakUtil,
   maybeInjectVariedFailureNudge as maybeInjectVariedFailureNudgeUtil,
+  shouldRetryEmptyFollowUpEndTurn as shouldRetryEmptyFollowUpEndTurnUtil,
   shouldForceStopAfterSkippedToolOnlyTurns as shouldForceStopAfterSkippedToolOnlyTurnsUtil,
   shouldLockFollowUpToolCalls as shouldLockFollowUpToolCallsUtil,
   type ToolLoopCall,
@@ -26541,6 +26542,13 @@ Return ONLY a JSON object:
       );
     }
 
+    if (lower.includes("llm returned empty responses repeatedly during follow-up processing")) {
+      return (
+        "The model returned empty responses repeatedly while processing your follow-up. " +
+        "This usually indicates a provider issue. Please retry or switch models/providers."
+      );
+    }
+
     const compact = raw.length > 220 ? `${raw.slice(0, 220)}...` : raw;
     return (
       "I hit an internal error while processing your follow-up: " +
@@ -28883,6 +28891,21 @@ Return ONLY a JSON object:
           wantsToEnd = false;
         }
 
+        if (
+          shouldRetryEmptyFollowUpEndTurnUtil({
+            wantsToEnd,
+            hasTextInThisResponse,
+            hasProvidedTextResponse,
+            hadToolCalls,
+          })
+        ) {
+          console.log(
+            `${this.logTag} Empty end_turn during follow-up without text or tool output - retrying`,
+          );
+          continueLoop = true;
+          wantsToEnd = false;
+        }
+
         if (wantsToEnd && hasTextInThisResponse) {
           const latestText = this.getLatestAssistantText(messages).trim();
           const domainCompletion = evaluateDomainCompletion({
@@ -28956,7 +28979,7 @@ Return ONLY a JSON object:
         }
 
         // Only end the loop if the agent wants to AND has provided a response
-        if (wantsToEnd && (hasProvidedTextResponse || !hadToolCalls)) {
+        if (wantsToEnd && hasProvidedTextResponse) {
           continueLoop = false;
         }
         state.messages = messages;
@@ -28973,6 +28996,13 @@ Return ONLY a JSON object:
       messages = followUpKernelOutcome.messages;
       iterationCount = followUpKernelOutcome.iterations;
       emptyResponseCount = followUpKernelOutcome.emptyResponseCount;
+
+      if (followUpKernelOutcome.stopReason === "max_empty_responses") {
+        throw new Error(
+          "LLM returned empty responses repeatedly during follow-up processing. " +
+            "This usually indicates a provider/tool-call error. Try again or switch models/providers.",
+        );
+      }
 
       if (
         !pausedForUserInput &&
