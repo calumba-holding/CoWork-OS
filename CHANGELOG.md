@@ -7,22 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.23] - 2026-04-05
+
 ### Added
-- **Configurable primary retry cooldown**: `Settings > LLM > Provider Failover` now includes `Retry primary after (seconds)` so ordered LLM fallback chains can temporarily stay on a working fallback before probing the primary route again. Leaving it blank uses the default 60-second cooldown; `0` retries the primary on the next route refresh.
-- **Imported capability security reports**: skills and plugin packs now share persisted import security reports, quarantine records, retry/remove actions, and aligned IPC contracts for install-time security outcomes.
-- **Provider-aware prompt caching**: CoWork now persists stable prompt-cache metadata in `SessionRuntime`, keeps stable system sections cacheable, prefers Anthropic automatic caching when available, uses explicit OpenRouter Claude breakpoints, and derives stable OpenAI-family cache keys for GPT routes including Azure OpenAI profile-based routing.
+- **Release notes for 0.5.23**: see [Release Notes 0.5.23](docs/release-notes-0.5.23.md).
+- **Subconscious reflective loop**: CoWork now includes a new reflective automation subsystem with persisted targets, backlog items, hypotheses, critiques, dispatch records, artifact storage, migration support, and a dedicated settings surface under Automations.
+- **Provider-aware prompt caching**: stable prompt sections can now be cached across Anthropic, OpenRouter Claude, Azure OpenAI, and OpenAI-family routes, with shared cache metadata persisted in `SessionRuntime`.
+- **Adaptive output token policy**: request-kind-aware output budgeting now classifies truncation modes, adjusts output-token limits by provider family, and guides retry or continuation behavior when a response hits output ceilings.
+- **Prompt-aware tool descriptions**: built-in tools now carry prompt metadata so the runtime can render concise execution-facing descriptions and compact planning text from one shared definition.
+- **Imported capability security**: managed skills and plugin packs now stage through a shared security gate with persisted reports, quarantine handling, retry/remove actions, and explicit file-import approval tracking.
+- **Usage Insights projector**: usage metrics now support incremental backfill/projection, richer provider breakdowns, retry metrics, normalized provider names, and new renderer helpers for periods and formatting.
+- **Task feedback controls**: completed tasks can now collect user feedback directly from the right panel.
 
 ### Changed
-- **Imported skills and packs**: managed imports now stage into a temp location, run structural/content/package scanning before activation, persist sidecar reports, and move to quarantine instead of activating when the scan blocks the bundle.
-- **OpenRouter app attribution**: default OpenRouter headers now include `X-OpenRouter-Categories: personal-agent,programming-app` so CoWork OS is categorized in OpenRouter app analytics and marketplace surfaces.
-- **Prompt-cache defaults**: prompt caching now defaults to `auto` for supported providers, uses a 5-minute TTL unless overridden, and records cache reads/writes in usage telemetry and cost accounting when upstream APIs report them.
+- **Execution runtime**: prompt assembly now uses cache-aware session- and turn-scoped sections, shared prompt-section hashing, adaptive output-budget state, prompt-aware tool text, and normalized delegation-role inference.
+- **Provider routing and failover**: fallback settings now preserve cached model metadata, respect a configurable retry-to-primary cooldown, keep active failover routes stable, and expose the new behavior in settings and provider docs.
+- **Anthropic, OpenAI, Azure, and OpenRouter integrations**: provider implementations now handle scoped system blocks, prompt-cache metadata, richer usage accounting, safer credential handling, and normalized display names more consistently.
+- **Import and extension loading**: imported skills and plugin packs now carry persisted security reports through loader, installer, registry, IPC, and renderer surfaces instead of surfacing ad hoc warnings.
+- **Automations terminology and docs**: product copy, settings labels, comparisons, and troubleshooting guides now consistently use `Subconscious` or `subconscious loop` in place of the older self-improvement language where appropriate.
+- **Usage Insights UI**: the LLM section and charts now use normalized provider names, richer charting, one-day and shared period presets, and extracted formatting helpers.
+- **Approval and task-detail UX**: approval dialogs now render safer command previews, and task detail feedback moved into the right panel.
+- **Gateway, daemon, and worktree plumbing**: workspace bootstrap, channel gateway startup, secure worktree persistence, and health snapshots now carry richer routing and provider state.
 
 ### Fixed
-- **LLM fallback settings persistence**: saving LLM settings now reliably preserves the configured fallback provider/model list and the primary-retry cooldown in the encrypted settings store.
-- **LLM failover retry routing**: retryable provider errors such as OpenRouter `429` responses now advance to the next configured fallback route without immediately snapping back to the primary provider on the next retry loop.
-- **Return-to-primary thrash**: after failover, the executor now preserves the active fallback route for the configured cooldown window before attempting the primary route again.
-- **Approval timeout completion race**: stale approval timers no longer overwrite terminal task state after a task has already completed, failed, or been cancelled.
-- **Post-install tampering on managed imports**: previously installed imported skills and packs are now rechecked by digest on discovery/load so modified managed bundles can be quarantined before activation.
+- **OpenRouter attribution**: request headers now use a single normalized attribution category set across OpenRouter calls.
+- **Fallback routing stability**: retryable provider failures now move through fallback routes more reliably without immediately snapping back to the primary route.
+- **LLM settings persistence**: saving provider settings now preserves fallback chains, retry cooldowns, and cached model metadata more reliably.
+- **Tool-result reminder payloads**: JSON envelopes remain valid when model reminders are attached to tool results.
+- **Approval command previews**: long or multiline commands now render as truncated previews instead of overflowing approval dialogs.
+- **Managed import integrity**: imported skills and packs are rechecked and can be quarantined consistently when their stored bundle no longer matches the expected digest or security outcome.
+- **Task cleanup bookkeeping**: deleting task rows now clears subconscious task references so reflective automation state does not retain stale task pointers.
+- **Empty follow-up end turns**: follow-up loops now retry empty `end_turn` responses instead of silently finalizing with no text, and repeated empty follow-up responses are surfaced as provider errors.
 
 ## [0.5.22] - 2026-04-03
 
@@ -1289,7 +1304,8 @@ This release is the first recommended Windows install baseline for normal users 
 | 0.1.0 | 2025-01-24 | First public release with core features |
 | 0.0.1 | 2025-01-20 | Initial development setup |
 
-[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.19...HEAD
+[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.23...HEAD
+[0.5.23]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.23
 [0.5.19]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.19
 [0.5.18]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.18
 [0.5.17]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.17
