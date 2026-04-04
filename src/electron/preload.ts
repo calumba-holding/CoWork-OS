@@ -66,6 +66,15 @@ import type {
   SupervisorExchangeStatus,
 } from "../shared/types";
 import type {
+  SubconsciousBrainSummary,
+  SubconsciousHistoryResetResult,
+  SubconsciousRefreshResult,
+  SubconsciousRun,
+  SubconsciousSettings,
+  SubconsciousTargetDetail,
+  SubconsciousTargetSummary,
+} from "../shared/subconscious";
+import type {
   HealthDashboard,
   HealthSource,
   HealthSourceInput,
@@ -330,9 +339,21 @@ const IPC_CHANNELS = {
   TASK_FORK_SESSION: "task:forkSession",
   TASK_RENAME: "task:rename",
   TASK_DELETE: "task:delete",
+  DIALOG_SELECT_FOLDER: "dialog:selectFolder",
+  DIALOG_SELECT_FILES: "dialog:selectFiles",
+  WINDOW_MINIMIZE: "window:minimize",
+  WINDOW_MAXIMIZE: "window:maximize",
+  WINDOW_CLOSE: "window:close",
+  WINDOW_IS_MAXIMIZED: "window:isMaximized",
+  FILE_OPEN: "file:open",
+  FILE_SHOW_IN_FINDER: "file:showInFinder",
+  FILE_READ_FOR_VIEWER: "file:readForViewer",
+  FILE_IMPORT_TO_WORKSPACE: "file:importToWorkspace",
+  FILE_IMPORT_DATA_TO_WORKSPACE: "file:importDataToWorkspace",
   DOCUMENT_OPEN_EDITOR_SESSION: "document:openEditorSession",
   DOCUMENT_LIST_VERSIONS: "document:listVersions",
   DOCUMENT_START_EDIT_TASK: "document:startEditTask",
+  SHELL_OPEN_EXTERNAL: "shell:openExternal",
   MAILBOX_GET_SYNC_STATUS: "mailbox:getSyncStatus",
   MAILBOX_SYNC: "mailbox:sync",
   MAILBOX_LIST_THREADS: "mailbox:listThreads",
@@ -427,6 +448,7 @@ const IPC_CHANNELS = {
   LLM_GET_CONFIG_STATUS: "llm:getConfigStatus",
   LLM_SET_MODEL: "llm:setModel",
   LLM_GET_PROVIDER_MODELS: "llm:getProviderModels",
+  LLM_GET_ANTHROPIC_MODELS: "llm:getAnthropicModels",
   LLM_GET_OLLAMA_MODELS: "llm:getOllamaModels",
   LLM_GET_GEMINI_MODELS: "llm:getGeminiModels",
   LLM_GET_OPENROUTER_MODELS: "llm:getOpenRouterModels",
@@ -662,6 +684,9 @@ const IPC_CHANNELS = {
   CRON_GET_STATUS: "cron:getStatus",
   CRON_LIST_JOBS: "cron:listJobs",
   CRON_GET_JOB: "cron:getJob",
+  CRON_GET_RUN_HISTORY: "cron:getRunHistory",
+  CRON_CLEAR_RUN_HISTORY: "cron:clearRunHistory",
+  CRON_GET_WEBHOOK_STATUS: "cron:getWebhookStatus",
   CRON_ADD_JOB: "cron:addJob",
   CRON_UPDATE_JOB: "cron:updateJob",
   CRON_REMOVE_JOB: "cron:removeJob",
@@ -680,6 +705,7 @@ const IPC_CHANNELS = {
   // Notifications
   NOTIFICATION_LIST: "notification:list",
   NOTIFICATION_ADD: "notification:add",
+  NOTIFICATION_UNREAD_COUNT: "notification:unreadCount",
   NOTIFICATION_MARK_READ: "notification:markRead",
   NOTIFICATION_MARK_ALL_READ: "notification:markAllRead",
   NOTIFICATION_DELETE: "notification:delete",
@@ -837,6 +863,22 @@ const IPC_CHANNELS = {
   IMPROVEMENT_REVIEW_RUN: "improvement:reviewRun",
   IMPROVEMENT_RESET_HISTORY: "improvement:resetHistory",
 
+  // Subconscious loop
+  SUBCONSCIOUS_GET_SETTINGS: "subconscious:getSettings",
+  SUBCONSCIOUS_SAVE_SETTINGS: "subconscious:saveSettings",
+  SUBCONSCIOUS_GET_BRAIN: "subconscious:getBrain",
+  SUBCONSCIOUS_LIST_TARGETS: "subconscious:listTargets",
+  SUBCONSCIOUS_LIST_RUNS: "subconscious:listRuns",
+  SUBCONSCIOUS_GET_TARGET_DETAIL: "subconscious:getTargetDetail",
+  SUBCONSCIOUS_REFRESH: "subconscious:refresh",
+  SUBCONSCIOUS_RUN_NOW: "subconscious:runNow",
+  SUBCONSCIOUS_RETRY_RUN: "subconscious:retryRun",
+  SUBCONSCIOUS_REVIEW_RUN: "subconscious:reviewRun",
+  SUBCONSCIOUS_DISMISS_TARGET: "subconscious:dismissTarget",
+  SUBCONSCIOUS_RESET_HISTORY: "subconscious:resetHistory",
+  WHATSAPP_GET_INFO: "whatsapp:get-info",
+  WHATSAPP_LOGOUT: "whatsapp:logout",
+
   // Workspace Kit (.cowork)
   KIT_GET_STATUS: "kit:getStatus",
   KIT_INIT: "kit:init",
@@ -925,6 +967,10 @@ const IPC_CHANNELS = {
   PLUGIN_PACK_REGISTRY_DETAILS: "pluginPack:registryDetails",
   PLUGIN_PACK_REGISTRY_CATEGORIES: "pluginPack:registryCategories",
   PLUGIN_PACK_CHECK_UPDATES: "pluginPack:checkUpdates",
+  IMPORT_SECURITY_LIST_QUARANTINED: "importSecurity:listQuarantined",
+  IMPORT_SECURITY_GET_REPORT: "importSecurity:getReport",
+  IMPORT_SECURITY_RETRY_QUARANTINED: "importSecurity:retryQuarantined",
+  IMPORT_SECURITY_REMOVE_QUARANTINED: "importSecurity:removeQuarantined",
   // Admin Policies
   ADMIN_POLICIES_GET: "admin:policiesGet",
   ADMIN_POLICIES_UPDATE: "admin:policiesUpdate",
@@ -2561,25 +2607,25 @@ interface ReadFileForViewerOptions {
 // Expose protected methods that allow the renderer process to use ipcRenderer
 contextBridge.exposeInMainWorld("electronAPI", {
   // Dialog APIs
-  selectFolder: () => ipcRenderer.invoke("dialog:selectFolder"),
-  selectFiles: () => ipcRenderer.invoke("dialog:selectFiles"),
+  selectFolder: () => ipcRenderer.invoke(IPC_CHANNELS.DIALOG_SELECT_FOLDER),
+  selectFiles: () => ipcRenderer.invoke(IPC_CHANNELS.DIALOG_SELECT_FILES),
 
   // File APIs
   openFile: (filePath: string, workspacePath?: string) =>
-    ipcRenderer.invoke("file:open", filePath, workspacePath),
+    ipcRenderer.invoke(IPC_CHANNELS.FILE_OPEN, filePath, workspacePath),
   showInFinder: (filePath: string, workspacePath?: string) =>
-    ipcRenderer.invoke("file:showInFinder", filePath, workspacePath),
+    ipcRenderer.invoke(IPC_CHANNELS.FILE_SHOW_IN_FINDER, filePath, workspacePath),
   readFileForViewer: (
     filePath: string,
     workspacePath?: string,
     options?: ReadFileForViewerOptions,
-  ) => ipcRenderer.invoke("file:readForViewer", { filePath, workspacePath, ...options }),
+  ) => ipcRenderer.invoke(IPC_CHANNELS.FILE_READ_FOR_VIEWER, { filePath, workspacePath, ...options }),
   importFilesToWorkspace: (data: { workspaceId: string; files: string[] }) =>
-    ipcRenderer.invoke("file:importToWorkspace", data),
+    ipcRenderer.invoke(IPC_CHANNELS.FILE_IMPORT_TO_WORKSPACE, data),
   importDataToWorkspace: (data: {
     workspaceId: string;
     files: Array<{ name: string; data: string; mimeType?: string }>;
-  }) => ipcRenderer.invoke("file:importDataToWorkspace", data),
+  }) => ipcRenderer.invoke(IPC_CHANNELS.FILE_IMPORT_DATA_TO_WORKSPACE, data),
   openDocumentEditorSession: (data: { filePath: string; workspacePath?: string }) =>
     ipcRenderer.invoke(IPC_CHANNELS.DOCUMENT_OPEN_EDITOR_SESSION, data) as Promise<DocumentEditorSession>,
   listDocumentVersions: (data: { filePath: string; workspacePath?: string }) =>
@@ -2733,7 +2779,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // Shell APIs
-  openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
+  openExternal: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.SHELL_OPEN_EXTERNAL, url),
   openSystemSettings: (target: "microphone" | "dictation") =>
     ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_OPEN_SETTINGS, target),
 
@@ -2852,6 +2898,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setLLMModel: (modelKey: string) => ipcRenderer.invoke(IPC_CHANNELS.LLM_SET_MODEL, modelKey),
   getProviderModels: (providerType: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.LLM_GET_PROVIDER_MODELS, providerType),
+  getAnthropicModels: (credentials?: {
+    apiKey?: string;
+    subscriptionToken?: string;
+    authMethod?: "api_key" | "subscription";
+  }) => ipcRenderer.invoke(IPC_CHANNELS.LLM_GET_ANTHROPIC_MODELS, credentials),
   refreshCustomProviderModels: (
     providerType: string,
     overrides?: { apiKey?: string; baseUrl?: string },
@@ -2932,8 +2983,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // WhatsApp-specific APIs
-  getWhatsAppInfo: () => ipcRenderer.invoke("whatsapp:get-info"),
-  whatsAppLogout: () => ipcRenderer.invoke("whatsapp:logout"),
+  getWhatsAppInfo: () => ipcRenderer.invoke(IPC_CHANNELS.WHATSAPP_GET_INFO),
+  whatsAppLogout: () => ipcRenderer.invoke(IPC_CHANNELS.WHATSAPP_LOGOUT),
 
   // WhatsApp event listeners
   onWhatsAppQRCode: (callback: (event: Any, qr: string) => void) => {
@@ -3355,9 +3406,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on(IPC_CHANNELS.CRON_EVENT, subscription);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.CRON_EVENT, subscription);
   },
-  getCronRunHistory: (id: string) => ipcRenderer.invoke("cron:getRunHistory", id),
-  clearCronRunHistory: (id: string) => ipcRenderer.invoke("cron:clearRunHistory", id),
-  getCronWebhookStatus: () => ipcRenderer.invoke("cron:getWebhookStatus"),
+  getCronRunHistory: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.CRON_GET_RUN_HISTORY, id),
+  clearCronRunHistory: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.CRON_CLEAR_RUN_HISTORY, id),
+  getCronWebhookStatus: () => ipcRenderer.invoke(IPC_CHANNELS.CRON_GET_WEBHOOK_STATUS),
   listCouncils: (workspaceId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_LIST, { workspaceId }) as Promise<CouncilConfig[]>,
   getCouncil: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_GET, id) as Promise<CouncilConfig | null>,
@@ -3387,7 +3438,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     recommendedDelivery?: "briefing" | "inbox" | "nudge";
     companionStyle?: "email" | "note";
   }) => ipcRenderer.invoke(IPC_CHANNELS.NOTIFICATION_ADD, data),
-  getUnreadNotificationCount: () => ipcRenderer.invoke("notification:unreadCount"),
+  getUnreadNotificationCount: () => ipcRenderer.invoke(IPC_CHANNELS.NOTIFICATION_UNREAD_COUNT),
   markNotificationRead: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.NOTIFICATION_MARK_READ, id),
   markAllNotificationsRead: () => ipcRenderer.invoke(IPC_CHANNELS.NOTIFICATION_MARK_ALL_READ),
   deleteNotification: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.NOTIFICATION_DELETE, id),
@@ -3703,6 +3754,40 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ImprovementCampaign | undefined
     >,
 
+  // Subconscious loop APIs
+  getSubconsciousSettings: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_GET_SETTINGS) as Promise<SubconsciousSettings>,
+  saveSubconsciousSettings: (settings: SubconsciousSettings) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_SAVE_SETTINGS, settings) as Promise<SubconsciousSettings>,
+  getSubconsciousBrain: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_GET_BRAIN) as Promise<SubconsciousBrainSummary>,
+  listSubconsciousTargets: (workspaceId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_LIST_TARGETS, workspaceId) as Promise<
+      SubconsciousTargetSummary[]
+    >,
+  listSubconsciousRuns: (targetKey?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_LIST_RUNS, targetKey) as Promise<SubconsciousRun[]>,
+  getSubconsciousTargetDetail: (targetKey: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_GET_TARGET_DETAIL, targetKey) as Promise<
+      SubconsciousTargetDetail | null
+    >,
+  refreshSubconsciousTargets: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_REFRESH) as Promise<SubconsciousRefreshResult>,
+  runSubconsciousNow: (targetKey?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_RUN_NOW, targetKey) as Promise<SubconsciousRun | null>,
+  retrySubconsciousRun: (runId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_RETRY_RUN, runId) as Promise<SubconsciousRun | null>,
+  reviewSubconsciousRun: (runId: string, reviewStatus: "accepted" | "dismissed") =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_REVIEW_RUN, runId, reviewStatus) as Promise<
+      SubconsciousRun | undefined
+    >,
+  dismissSubconsciousTarget: (targetKey: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_DISMISS_TARGET, targetKey) as Promise<
+      SubconsciousTargetSummary | undefined
+    >,
+  resetSubconsciousHistory: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUBCONSCIOUS_RESET_HISTORY) as Promise<SubconsciousHistoryResetResult>,
+
   // Workspace Kit (.cowork) APIs
   getWorkspaceKitStatus: (workspaceId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.KIT_GET_STATUS, workspaceId) as Promise<WorkspaceKitStatus>,
@@ -3943,6 +4028,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.PLUGIN_PACK_REGISTRY_DETAILS, packId),
   getPackRegistryCategories: () => ipcRenderer.invoke(IPC_CHANNELS.PLUGIN_PACK_REGISTRY_CATEGORIES),
   checkPackUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.PLUGIN_PACK_CHECK_UPDATES),
+  listQuarantinedImports: () => ipcRenderer.invoke(IPC_CHANNELS.IMPORT_SECURITY_LIST_QUARANTINED),
+  getImportSecurityReport: (request: import("../shared/types").ImportSecurityReportRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.IMPORT_SECURITY_GET_REPORT, request),
+  retryQuarantinedImport: (recordId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.IMPORT_SECURITY_RETRY_QUARANTINED, recordId),
+  removeQuarantinedImport: (recordId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.IMPORT_SECURITY_REMOVE_QUARANTINED, recordId),
 
   // Admin Policies APIs
   getAdminPolicies: () => ipcRenderer.invoke(IPC_CHANNELS.ADMIN_POLICIES_GET),
@@ -4343,10 +4435,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // Window control APIs (for custom title bar on Windows)
-  windowMinimize: () => ipcRenderer.invoke("window:minimize"),
-  windowMaximize: () => ipcRenderer.invoke("window:maximize"),
-  windowClose: () => ipcRenderer.invoke("window:close"),
-  windowIsMaximized: () => ipcRenderer.invoke("window:isMaximized") as Promise<boolean>,
+  windowMinimize: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_MINIMIZE),
+  windowMaximize: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_MAXIMIZE),
+  windowClose: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_CLOSE),
+  windowIsMaximized: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_MAXIMIZED) as Promise<boolean>,
   getPlatform: () => process.platform,
 });
 
@@ -4716,6 +4808,11 @@ export interface ElectronAPI {
   getProviderModels: (
     providerType: string,
   ) => Promise<Array<{ key: string; displayName: string; description: string }>>;
+  getAnthropicModels: (credentials?: {
+    apiKey?: string;
+    subscriptionToken?: string;
+    authMethod?: "api_key" | "subscription";
+  }) => Promise<Array<{ id: string; displayName: string; description: string }>>;
   refreshCustomProviderModels: (
     providerType: string,
     overrides?: { apiKey?: string; baseUrl?: string },
@@ -5383,18 +5480,43 @@ export interface ElectronAPI {
   installSkillFromRegistry: (
     skillId: string,
     version?: string,
-  ) => Promise<{ success: boolean; skill?: CustomSkill; error?: string }>;
+  ) => Promise<{
+    success: boolean;
+    skill?: CustomSkill;
+    error?: string;
+    security?: import("../shared/types").InstallSecurityOutcome;
+  }>;
   installSkillFromClawHub: (
     identifierOrUrl: string,
-  ) => Promise<{ success: boolean; skill?: CustomSkill; error?: string }>;
-  installSkillFromUrl: (url: string) => Promise<{ success: boolean; skill?: CustomSkill; error?: string }>;
+  ) => Promise<{
+    success: boolean;
+    skill?: CustomSkill;
+    error?: string;
+    security?: import("../shared/types").InstallSecurityOutcome;
+  }>;
+  installSkillFromUrl: (url: string) => Promise<{
+    success: boolean;
+    skill?: CustomSkill;
+    error?: string;
+    security?: import("../shared/types").InstallSecurityOutcome;
+  }>;
   installSkillFromGit: (
     gitUrl: string,
-  ) => Promise<{ success: boolean; skill?: CustomSkill; error?: string }>;
+  ) => Promise<{
+    success: boolean;
+    skill?: CustomSkill;
+    error?: string;
+    security?: import("../shared/types").InstallSecurityOutcome;
+  }>;
   updateSkillFromRegistry: (
     skillId: string,
     version?: string,
-  ) => Promise<{ success: boolean; skill?: CustomSkill; error?: string }>;
+  ) => Promise<{
+    success: boolean;
+    skill?: CustomSkill;
+    error?: string;
+    security?: import("../shared/types").InstallSecurityOutcome;
+  }>;
   updateAllSkills: () => Promise<{ updated: string[]; failed: string[] }>;
   uninstallSkill: (skillId: string) => Promise<{ success: boolean; error?: string }>;
   listManagedSkills: () => Promise<CustomSkill[]>;
@@ -5403,6 +5525,16 @@ export interface ElectronAPI {
   ) => Promise<{ hasUpdate: boolean; currentVersion: string | null; latestVersion: string | null }>;
   getSkillStatus: () => Promise<SkillStatusReport>;
   getEligibleSkills: () => Promise<CustomSkill[]>;
+  listQuarantinedImports: () => Promise<import("../shared/types").QuarantinedImportRecord[]>;
+  getImportSecurityReport: (
+    request: import("../shared/types").ImportSecurityReportRequest,
+  ) => Promise<import("../shared/types").CapabilitySecurityReport | null>;
+  retryQuarantinedImport: (
+    recordId: string,
+  ) => Promise<import("../shared/types").RetryQuarantinedImportResult>;
+  removeQuarantinedImport: (
+    recordId: string,
+  ) => Promise<{ success: boolean; error?: string }>;
   // MCP (Model Context Protocol)
   getMCPSettings: () => Promise<MCPSettings>;
   saveMCPSettings: (settings: MCPSettings) => Promise<{ success: boolean }>;
@@ -5856,6 +5988,23 @@ export interface ElectronAPI {
     reviewStatus: "accepted" | "dismissed",
   ) => Promise<ImprovementCampaign | undefined>;
 
+  // Subconscious loop
+  getSubconsciousSettings: () => Promise<SubconsciousSettings>;
+  saveSubconsciousSettings: (settings: SubconsciousSettings) => Promise<SubconsciousSettings>;
+  getSubconsciousBrain: () => Promise<SubconsciousBrainSummary>;
+  listSubconsciousTargets: (workspaceId?: string) => Promise<SubconsciousTargetSummary[]>;
+  listSubconsciousRuns: (targetKey?: string) => Promise<SubconsciousRun[]>;
+  getSubconsciousTargetDetail: (targetKey: string) => Promise<SubconsciousTargetDetail | null>;
+  refreshSubconsciousTargets: () => Promise<SubconsciousRefreshResult>;
+  runSubconsciousNow: (targetKey?: string) => Promise<SubconsciousRun | null>;
+  retrySubconsciousRun: (runId: string) => Promise<SubconsciousRun | null>;
+  reviewSubconsciousRun: (
+    runId: string,
+    reviewStatus: "accepted" | "dismissed",
+  ) => Promise<SubconsciousRun | undefined>;
+  dismissSubconsciousTarget: (targetKey: string) => Promise<SubconsciousTargetSummary | undefined>;
+  resetSubconsciousHistory: () => Promise<SubconsciousHistoryResetResult>;
+
   // Workspace Kit (.cowork)
   getWorkspaceKitStatus: (workspaceId: string) => Promise<WorkspaceKitStatus>;
   initWorkspaceKit: (request: WorkspaceKitInitRequest) => Promise<WorkspaceKitStatus>;
@@ -6076,6 +6225,7 @@ export interface ElectronAPI {
       }>;
       state: string;
       enabled: boolean;
+      securityReport?: import("../shared/types").CapabilitySecurityReport;
     }>
   >;
   getPluginPack: (name: string) => Promise<{
@@ -6105,6 +6255,7 @@ export interface ElectronAPI {
     }>;
     state: string;
     enabled: boolean;
+    securityReport?: import("../shared/types").CapabilitySecurityReport;
   } | null>;
   togglePluginPack: (
     name: string,
@@ -6137,6 +6288,7 @@ export interface ElectronAPI {
     error?: string;
     skillCount?: number;
     agentCount?: number;
+    security?: import("../shared/types").InstallSecurityOutcome;
   }>;
   installPluginPackFromUrl: (url: string) => Promise<{
     success: boolean;
@@ -6145,6 +6297,7 @@ export interface ElectronAPI {
     error?: string;
     skillCount?: number;
     agentCount?: number;
+    security?: import("../shared/types").InstallSecurityOutcome;
   }>;
   uninstallPluginPack: (
     packName: string,
