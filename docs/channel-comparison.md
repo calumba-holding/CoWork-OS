@@ -1,10 +1,10 @@
 # Channel Integration Comparison
 
-How CoWork OS channel integrations compare to alternative implementations (e.g. Anthropic Claude Code plugins).
+How CoWork OS channel integrations compare to alternative plugin-based implementations.
 
 ---
 
-## Discord: CoWork OS vs Anthropic Claude Code Plugin
+## Discord: CoWork OS vs Plugin-Based Alternatives
 
 | Aspect | CoWork OS | Anthropic Plugin |
 |--------|-----------|------------------|
