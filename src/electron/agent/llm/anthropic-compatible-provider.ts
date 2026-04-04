@@ -8,6 +8,15 @@ import {
   LLMTool,
 } from "./types";
 import { assertNormalizedTurnTranscript } from "../runtime/turn-transcript-normalizer";
+import {
+  applyAnthropicExplicitCacheControl,
+  applyExplicitSystemBlockMarker,
+  buildAnthropicCacheMarker,
+  convertSystemBlocksToTextParts,
+  extractAnthropicUsage,
+  isPromptCacheAutoUnsupportedError,
+  normalizeSystemBlocks,
+} from "./prompt-cache";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 
@@ -59,6 +68,7 @@ export class AnthropicCompatibleProvider implements LLMProvider {
   private messagesUrl: string;
   private defaultModel: string;
   private providerName: string;
+  private promptCacheAutoSupported = true;
 
   constructor(options: AnthropicCompatibleProviderOptions) {
     this.type = options.type;
@@ -70,46 +80,28 @@ export class AnthropicCompatibleProvider implements LLMProvider {
   }
 
   async createMessage(request: LLMRequest): Promise<LLMResponse> {
-    const messages = this.convertMessages(
-      assertNormalizedTurnTranscript(
-        request.messages,
-        (message) => console.warn(`[${this.providerName}] ${message}`),
-      ),
-    );
     const tools = request.tools ? this.convertTools(request.tools) : undefined;
     const model = request.model || this.defaultModel;
+    const normalizedMessages = assertNormalizedTurnTranscript(
+      request.messages,
+      (message) => console.warn(`[${this.providerName}] ${message}`),
+    );
+    const requestedPromptCache =
+      request.promptCache?.mode === "disabled" ? undefined : request.promptCache;
+    const effectivePromptCache =
+      requestedPromptCache?.mode === "anthropic_auto" && !this.promptCacheAutoSupported
+        ? { ...requestedPromptCache, mode: "anthropic_explicit" as const }
+        : requestedPromptCache;
 
     try {
       console.log(`[${this.providerName}] Calling API with model: ${model}`);
-      const response = await fetch(this.messagesUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": this.apiKey,
-          "anthropic-version": ANTHROPIC_VERSION,
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: request.maxTokens,
-          system: request.system,
-          messages,
-          ...(tools && { tools }),
-        }),
-        signal: request.signal,
+      return await this.sendRequest({
+        request,
+        normalizedMessages,
+        tools,
+        model,
+        promptCache: effectivePromptCache,
       });
-
-      if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as {
-          error?: { message?: string };
-        };
-        throw new Error(
-          `${this.providerName} API error: ${response.status} ${response.statusText}` +
-            (errorData.error?.message ? ` - ${errorData.error.message}` : ""),
-        );
-      }
-
-      const data = (await response.json()) as Any;
-      return this.convertResponse(data);
     } catch (error: Any) {
       if (error.name === "AbortError" || error.message?.includes("aborted")) {
         console.log(`[${this.providerName}] Request aborted`);
@@ -272,6 +264,105 @@ export class AnthropicCompatibleProvider implements LLMProvider {
     });
   }
 
+  private async sendRequest(args: {
+    request: LLMRequest;
+    normalizedMessages: LLMMessage[];
+    tools: Array<{ name: string; description: string; input_schema: Any }> | undefined;
+    model: string;
+    promptCache: LLMRequest["promptCache"] | undefined;
+  }): Promise<LLMResponse> {
+    const messages = this.buildMessagesPayload(args.normalizedMessages, args.promptCache);
+    const response = await fetch(this.messagesUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": this.apiKey,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify({
+        model: args.model,
+        max_tokens: args.request.maxTokens,
+        system: this.buildSystemPayload(args.request, args.promptCache),
+        messages,
+        ...(args.tools && { tools: args.tools }),
+        ...(args.promptCache?.mode === "anthropic_auto"
+          ? { cache_control: buildAnthropicCacheMarker(args.promptCache.ttl) }
+          : {}),
+      }),
+      signal: args.request.signal,
+    });
+
+    if (!response.ok) {
+      const errorData = (await response.json().catch(() => ({}))) as {
+        error?: { message?: string };
+      };
+      const providerMessage = errorData.error?.message || "";
+      if (
+        args.promptCache?.mode === "anthropic_auto" &&
+        isPromptCacheAutoUnsupportedError(response.status, providerMessage)
+      ) {
+        this.promptCacheAutoSupported = false;
+        console.warn(
+          `[${this.providerName}] Automatic prompt caching rejected by endpoint; downgrading this provider instance to explicit caching.`,
+          {
+            status: response.status,
+            message: providerMessage,
+          },
+        );
+        return this.sendRequest({
+          ...args,
+          promptCache: { ...args.promptCache, mode: "anthropic_explicit" },
+        });
+      }
+
+      throw new Error(
+        `${this.providerName} API error: ${response.status} ${response.statusText}` +
+          (providerMessage ? ` - ${providerMessage}` : ""),
+      );
+    }
+
+    const data = (await response.json()) as Any;
+    return this.convertResponse(data);
+  }
+
+  private buildSystemPayload(
+    request: Pick<LLMRequest, "system" | "systemBlocks">,
+    promptCache: LLMRequest["promptCache"] | undefined,
+  ): string | Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral"; ttl?: "1h" } }> {
+    const blocks = normalizeSystemBlocks(request.system, request.systemBlocks);
+    if (blocks.length === 0) {
+      return request.system;
+    }
+
+    const parts = convertSystemBlocksToTextParts(request.system, request.systemBlocks);
+    if (promptCache?.mode === "anthropic_explicit") {
+      applyExplicitSystemBlockMarker(parts, blocks, promptCache.ttl);
+    }
+
+    if (!request.systemBlocks && parts.length === 1 && !parts[0].cache_control) {
+      return parts[0].text;
+    }
+
+    return parts;
+  }
+
+  private buildMessagesPayload(
+    messages: LLMMessage[],
+    promptCache: LLMRequest["promptCache"] | undefined,
+  ): Array<{ role: string; content: Any }> {
+    const converted = this.convertMessages(messages);
+    if (promptCache?.mode !== "anthropic_explicit") {
+      return converted;
+    }
+
+    return applyAnthropicExplicitCacheControl(converted, {
+      ttl: promptCache.ttl,
+      includeSystem: false,
+      maxBreakpoints: Math.max(0, promptCache.explicitRecentMessages || 3),
+      nativeAnthropic: true,
+    }) as Array<{ role: string; content: Any }>;
+  }
+
   private convertTools(
     tools: LLMTool[],
   ): Array<{ name: string; description: string; input_schema: Any }> {
@@ -303,12 +394,7 @@ export class AnthropicCompatibleProvider implements LLMProvider {
     return {
       content: content.length > 0 ? content : [{ type: "text", text: "" }],
       stopReason: this.mapStopReason(response.stop_reason),
-      usage: response.usage
-        ? {
-            inputTokens: response.usage.input_tokens || 0,
-            outputTokens: response.usage.output_tokens || 0,
-          }
-        : undefined,
+      usage: extractAnthropicUsage(response.usage),
     };
   }
 
