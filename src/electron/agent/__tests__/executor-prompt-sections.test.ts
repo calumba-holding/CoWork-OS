@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   SHARED_PROMPT_POLICY_CORE,
   buildModeDomainContract,
   composePromptSections,
+  resolvePromptSections,
 } from "../executor-prompt-sections";
 
 describe("executor-prompt-sections", () => {
@@ -42,5 +43,29 @@ describe("executor-prompt-sections", () => {
     expect(result.droppedSections.length).toBeGreaterThan(0);
     expect(result.droppedSections).toContain("optional-a");
     expect(result.prompt).toContain("CONFIDENTIALITY");
+  });
+
+  it("reuses cached session sections and recomputes turn sections", async () => {
+    const sessionResolve = vi.fn(async () => "session text");
+    const turnResolve = vi.fn(async () => "turn text");
+    const cache = new Map<string, string | null>();
+
+    await resolvePromptSections(
+      [
+        { key: "session", resolve: sessionResolve, cacheScope: "session", stableInputHash: "a" },
+        { key: "turn", resolve: turnResolve, cacheScope: "turn", stableInputHash: "b" },
+      ],
+      cache,
+    );
+    await resolvePromptSections(
+      [
+        { key: "session", resolve: sessionResolve, cacheScope: "session", stableInputHash: "a" },
+        { key: "turn", resolve: turnResolve, cacheScope: "turn", stableInputHash: "b" },
+      ],
+      cache,
+    );
+
+    expect(sessionResolve).toHaveBeenCalledTimes(1);
+    expect(turnResolve).toHaveBeenCalledTimes(2);
   });
 });
