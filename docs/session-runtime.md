@@ -7,7 +7,7 @@ SessionRuntime is the canonical owner of mutable task-session state for executio
 SessionRuntime groups all mutable session state into explicit buckets:
 
 - `transcript`: conversation history, latest user and assistant outputs, chat summary blocks, and step outcome summaries
-- `tooling`: tool failure tracking, tool usage counters, tool-result memory, web evidence memory, and available-tools caching
+- `tooling`: tool failure tracking, tool usage counters, tool-result memory, web evidence memory, and visible-tool render caching
 - `files`: file-read tracking and file-operation tracking
 - `loop`: turn counts, continuation counters, compaction counters, loop fingerprints, and soft-deadline flags
 - `recovery`: retry and failure-signature state, recovery classification, and tool-disable scopes
@@ -15,10 +15,50 @@ SessionRuntime groups all mutable session state into explicit buckets:
 - `worker`: mentioned-agent dispatch state and verification-agent state
 - `verification`: verification evidence and failed-step tracking
 - `checklist`: session-local execution checklist items, nudge state, and checklist timestamps
+- `promptCache`: stable system blocks, stable-prefix hash, tool-schema hash, provider-family mode, and invalidation reason
 - `usage`: cumulative token and cost tracking plus usage offsets
 - `permissions`: default mode, session-local rules, temporary grants, denial counters, and latest prompt context
 
 This is the state that used to be mirrored across the executor and related helpers. It now lives in one place so task resume, retry, and completion logic read the same source of truth.
+
+## Tool Availability and Rendering
+
+SessionRuntime also owns the runtime-facing available-tools path used by execution and follow-up turns.
+
+The sequence is:
+
+1. start from the tool catalog
+2. apply restriction, allowlist, policy, mode, and intent filters
+3. render prompt-aware descriptions only for the remaining visible tools
+4. cache the rendered result for repeated turns under the same visible-tool and render-context state
+
+This means tool-local guidance is attached only to tools the current task can actually see.
+
+The render-context inputs include:
+
+- execution mode
+- task domain
+- web-search mode
+- shell availability
+- agent type
+- worker role
+- user-input allowance
+
+The provider-facing tool shape remains unchanged after rendering; providers still receive only `name`, rendered `description`, and `input_schema`.
+
+## Prompt Cache State
+
+SessionRuntime persists the stable prompt-cache context needed to reuse provider-side prompt prefixes across turns and restarts.
+
+It tracks:
+
+- stable session-scoped `systemBlocks`
+- `stablePrefixHash`
+- `toolSchemaHash`
+- prompt-cache mode and provider family
+- the latest invalidation reason when the stable prefix changes
+
+This lets CoWork reuse the same cacheable prefix after follow-ups, resume from `session_runtime_v2` snapshots without rebuilding it blindly, and explain why a cache epoch changed when model, provider family, tool schema, or stable prompt contracts changed.
 
 ## Public Surface
 
@@ -92,11 +132,12 @@ The checklist can raise a non-blocking verification reminder when all of the fol
 When that happens:
 
 - `task_list_update` returns `verificationNudgeNeeded: true`
+- `task_list_create` and `task_list_update` can append an immediate human-readable reminder in the tool result payload seen by the model
 - SessionRuntime persists that flag in checklist state
 - the runtime emits `task_list_verification_nudged`
 - next-turn preparation injects a short reminder to add or run a verification item before final completion
 
-The reminder is advisory in v1. It does not fail completion by itself.
+The reminder is advisory. It does not fail completion by itself, and the post-hoc verification runtime remains the final enforcement layer.
 
 ### UI/event model
 
@@ -114,13 +155,97 @@ Each payload carries the full current checklist snapshot so the renderer can rec
 TaskExecutor
   -> SessionRuntime
       -> TurnKernel for the active step / follow-up / text turn
-      -> adaptive budget and retry helpers
+      -> provider-aware output-budget policy
+      -> adaptive truncation retry helpers
       -> session state updates
       -> task projection updates
       -> snapshot save / restore
 ```
 
 The turn kernel is still responsible for a single turn of execution. SessionRuntime is responsible for choosing when to run it, which state to feed into it, and how to persist the results.
+
+## Adaptive Output Budgeting
+
+When `COWORK_LLM_OUTPUT_POLICY=adaptive` is enabled, execution and follow-up turns resolve output limits through one shared provider-aware policy path instead of relying on provider defaults or a single tool-call floor.
+
+### Request kinds
+
+The runtime resolves a budget for three request kinds:
+
+- `agentic_main`: the first execution turn for a step or follow-up
+- `tool_followup`: the next turn after tool results are present in the transcript
+- `continuation`: explicit continuation-only retries after a visible truncation
+
+### Policy shape
+
+For the current internal rollout, the runtime uses provider-family defaults for the mainstream routes first:
+
+- Anthropic-family routes
+- Bedrock Claude routes
+- OpenAI routes
+- Azure OpenAI routes
+- Gemini routes
+- OpenRouter routes
+- generic fallback for everything else
+
+Default behavior:
+
+- main execution turns start with `8000`
+- tool-follow-up turns start with `16000`
+- if a main/tool turn is truncated, the runtime retries the same request once with a higher budget before injecting any continuation prompt
+- the escalated target is typically `48000`
+- Anthropic-family routes can escalate to `64000`
+- generic fallback escalation is capped at `16000`
+
+The runtime always sends an explicit output limit for agentic turns in adaptive mode. It does not depend on provider-side defaults because gateways and compatible endpoints vary too much.
+
+### Budget selection
+
+The runtime resolves the outbound limit in this order:
+
+1. task-level `agentConfig.maxTokens`, when present
+2. `COWORK_LLM_MAX_OUTPUT_TOKENS`
+3. provider-family defaults for the current request kind
+4. final clamping by known hard caps and context headroom
+
+Known provider caps remain a safety rail even when task-level or env-level overrides request more.
+
+### Truncation handling
+
+If a turn stops because it hit the output limit, the runtime classifies the result as one of:
+
+- `visible_partial_output`: the model produced usable answer text but was cut off
+- `reasoning_exhausted`: the model spent the budget on internal reasoning or otherwise produced no usable answer text
+
+Recovery order:
+
+1. same-request escalation once
+2. if still truncated and visible partial output exists, fall back to the normal continuation prompt path
+3. if still truncated and the result is reasoning-only, stop burning continuation retries and surface a targeted guidance message instead
+
+This keeps continuation retries focused on recoverable truncation and avoids loops where the model repeatedly spends the entire budget without producing visible output.
+
+### Logging and rollout controls
+
+The runtime logs output-budget decisions on each agentic call, including:
+
+- provider family
+- request kind
+- chosen budget
+- transport token field
+- cap source
+- escalation attempted
+- truncation classification
+- whether continuation fallback was allowed or skipped
+
+Internal rollout is controlled by environment flags:
+
+- `COWORK_LLM_OUTPUT_POLICY=legacy|adaptive`
+- `COWORK_LLM_MAX_OUTPUT_TOKENS`
+- `COWORK_LLM_AGENTIC_INITIAL_MAX_TOKENS`
+- `COWORK_LLM_AGENTIC_ESCALATED_MAX_TOKENS`
+
+`COWORK_LLM_OUTPUT_POLICY` defaults to `legacy` unless explicitly enabled. `COWORK_LLM_TOOL_RESPONSE_MAX_TOKENS` remains a legacy compatibility input and is no longer the primary path in adaptive mode.
 
 ## Snapshot And Restore Algorithm
 
@@ -132,7 +257,7 @@ Persisted task state uses the legacy `conversation_snapshot` event name for comp
 2. It writes a `conversation_snapshot` event with:
    - `schema: "session_runtime_v2"`
    - `version: 2`
-   - transcript, tooling, files, loop, recovery, queues, worker, verification, checklist, usage, and permissions state
+   - transcript, tooling, files, loop, recovery, queues, worker, verification, checklist, prompt-cache, usage, and permissions state
 3. `TaskExecutor` no longer writes the payload directly.
 
 ### Restore path
@@ -201,6 +326,7 @@ workspace rule set.
 ## Related Docs
 
 - [Architecture](architecture.md)
+- [Execution Runtime Model](execution-runtime-model.md)
 - [Features](features.md)
 - [Context Compaction](context-compaction.md)
 - [Project Status](project-status.md)
