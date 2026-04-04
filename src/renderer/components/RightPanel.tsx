@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, type ComponentType } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, type ComponentType } from "react";
 import {
   Task,
   Workspace,
@@ -102,11 +102,6 @@ function resolveConnectorLucideIcon(name: string, emoji: string): ComponentType<
   return getEmojiIcon(emoji) || Plug;
 }
 
-/** Resolve a Lucide icon component for a skill from its emoji, falling back to Zap. */
-function resolveSkillLucideIcon(emoji: string): ComponentType<LucideProps> {
-  return getEmojiIcon(emoji) || Zap;
-}
-
 const TOOL_FRIENDLY_LABELS: Record<string, string> = {
   glob: "Search for files",
   grep: "Search code",
@@ -118,21 +113,21 @@ const TOOL_FRIENDLY_LABELS: Record<string, string> = {
   web_fetch: "Fetch web page",
   web_search: "Search the web",
   todo_write: "Update task list",
-  use_skill: "Run skill",
+  skill: "Run skill",
   request_user_input: "Collect details from you",
 };
 
 /**
  * Strips technical tool-call language from LLM-generated plan step descriptions.
- * Converts e.g. "Use the `use_skill` tool with skill ID `novelist`..." into
+ * Converts e.g. "Use the `Skill` tool with skill ID `novelist`..." into
  * "Run the Novelist skill" so the Progress panel stays readable.
  */
 function humanizeStepDescription(description: string): string {
   if (!description) return description;
 
-  // "Use the `use_skill` tool with skill ID `<id>`..." → "Run the <Id> skill"
+  // "Use the `Skill` tool with skill ID `<id>`..." → "Run the <Id> skill"
   const useSkillMatch = description.match(
-    /use\s+the\s+`?use_skill`?\s+tool\s+with\s+skill\s+(?:ID\s+)?`?([a-z0-9_-]+)`?/i,
+    /use\s+the\s+`?Skill`?\s+tool\s+with\s+skill\s+(?:ID\s+)?`?([a-z0-9_-]+)`?/i,
   );
   if (useSkillMatch) {
     const skillId = useSkillMatch[1];
@@ -142,29 +137,44 @@ function humanizeStepDescription(description: string): string {
     // Append any meaningful context after the skill ID match
     const rest = description.slice(description.indexOf(useSkillMatch[0]) + useSkillMatch[0].length).trim();
     const suffix = rest.replace(/^[^a-zA-Z]*/, "").split(/[.]/)[0].trim();
-    return suffix.length > 4 ? `Run the ${skillName} skill — ${suffix}` : `Run the ${skillName} skill`;
+    const humanized = suffix.length > 4 ? `Run the ${skillName} skill — ${suffix}` : `Run the ${skillName} skill`;
+    return stripInlineMarkdownFormatting(humanized);
   }
 
   // "Use request_user_input to collect..." → "Collect details from you"
   if (/use\s+request_user_input\b/i.test(description)) {
     const rest = description.replace(/use\s+request_user_input\s+(to\s+)?/i, "").trim();
     const clean = rest.replace(/`[^`]+`/g, "").trim();
-    return clean.length > 4 ? capitalize(clean) : "Collect details from you";
+    const humanized = clean.length > 4 ? capitalize(clean) : "Collect details from you";
+    return stripInlineMarkdownFormatting(humanized);
   }
 
   // Detect raw tool-call text leaking into descriptions: "to=glob 】【..." or "assistant to=read ..."
   const rawToolCallMatch = description.match(/^\s*(?:assistant\s+)?to=([a-z_][\w-]*)\b/i);
   if (rawToolCallMatch) {
     const toolName = rawToolCallMatch[1].toLowerCase();
-    return TOOL_FRIENDLY_LABELS[toolName] ?? capitalize(toolName.replace(/_/g, " "));
+    const humanized = TOOL_FRIENDLY_LABELS[toolName] ?? capitalize(toolName.replace(/_/g, " "));
+    return stripInlineMarkdownFormatting(humanized);
   }
 
-  // Strip any remaining backtick-wrapped tool names from descriptions
-  return description.replace(/`([^`]+)`/g, "$1");
+  return stripInlineMarkdownFormatting(description);
 }
 
 function capitalize(str: string): string {
   return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function stripInlineMarkdownFormatting(text: string): string {
+  return text
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/(^|[^\*])\*([^\*\n]+)\*(?!\*)/g, "$1$2")
+    .replace(/(^|[^_])_([^_\n]+)_(?!_)/g, "$1$2")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
 // Clickable file path component - opens file viewer on click, shows in Finder on right-click
@@ -275,6 +285,10 @@ export function RightPanel({
   });
   const [viewerFilePath, setViewerFilePath] = useState<string | null>(null);
   const [highlightedOutputPath, setHighlightedOutputPath] = useState<string | null>(null);
+  const [taskFeedbackDecision, setTaskFeedbackDecision] = useState<"accepted" | "rejected" | null>(
+    null,
+  );
+  const [taskFeedbackDismissed, setTaskFeedbackDismissed] = useState(false);
   const fileItemRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
   const agentContext = useAgentContext();
 
@@ -524,6 +538,28 @@ export function RightPanel({
     return () => clearTimeout(timer);
   }, [highlightOutputPath, files.length]);
 
+  useEffect(() => {
+    setTaskFeedbackDecision(null);
+    setTaskFeedbackDismissed(false);
+  }, [task?.id]);
+
+  const handleTaskFeedback = useCallback(
+    async (decision: "accepted" | "rejected") => {
+      if (!task?.id) return;
+      setTaskFeedbackDecision(decision);
+      try {
+        await window.electronAPI.submitMessageFeedback({
+          taskId: task.id,
+          decision,
+          kind: "task",
+        });
+      } catch (err) {
+        console.error("[Feedback] Failed to submit task feedback:", err);
+      }
+    },
+    [task?.id],
+  );
+
   // Extract tool usage from events
   const toolUsage = useMemo((): ToolUsage[] => {
     const toolMap = new Map<string, ToolUsage>();
@@ -564,25 +600,6 @@ export function RightPanel({
     });
 
     return Array.from(files).slice(0, 10); // Limit to 10 most recent
-  }, [events]);
-
-  // Extract skill IDs used in this task/session from events
-  const usedSkillIds = useMemo((): Set<string> => {
-    const ids = new Set<string>();
-    events.forEach((event) => {
-      const effectiveType = getEffectiveTaskEventType(event);
-      if (
-        effectiveType === "tool_call" &&
-        event.payload.tool === "use_skill" &&
-        event.payload.input?.skill_id
-      ) {
-        ids.add(event.payload.input.skill_id);
-      }
-      if (effectiveType === "log" && event.payload.skillId) {
-        ids.add(event.payload.skillId);
-      }
-    });
-    return ids;
   }, [events]);
 
   // Extract tool names used in this task/session (for connector filtering)
@@ -750,17 +767,20 @@ export function RightPanel({
           <div className="cli-section-content">
             {planSteps.length > 0 ? (
               <div className="cli-progress-list">
-                {planSteps.map((step, index) => (
-                  <div key={step.id || index} className={`cli-progress-item ${step.status}`}>
-                    <span className="cli-progress-num">{String(index + 1).padStart(2, "0")}</span>
-                    <span className={`cli-progress-status ${step.status}`}>
-                      {getStatusIndicator(step.status)}
-                    </span>
-                    <span className="cli-progress-text" title={step.description}>
-                      {humanizeStepDescription(step.description) || `Step ${index + 1}`}
-                    </span>
-                  </div>
-                ))}
+                {planSteps.map((step, index) => {
+                  const displayDescription = humanizeStepDescription(step.description) || `Step ${index + 1}`;
+                  return (
+                    <div key={step.id || index} className={`cli-progress-item ${step.status}`}>
+                      <span className="cli-progress-num">{String(index + 1).padStart(2, "0")}</span>
+                      <span className={`cli-progress-status ${step.status}`}>
+                        {getStatusIndicator(step.status)}
+                      </span>
+                      <span className="cli-progress-text" title={displayDescription}>
+                        {displayDescription}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <div className="cli-empty-state">
@@ -1000,14 +1020,13 @@ export function RightPanel({
         </div>
       )}
 
-      {/* Active Context Section (Connectors + Skills) — only shown when integrations are active */}
+      {/* Active Context Section (connectors only) — skill application stays hidden in the task UI */}
       {(() => {
         const connectedServers =
           activeContext?.connectors.filter(
             (c) => c.status === "connected" && c.tools.some((t) => usedToolNames.has(t)),
           ) || [];
-        const activeSkills = (activeContext?.skills || []).filter((s) => usedSkillIds.has(s.id));
-        const activeCount = connectedServers.length + activeSkills.length;
+        const activeCount = connectedServers.length;
 
         if (activeCount === 0) return null;
 
@@ -1046,27 +1065,6 @@ export function RightPanel({
                               </span>
                               <span className="cli-context-key">{c.name}</span>
                               <span className="cli-active-context-status connected" />
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                  {activeSkills.length > 0 && (
-                    <div className="cli-context-group">
-                      <div className="cli-context-label">
-                        <span className="terminal-only"># skills:</span>
-                        <span className="modern-only">Skills</span>
-                      </div>
-                      <div className="cli-active-context-scroll">
-                        {activeSkills.map((s) => {
-                          const SkillIcon = resolveSkillLucideIcon(s.icon);
-                          return (
-                            <div key={s.id} className="cli-context-item">
-                              <span className="cli-active-context-icon">
-                                <SkillIcon size={14} />
-                              </span>
-                              <span className="cli-context-key">{s.name}</span>
                             </div>
                           );
                         })}
@@ -1138,6 +1136,47 @@ export function RightPanel({
 
       {/* Empty space filler */}
       <div style={{ flex: 1 }} />
+
+      {task?.status === "completed" && !hasActiveChildren && !taskFeedbackDismissed && (
+        <div className="right-panel-section cli-section right-panel-feedback-section">
+          <div className="cli-section-content">
+            <div className="right-panel-feedback-card">
+              <div className="right-panel-feedback-copy">
+                <strong>Rate this result</strong>
+                <span className="right-panel-feedback-detail">
+                  Helps improve this agent and persona.
+                </span>
+              </div>
+              <div className="right-panel-feedback-actions">
+                <button
+                  type="button"
+                  className={`message-feedback-btn right-panel-feedback-btn${taskFeedbackDecision === "accepted" ? " active" : ""}`}
+                  onClick={() => void handleTaskFeedback("accepted")}
+                  title="This task result was helpful"
+                >
+                  Up
+                </button>
+                <button
+                  type="button"
+                  className={`message-feedback-btn right-panel-feedback-btn${taskFeedbackDecision === "rejected" ? " active" : ""}`}
+                  onClick={() => void handleTaskFeedback("rejected")}
+                  title="This task result needs improvement"
+                >
+                  Down
+                </button>
+                <button
+                  type="button"
+                  className="message-feedback-btn right-panel-feedback-btn right-panel-feedback-dismiss"
+                  onClick={() => setTaskFeedbackDismissed(true)}
+                  title="Close without rating"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {task?.status === "completed" && !hasActiveChildren && task?.terminalStatus === "partial_success" && (
         <div
