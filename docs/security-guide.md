@@ -629,7 +629,7 @@ Imported bundles that cannot be fully checked against network-backed intelligenc
 ### Running Security Tests
 
 ```bash
-npm run test                # Full suite (~4,583 passing tests; includes security)
+npm run test                # Full suite (4,932 tests total: 4,854 passed, 78 skipped; includes security)
 npx vitest run tests/security   # Security-focused tests only (135 tests)
 npm run test:coverage       # With coverage report
 ```
