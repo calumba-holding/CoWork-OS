@@ -8,9 +8,10 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 
 - **Personal AI Gateway**: Connect your AI assistant to WhatsApp, Telegram, Discord, Slack, and iMessage
 - **Managed Devices**: Operate local and remote CoWork machines from a dedicated Devices tab
-- **Automations Surface**: One settings group for queueing, scheduling, triggers, briefing, and self-improvement
+- **Automations Surface**: One settings group for queueing, scheduling, triggers, briefing, and subconscious reflection/dispatch
 - **Renderer Performance**: Sidebar and timeline virtualization in the `CoWork-OS/CoWork-OS` repo use `@chenglou/pretext` for text measurement and keep long task feeds responsive
 - **Security-First Design**: 4,500+ automated tests, configurable guardrails, layered permission rules, workspace-local policy files, and approval workflows
+- **Imported Capability Security**: managed skill and pack imports are staged, scanned, reported, and quarantined when blocked instead of being activated directly
 - **Multi-Provider Support**: 30+ LLM providers including free local models via Ollama
 - **Local-First Architecture**: Your data stays on your machine, BYOK model
 
@@ -25,7 +26,11 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] Eval service and IPC endpoints (`eval:listSuites`, `eval:runSuite`, `eval:getRun`, `eval:getCase`, `eval:createCaseFromTask`)
 - [x] Risk scoring and policy-driven tiered review gate (`off`, `balanced`, `strict`)
 - [x] Prompt reliability hardening (modular prompt sections, shared policy dedupe, token budgets)
+- [x] Session- and turn-scoped prompt section memoization for execution and follow-up prompt assembly
+- [x] Provider-aware prompt caching with stable-prefix hashing, Anthropic/OpenRouter/OpenAI-family routing, and cache telemetry
+- [x] Prompt-aware tool rendering with compact planning text and provider-facing description reuse
 - [x] Skill shortlist routing with low-confidence fallback and text budget caps
+- [x] Earlier verification nudges through checklist tool-result reminders and pre-finalization prompt reminders
 - [x] PR regression policy gate for production incident fixes
 - [x] Nightly hardening workflow with machine-readable report artifact
 - [x] Release hardening gate (date-based strictness window)
@@ -42,12 +47,15 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] AgentDaemon - Main orchestrator with worktree isolation and collaborative mode
 - [x] TaskExecutor - Shared turn kernel, metadata-driven tool scheduler, delegated-work orchestration, and terminal-state-safe completion/resume handoff
 - [x] SessionRuntime - Canonical owner for task-session state, session checklists, snapshots, recovery, and task projection
+- [x] Prompt-cache runtime state - stable system blocks, stable-prefix hashing, provider-family mode tracking, and resume-safe cache invalidation
 - [x] ExecutorEventEmitter - Typed event system for executor lifecycle
 - [x] LifecycleMutex - Concurrency control for executor operations
 - [x] Tool Registry - Manages all available tools and scheduler metadata
+- [x] Tool prompt layer - Internal prompt metadata renders visible-tool guidance after filtering without changing provider schemas
 - [x] Session checklist runtime tools - `task_list_create`, `task_list_update`, and `task_list_list` for execution-style tasks
 - [x] Orchestration graph engine - Normalized delegation runs for spawn_agent, workflow phases, teams, and ACP tasks
 - [x] Worker roles - researcher, implementer, verifier, and synthesizer with hard tool scopes
+- [x] Structured delegation brief - child tasks inherit objective, scope, evidence, deliverable, and completion contracts
 - [x] Permission system with layered rules, workspace policy files, and approval flow
 - [x] Context Manager - Conversation context handling
 - [x] Capability Matcher - Auto-select agents based on task requirements
@@ -59,6 +67,7 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] OpenRouter (multi-model access)
 - [x] OpenAI (API Key: GPT-4o, o1 models)
 - [x] OpenAI (ChatGPT OAuth: Use your ChatGPT subscription)
+- [x] Prompt caching defaults for Anthropic, Azure Anthropic, OpenAI, Azure OpenAI, and OpenRouter GPT/Claude routes
 - [x] AWS Bedrock
 - [x] Ollama (local/free)
 - [x] Provider Factory with dynamic selection
@@ -154,6 +163,7 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] YAML-based skill definitions
 - [x] Priority-based sorting
 - [x] Parameter input modal for skill variables
+- [x] Managed import scanning, persisted security reports, quarantine, and digest recheck for imported skill bundles
 - [x] Located: `~/Library/Application Support/cowork-os/skills/`
 
 #### Personality System
@@ -195,7 +205,7 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] Worktree Settings - Git worktree configuration UI
 - [x] Devices tab - saved remote devices, remote task feed, remote workspace browser, remote file picker
 - [x] Companies tab - company shell setup, goals, projects, issues, linked operators
-- [x] Improvement settings - bounded self-improvement campaigns, provider health, parked candidate visibility
+- [x] Subconscious settings - cadence, target kinds, last winner visibility, namespaced backlog, and dispatch history
 
 #### Settings UI
 - [x] LLM provider configuration
@@ -207,8 +217,9 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] Update settings
 - [x] Guardrail settings (budgets, limits)
 - [x] Queue settings (concurrency)
-- [x] Automations settings group (queue, self-improve, scheduled, hooks, triggers, briefing)
+- [x] Automations settings group (queue, subconscious, scheduled, hooks, triggers, briefing)
 - [x] Custom Skills management
+- [x] Quarantined Imports sections for skills and plugin packs with report, retry scan, and removal actions
 - [x] Personality settings (styles, personas, quirks)
 - [x] MCP server configuration
 
