@@ -31,7 +31,7 @@ export interface ImportProcessEnvOptions {
 function getElectronAppPath(): string | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-// oxlint-disable-next-line typescript-eslint(no-require-imports)
+    // oxlint-disable-next-line typescript-eslint(no-require-imports)
     const electron = require("electron") as Any;
     const app = electron?.app;
     if (app && typeof app.getAppPath === "function") {
@@ -60,10 +60,16 @@ function shouldWriteValue(
   return !existingNorm;
 }
 
-function isProviderConfigured(providerType: LLMProviderType, settings: Any): boolean {
+function isProviderConfigured(
+  providerType: LLMProviderType,
+  settings: Any,
+): boolean {
   switch (providerType) {
     case "anthropic":
-      return !!normalizeEnvValue(settings?.anthropic?.apiKey);
+      return !!(
+        normalizeEnvValue(settings?.anthropic?.apiKey) ||
+        normalizeEnvValue(settings?.anthropic?.subscriptionToken)
+      );
     case "openai":
       return !!(
         normalizeEnvValue(settings?.openai?.apiKey) ||
@@ -78,7 +84,8 @@ function isProviderConfigured(providerType: LLMProviderType, settings: Any): boo
       const hasEndpoint = !!normalizeEnvValue(settings?.azure?.endpoint);
       const hasDeployment =
         !!normalizeEnvValue(settings?.azure?.deployment) ||
-        (Array.isArray(settings?.azure?.deployments) && settings.azure.deployments.length > 0);
+        (Array.isArray(settings?.azure?.deployments) &&
+          settings.azure.deployments.length > 0);
       return hasKey && hasEndpoint && hasDeployment;
     }
     case "groq":
@@ -94,11 +101,13 @@ function isProviderConfigured(providerType: LLMProviderType, settings: Any): boo
       );
     case "ollama":
       return !!(
-        normalizeEnvValue(settings?.ollama?.baseUrl) || normalizeEnvValue(settings?.ollama?.model)
+        normalizeEnvValue(settings?.ollama?.baseUrl) ||
+        normalizeEnvValue(settings?.ollama?.model)
       );
     case "pi":
       return !!(
-        normalizeEnvValue(settings?.pi?.apiKey) && normalizeEnvValue(settings?.pi?.provider)
+        normalizeEnvValue(settings?.pi?.apiKey) &&
+        normalizeEnvValue(settings?.pi?.provider)
       );
     default:
       return false;
@@ -111,14 +120,19 @@ function pickProviderFromSettings(settings: Any): LLMProviderType | null {
     normalizeEnvValue(settings?.openai?.accessToken)
   )
     return "openai";
-  if (normalizeEnvValue(settings?.anthropic?.apiKey)) return "anthropic";
+  if (
+    normalizeEnvValue(settings?.anthropic?.apiKey) ||
+    normalizeEnvValue(settings?.anthropic?.subscriptionToken)
+  )
+    return "anthropic";
   if (normalizeEnvValue(settings?.gemini?.apiKey)) return "gemini";
   if (normalizeEnvValue(settings?.openrouter?.apiKey)) return "openrouter";
   if (
     normalizeEnvValue(settings?.azure?.apiKey) &&
     normalizeEnvValue(settings?.azure?.endpoint) &&
     (normalizeEnvValue(settings?.azure?.deployment) ||
-      (Array.isArray(settings?.azure?.deployments) && settings.azure.deployments.length > 0))
+      (Array.isArray(settings?.azure?.deployments) &&
+        settings.azure.deployments.length > 0))
   )
     return "azure";
   if (normalizeEnvValue(settings?.groq?.apiKey)) return "groq";
@@ -129,9 +143,15 @@ function pickProviderFromSettings(settings: Any): LLMProviderType | null {
     normalizeEnvValue(settings?.bedrock?.profile)
   )
     return "bedrock";
-  if (normalizeEnvValue(settings?.ollama?.baseUrl) || normalizeEnvValue(settings?.ollama?.model))
+  if (
+    normalizeEnvValue(settings?.ollama?.baseUrl) ||
+    normalizeEnvValue(settings?.ollama?.model)
+  )
     return "ollama";
-  if (normalizeEnvValue(settings?.pi?.apiKey) && normalizeEnvValue(settings?.pi?.provider))
+  if (
+    normalizeEnvValue(settings?.pi?.apiKey) &&
+    normalizeEnvValue(settings?.pi?.provider)
+  )
     return "pi";
   return null;
 }
@@ -242,7 +262,11 @@ export async function migrateEnvToSettings(): Promise<MigrationResult> {
 
     // Migrate Anthropic API key
     if (env.ANTHROPIC_API_KEY && !llmSettings.anthropic?.apiKey) {
-      llmSettings.anthropic = { ...llmSettings.anthropic, apiKey: env.ANTHROPIC_API_KEY };
+      llmSettings.anthropic = {
+        ...llmSettings.anthropic,
+        apiKey: env.ANTHROPIC_API_KEY,
+        authMethod: "api_key",
+      };
       migratedKeys.push("Anthropic API Key");
       llmChanged = true;
     }
@@ -263,14 +287,20 @@ export async function migrateEnvToSettings(): Promise<MigrationResult> {
 
     // Migrate Gemini API key
     if (env.GEMINI_API_KEY && !llmSettings.gemini?.apiKey) {
-      llmSettings.gemini = { ...llmSettings.gemini, apiKey: env.GEMINI_API_KEY };
+      llmSettings.gemini = {
+        ...llmSettings.gemini,
+        apiKey: env.GEMINI_API_KEY,
+      };
       migratedKeys.push("Gemini API Key");
       llmChanged = true;
     }
 
     // Migrate OpenRouter API key
     if (env.OPENROUTER_API_KEY && !llmSettings.openrouter?.apiKey) {
-      llmSettings.openrouter = { ...llmSettings.openrouter, apiKey: env.OPENROUTER_API_KEY };
+      llmSettings.openrouter = {
+        ...llmSettings.openrouter,
+        apiKey: env.OPENROUTER_API_KEY,
+      };
       migratedKeys.push("OpenRouter API Key");
       llmChanged = true;
     }
@@ -390,7 +420,8 @@ export async function importProcessEnvToSettings(
     // Load current settings
     const llmSettings = LLMProviderFactory.loadSettings() as Any;
     const searchSettings = SearchProviderFactory.loadSettings() as Any;
-    const originalProviderType: LLMProviderType | undefined = llmSettings?.providerType;
+    const originalProviderType: LLMProviderType | undefined =
+      llmSettings?.providerType;
     let llmChanged = false;
     let searchChanged = false;
 
@@ -407,29 +438,53 @@ export async function importProcessEnvToSettings(
     }
 
     const anthropicApiKey = normalizeEnvValue(process.env.ANTHROPIC_API_KEY);
-    if (shouldWriteValue(llmSettings?.anthropic?.apiKey, anthropicApiKey, mode)) {
-      llmSettings.anthropic = { ...llmSettings.anthropic, apiKey: anthropicApiKey };
+    if (
+      shouldWriteValue(llmSettings?.anthropic?.apiKey, anthropicApiKey, mode)
+    ) {
+      llmSettings.anthropic = {
+        ...llmSettings.anthropic,
+        apiKey: anthropicApiKey,
+        authMethod: "api_key",
+      };
       migratedKeys.push("Anthropic API Key");
       llmChanged = true;
     }
 
     // AWS Bedrock credentials
     const awsAccessKeyId = normalizeEnvValue(process.env.AWS_ACCESS_KEY_ID);
-    const awsSecretAccessKey = normalizeEnvValue(process.env.AWS_SECRET_ACCESS_KEY);
+    const awsSecretAccessKey = normalizeEnvValue(
+      process.env.AWS_SECRET_ACCESS_KEY,
+    );
     const awsSessionToken = normalizeEnvValue(process.env.AWS_SESSION_TOKEN);
     const awsRegion =
       normalizeEnvValue(process.env.AWS_REGION) ||
       normalizeEnvValue(process.env.AWS_DEFAULT_REGION);
     const awsProfile = normalizeEnvValue(process.env.AWS_PROFILE);
     const shouldWriteBedrock =
-      shouldWriteValue(llmSettings?.bedrock?.accessKeyId, awsAccessKeyId, mode) ||
-      shouldWriteValue(llmSettings?.bedrock?.secretAccessKey, awsSecretAccessKey, mode) ||
-      shouldWriteValue(llmSettings?.bedrock?.sessionToken, awsSessionToken, mode) ||
+      shouldWriteValue(
+        llmSettings?.bedrock?.accessKeyId,
+        awsAccessKeyId,
+        mode,
+      ) ||
+      shouldWriteValue(
+        llmSettings?.bedrock?.secretAccessKey,
+        awsSecretAccessKey,
+        mode,
+      ) ||
+      shouldWriteValue(
+        llmSettings?.bedrock?.sessionToken,
+        awsSessionToken,
+        mode,
+      ) ||
       shouldWriteValue(llmSettings?.bedrock?.region, awsRegion, mode) ||
       shouldWriteValue(llmSettings?.bedrock?.profile, awsProfile, mode);
     if (
       shouldWriteBedrock &&
-      (awsAccessKeyId || awsSecretAccessKey || awsSessionToken || awsRegion || awsProfile)
+      (awsAccessKeyId ||
+        awsSecretAccessKey ||
+        awsSessionToken ||
+        awsRegion ||
+        awsProfile)
     ) {
       llmSettings.bedrock = {
         ...llmSettings.bedrock,
@@ -453,8 +508,13 @@ export async function importProcessEnvToSettings(
     }
 
     const openrouterApiKey = normalizeEnvValue(process.env.OPENROUTER_API_KEY);
-    if (shouldWriteValue(llmSettings?.openrouter?.apiKey, openrouterApiKey, mode)) {
-      llmSettings.openrouter = { ...llmSettings.openrouter, apiKey: openrouterApiKey };
+    if (
+      shouldWriteValue(llmSettings?.openrouter?.apiKey, openrouterApiKey, mode)
+    ) {
+      llmSettings.openrouter = {
+        ...llmSettings.openrouter,
+        apiKey: openrouterApiKey,
+      };
       migratedKeys.push("OpenRouter API Key");
       llmChanged = true;
     }
@@ -503,14 +563,21 @@ export async function importProcessEnvToSettings(
     // Azure OpenAI (optional)
     const azureApiKey = normalizeEnvValue(process.env.AZURE_OPENAI_API_KEY);
     const azureEndpoint = normalizeEnvValue(process.env.AZURE_OPENAI_ENDPOINT);
-    const azureDeployment = normalizeEnvValue(process.env.AZURE_OPENAI_DEPLOYMENT);
-    const azureApiVersion = normalizeEnvValue(process.env.AZURE_OPENAI_API_VERSION);
+    const azureDeployment = normalizeEnvValue(
+      process.env.AZURE_OPENAI_DEPLOYMENT,
+    );
+    const azureApiVersion = normalizeEnvValue(
+      process.env.AZURE_OPENAI_API_VERSION,
+    );
     const shouldWriteAzure =
       shouldWriteValue(llmSettings?.azure?.apiKey, azureApiKey, mode) ||
       shouldWriteValue(llmSettings?.azure?.endpoint, azureEndpoint, mode) ||
       shouldWriteValue(llmSettings?.azure?.deployment, azureDeployment, mode) ||
       shouldWriteValue(llmSettings?.azure?.apiVersion, azureApiVersion, mode);
-    if (shouldWriteAzure && (azureApiKey || azureEndpoint || azureDeployment || azureApiVersion)) {
+    if (
+      shouldWriteAzure &&
+      (azureApiKey || azureEndpoint || azureDeployment || azureApiVersion)
+    ) {
       llmSettings.azure = {
         ...llmSettings.azure,
         ...(azureApiKey ? { apiKey: azureApiKey } : {}),
@@ -525,7 +592,10 @@ export async function importProcessEnvToSettings(
     // Search API keys
     const tavilyApiKey = normalizeEnvValue(process.env.TAVILY_API_KEY);
     if (shouldWriteValue(searchSettings?.tavily?.apiKey, tavilyApiKey, mode)) {
-      searchSettings.tavily = { ...searchSettings.tavily, apiKey: tavilyApiKey };
+      searchSettings.tavily = {
+        ...searchSettings.tavily,
+        apiKey: tavilyApiKey,
+      };
       migratedKeys.push("Tavily API Key");
       searchChanged = true;
     }
@@ -546,28 +616,41 @@ export async function importProcessEnvToSettings(
 
     const serpApiKey = normalizeEnvValue(process.env.SERPAPI_API_KEY);
     if (shouldWriteValue(searchSettings?.serpapi?.apiKey, serpApiKey, mode)) {
-      searchSettings.serpapi = { ...searchSettings.serpapi, apiKey: serpApiKey };
+      searchSettings.serpapi = {
+        ...searchSettings.serpapi,
+        apiKey: serpApiKey,
+      };
       migratedKeys.push("SerpAPI Key");
       searchChanged = true;
     }
 
     const googleApiKey = normalizeEnvValue(process.env.GOOGLE_API_KEY);
-    const googleSearchEngineId = normalizeEnvValue(process.env.GOOGLE_SEARCH_ENGINE_ID);
+    const googleSearchEngineId = normalizeEnvValue(
+      process.env.GOOGLE_SEARCH_ENGINE_ID,
+    );
     const shouldWriteGoogle =
       shouldWriteValue(searchSettings?.google?.apiKey, googleApiKey, mode) ||
-      shouldWriteValue(searchSettings?.google?.searchEngineId, googleSearchEngineId, mode);
+      shouldWriteValue(
+        searchSettings?.google?.searchEngineId,
+        googleSearchEngineId,
+        mode,
+      );
     if (shouldWriteGoogle && (googleApiKey || googleSearchEngineId)) {
       searchSettings.google = {
         ...searchSettings.google,
         ...(googleApiKey ? { apiKey: googleApiKey } : {}),
-        ...(googleSearchEngineId ? { searchEngineId: googleSearchEngineId } : {}),
+        ...(googleSearchEngineId
+          ? { searchEngineId: googleSearchEngineId }
+          : {}),
       };
       migratedKeys.push("Google Search API Key");
       searchChanged = true;
     }
 
     // Provider selection (optional)
-    const providerOverride = validateProviderType(process.env.COWORK_LLM_PROVIDER);
+    const providerOverride = validateProviderType(
+      process.env.COWORK_LLM_PROVIDER,
+    );
     if (providerOverride) {
       if (llmSettings.providerType !== providerOverride) {
         llmSettings.providerType = providerOverride;
