@@ -38,8 +38,10 @@ const TOOL_TEXT_MARKERS = [
 
 const PLAIN_TOOL_TRANSCRIPT_MARKERS = [
   "to=run_command",
+  "to=skill",
   "to=skill_list",
   "assistant to=run_command",
+  "assistant to=skill",
   "assistant to=skill_list",
   "\"cwd\":",
   "\"timeout_ms\":",
