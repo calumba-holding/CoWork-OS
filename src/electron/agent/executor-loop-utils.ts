@@ -51,6 +51,7 @@ export function handleMaxTokensRecovery(opts: {
   maxRecoveries: number;
   remainingTurns?: number;
   minTurnsRequiredForRetry?: number;
+  allowRetry?: boolean;
   logPrefix?: string;
   eventPayload?: Record<string, unknown>;
   log: (message: string) => void;
@@ -86,6 +87,11 @@ export function handleMaxTokensRecovery(opts: {
     typeof opts.remainingTurns === "number" && Number.isFinite(opts.remainingTurns)
       ? opts.remainingTurns
       : Number.POSITIVE_INFINITY;
+  if (opts.allowRetry === false) {
+    opts.log(`${messagePrefix}max_tokens retry skipped: adaptive continuation disabled`);
+    appendRecoveryAssistantMessage(opts.messages, opts.response, false);
+    return { action: "exhausted", recoveryCount: nextRecoveryCount };
+  }
   if (remainingTurns <= minTurnsRequiredForRetry) {
     opts.log(
       `${messagePrefix}max_tokens retry skipped: only ${remainingTurns} turn(s) remaining ` +
