@@ -538,7 +538,6 @@ export class AgentCompaniesService {
               color: "#2563eb",
               capabilities: [],
               systemPrompt: this.getManifestBody(preview.graph.manifests, node.manifestId),
-              heartbeatEnabled: false,
             });
           if (!existing) {
             createdCount += 1;
