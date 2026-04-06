@@ -7,6 +7,7 @@ import type {
   SubconsciousDispatchRecord,
   SubconsciousEvidence,
   SubconsciousHypothesis,
+  SubconsciousRunOutcome,
   SubconsciousRun,
   SubconsciousTargetKind,
   SubconsciousTargetSummary,
@@ -23,6 +24,24 @@ function safeJsonParse<T>(value: string | null | undefined, fallback: T): T {
   }
 }
 
+function normalizeOutcome(value: unknown): SubconsciousRunOutcome | undefined {
+  if (value === "completed") return "dispatch";
+  if (value === "completed_no_dispatch") return "suggest";
+  if (
+    value === "sleep" ||
+    value === "suggest" ||
+    value === "dispatch" ||
+    value === "notify" ||
+    value === "defer" ||
+    value === "dismiss" ||
+    value === "blocked" ||
+    value === "failed"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
 export class SubconsciousTargetRepository {
   constructor(private readonly db: Database.Database) {}
 
@@ -30,16 +49,26 @@ export class SubconsciousTargetRepository {
     this.db
       .prepare(
         `INSERT INTO subconscious_targets (
-          target_key, kind, workspace_id, ref_json, health, state, last_winner,
+          target_key, kind, workspace_id, ref_json, health, state, persistence,
+          missed_run_policy, next_eligible_at, last_observed_at, last_action_at, expires_at,
+          jitter_ms, last_meaningful_outcome, last_winner,
           last_run_at, last_evidence_at, backlog_count, evidence_fingerprint,
           last_dispatch_kind, last_dispatch_status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(target_key) DO UPDATE SET
           kind = excluded.kind,
           workspace_id = excluded.workspace_id,
           ref_json = excluded.ref_json,
           health = excluded.health,
           state = excluded.state,
+          persistence = excluded.persistence,
+          missed_run_policy = excluded.missed_run_policy,
+          next_eligible_at = excluded.next_eligible_at,
+          last_observed_at = excluded.last_observed_at,
+          last_action_at = excluded.last_action_at,
+          expires_at = excluded.expires_at,
+          jitter_ms = excluded.jitter_ms,
+          last_meaningful_outcome = excluded.last_meaningful_outcome,
           last_winner = excluded.last_winner,
           last_run_at = excluded.last_run_at,
           last_evidence_at = excluded.last_evidence_at,
@@ -56,6 +85,14 @@ export class SubconsciousTargetRepository {
         JSON.stringify(summary.target),
         summary.health,
         summary.state,
+        summary.persistence,
+        summary.missedRunPolicy,
+        summary.nextEligibleAt || null,
+        summary.lastObservedAt || null,
+        summary.lastActionAt || null,
+        summary.expiresAt || null,
+        summary.jitterMs || null,
+        summary.lastMeaningfulOutcome || null,
         summary.lastWinner || null,
         summary.lastRunAt || null,
         summary.lastEvidenceAt || null,
@@ -75,6 +112,14 @@ export class SubconsciousTargetRepository {
       SubconsciousTargetSummary,
       | "health"
       | "state"
+      | "persistence"
+      | "missedRunPolicy"
+      | "nextEligibleAt"
+      | "lastObservedAt"
+      | "lastActionAt"
+      | "expiresAt"
+      | "jitterMs"
+      | "lastMeaningfulOutcome"
       | "lastWinner"
       | "lastRunAt"
       | "lastEvidenceAt"
@@ -130,6 +175,14 @@ export class SubconsciousTargetRepository {
       }),
       health: row.health,
       state: row.state,
+      persistence: row.persistence || "durable",
+      missedRunPolicy: row.missed_run_policy || "catchUp",
+      nextEligibleAt: row.next_eligible_at ? Number(row.next_eligible_at) : undefined,
+      lastObservedAt: row.last_observed_at ? Number(row.last_observed_at) : undefined,
+      lastActionAt: row.last_action_at ? Number(row.last_action_at) : undefined,
+      expiresAt: row.expires_at ? Number(row.expires_at) : undefined,
+      jitterMs: row.jitter_ms ? Number(row.jitter_ms) : undefined,
+      lastMeaningfulOutcome: normalizeOutcome(row.last_meaningful_outcome),
       lastWinner: row.last_winner || undefined,
       lastRunAt: row.last_run_at ? Number(row.last_run_at) : undefined,
       lastEvidenceAt: row.last_evidence_at ? Number(row.last_evidence_at) : undefined,
@@ -157,8 +210,10 @@ export class SubconsciousRunRepository {
         `INSERT INTO subconscious_runs (
           id, target_key, workspace_id, stage, outcome, evidence_fingerprint, evidence_summary,
           artifact_root, dispatch_kind, dispatch_status, blocked_reason, error,
+          confidence, risk_level, evidence_sources_json, evidence_freshness, permission_decision,
+          notification_intent,
           rejected_hypothesis_ids_json, started_at, completed_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id,
@@ -173,6 +228,12 @@ export class SubconsciousRunRepository {
         run.dispatchStatus || null,
         run.blockedReason || null,
         run.error || null,
+        run.confidence ?? null,
+        run.riskLevel || null,
+        JSON.stringify(run.evidenceSources || []),
+        run.evidenceFreshness ?? null,
+        run.permissionDecision || null,
+        run.notificationIntent || null,
         JSON.stringify(run.rejectedHypothesisIds || []),
         run.startedAt,
         run.completedAt || null,
@@ -193,6 +254,12 @@ export class SubconsciousRunRepository {
       dispatchKind: "dispatch_kind",
       dispatchStatus: "dispatch_status",
       blockedReason: "blocked_reason",
+      confidence: "confidence",
+      riskLevel: "risk_level",
+      evidenceSources: "evidence_sources_json",
+      evidenceFreshness: "evidence_freshness",
+      permissionDecision: "permission_decision",
+      notificationIntent: "notification_intent",
       rejectedHypothesisIds: "rejected_hypothesis_ids_json",
       startedAt: "started_at",
       completedAt: "completed_at",
@@ -201,7 +268,11 @@ export class SubconsciousRunRepository {
     for (const [key, value] of Object.entries(updates)) {
       const column = mapped[key] || key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
       fields.push(`${column} = ?`);
-      values.push(key === "rejectedHypothesisIds" ? JSON.stringify(value || []) : (value ?? null));
+      values.push(
+        key === "rejectedHypothesisIds" || key === "evidenceSources"
+          ? JSON.stringify(value || [])
+          : (value ?? null),
+      );
     }
     if (!fields.length) return;
     values.push(id);
@@ -256,7 +327,7 @@ export class SubconsciousRunRepository {
       targetKey: String(row.target_key),
       workspaceId: row.workspace_id || undefined,
       stage: row.stage,
-      outcome: row.outcome || undefined,
+      outcome: normalizeOutcome(row.outcome),
       evidenceFingerprint: String(row.evidence_fingerprint || ""),
       evidenceSummary: String(row.evidence_summary || ""),
       artifactRoot: String(row.artifact_root || ""),
@@ -264,6 +335,15 @@ export class SubconsciousRunRepository {
       dispatchStatus: row.dispatch_status || undefined,
       blockedReason: row.blocked_reason || undefined,
       error: row.error || undefined,
+      confidence: row.confidence !== null && row.confidence !== undefined ? Number(row.confidence) : undefined,
+      riskLevel: row.risk_level || undefined,
+      evidenceSources: safeJsonParse(row.evidence_sources_json, []),
+      evidenceFreshness:
+        row.evidence_freshness !== null && row.evidence_freshness !== undefined
+          ? Number(row.evidence_freshness)
+          : undefined,
+      permissionDecision: row.permission_decision || undefined,
+      notificationIntent: row.notification_intent || undefined,
       rejectedHypothesisIds: safeJsonParse(row.rejected_hypothesis_ids_json, []),
       startedAt: Number(row.started_at || row.created_at || Date.now()),
       completedAt: row.completed_at ? Number(row.completed_at) : undefined,
@@ -459,7 +539,7 @@ export class SubconsciousDecisionRepository {
       rejectedHypothesisIds: safeJsonParse(row.rejected_hypothesis_ids_json, []),
       rationale: String(row.rationale || ""),
       nextBacklog: safeJsonParse(row.next_backlog_json, []),
-      outcome: row.outcome,
+      outcome: normalizeOutcome(row.outcome) || "suggest",
       createdAt: Number(row.created_at || Date.now()),
     };
   }
@@ -676,4 +756,30 @@ export function clearSubconsciousHistoryData(db: Database.Database): {
     DELETE FROM subconscious_targets;
   `);
   return deleted;
+}
+
+export function clearSubconsciousTargetData(
+  db: Database.Database,
+  targetKeys: string[],
+): void {
+  if (!targetKeys.length) return;
+  const placeholders = targetKeys.map(() => "?").join(", ");
+  db.exec("BEGIN");
+  try {
+    for (const table of [
+      "subconscious_dispatch_records",
+      "subconscious_backlog_items",
+      "subconscious_decisions",
+      "subconscious_critiques",
+      "subconscious_hypotheses",
+      "subconscious_runs",
+      "subconscious_targets",
+    ]) {
+      db.prepare(`DELETE FROM ${table} WHERE target_key IN (${placeholders})`).run(...targetKeys);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
