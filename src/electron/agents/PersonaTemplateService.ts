@@ -6,12 +6,13 @@ import type {
   PersonaTemplateActivationResult,
   ActivatePersonaTemplateRequest,
   PersonaTemplateSkillRef,
-  ProactiveTaskDefinition,
   CreateAgentRoleRequest,
 } from "../../shared/types";
 import type { AgentRoleRepository } from "./AgentRoleRepository";
+import { createLogger } from "../utils/logger";
 
 const TEMPLATES_FOLDER_NAME = "persona-templates";
+const logger = createLogger("PersonaTemplateService");
 
 interface PersonaTemplateServiceConfig {
   bundledTemplatesDir?: string;
@@ -62,8 +63,8 @@ export class PersonaTemplateService {
 
     this.loadTemplates();
     this.initialized = true;
-    console.log(
-      `[PersonaTemplateService] Initialized with ${this.templates.size} templates from ${this.bundledTemplatesDir}`,
+    logger.info(
+      `Initialized with ${this.templates.size} templates from ${this.bundledTemplatesDir}`,
     );
   }
 
@@ -71,9 +72,7 @@ export class PersonaTemplateService {
     this.templates.clear();
 
     if (!fs.existsSync(this.bundledTemplatesDir)) {
-      console.warn(
-        `[PersonaTemplateService] Templates directory not found: ${this.bundledTemplatesDir}`,
-      );
+      logger.warn(`Templates directory not found: ${this.bundledTemplatesDir}`);
       return;
     }
 
@@ -90,14 +89,14 @@ export class PersonaTemplateService {
           if (this.validateTemplate(template)) {
             this.templates.set(template.id, template);
           } else {
-            console.warn(`[PersonaTemplateService] Invalid template in ${file}, skipping`);
+            logger.warn(`Invalid template in ${file}, skipping`);
           }
         } catch (err) {
-          console.error(`[PersonaTemplateService] Failed to load ${file}:`, err);
+          logger.error(`Failed to load ${file}:`, err);
         }
       }
     } catch (err) {
-      console.error("[PersonaTemplateService] Failed to read templates directory:", err);
+      logger.error("Failed to read templates directory:", err);
     }
   }
 
@@ -115,10 +114,6 @@ export class PersonaTemplateService {
       Array.isArray(template.role.capabilities) &&
       template.role.capabilities.length > 0 &&
       template.role.systemPrompt &&
-      template.heartbeat &&
-      template.cognitiveOffload &&
-      Array.isArray(template.cognitiveOffload.primaryCategories) &&
-      Array.isArray(template.cognitiveOffload.proactiveTasks) &&
       Array.isArray(template.skills) &&
       Array.isArray(template.tags)
     );
@@ -174,7 +169,7 @@ export class PersonaTemplateService {
     roleName: string;
     displayName: string;
     skills: PersonaTemplateSkillRef[];
-    proactiveTasks: ProactiveTaskDefinition[];
+    proactiveTasks: Array<never>;
   } | null {
     const template = this.templates.get(templateId);
     if (!template) return null;
@@ -183,7 +178,7 @@ export class PersonaTemplateService {
       roleName: this.generateRoleName(template.id),
       displayName: template.name + " Twin",
       skills: template.skills,
-      proactiveTasks: template.cognitiveOffload.proactiveTasks,
+      proactiveTasks: [],
     };
   }
 
@@ -200,7 +195,7 @@ export class PersonaTemplateService {
     const warnings: string[] = [];
 
     // Build soul JSON with cognitive offload config embedded
-    const soulData = this.buildSoulData(template, customization.enabledProactiveTasks);
+    const soulData = this.buildSoulData(template);
     const soulJson = JSON.stringify(soulData);
 
     // Generate unique role name
@@ -233,22 +228,19 @@ export class PersonaTemplateService {
       toolRestrictions: template.role.toolRestrictions,
       autonomyLevel: template.role.autonomyLevel,
       soul: soulJson,
-      heartbeatPolicy: {
-        enabled: template.heartbeat.enabled,
-        cadenceMinutes:
-          customization.heartbeatIntervalMinutes || template.heartbeat.intervalMinutes,
-        staggerOffsetMinutes: template.heartbeat.staggerOffset,
-        dispatchCooldownMinutes: template.role.autonomyLevel === "lead" ? 60 : 120,
-        maxDispatchesPerDay: template.role.autonomyLevel === "lead" ? 12 : 4,
-        profile: template.role.autonomyLevel === "lead" ? "dispatcher" : "operator",
-        primaryCategories: template.cognitiveOffload.primaryCategories,
-        proactiveTasks: template.cognitiveOffload.proactiveTasks.map((task) => ({
-          ...task,
-          enabled: customization.enabledProactiveTasks
-            ? customization.enabledProactiveTasks.includes(task.id)
-            : task.enabled,
-        })),
-      },
+      heartbeatPolicy: template.heartbeat
+        ? {
+            enabled: template.heartbeat.enabled,
+            cadenceMinutes: template.heartbeat.intervalMinutes,
+            staggerOffsetMinutes: template.heartbeat.staggerOffset,
+            dispatchCooldownMinutes: template.heartbeat.dispatchCooldownMinutes,
+            maxDispatchesPerDay: template.heartbeat.maxDispatchesPerDay,
+            profile: template.heartbeat.profile,
+            activeHours: template.heartbeat.activeHours ?? null,
+            primaryCategories: template.cognitiveOffload?.primaryCategories,
+            proactiveTasks: template.cognitiveOffload?.proactiveTasks,
+          }
+        : undefined,
     };
 
     // Create the agent role
@@ -269,18 +261,10 @@ export class PersonaTemplateService {
       installedSkillIds.push(skillRef.skillId);
     }
 
-    // Count enabled proactive tasks
-    const proactiveTaskCount = template.cognitiveOffload.proactiveTasks.filter((t) => {
-      if (customization.enabledProactiveTasks) {
-        return customization.enabledProactiveTasks.includes(t.id);
-      }
-      return t.enabled;
-    }).length;
-
     return {
       agentRole,
       installedSkillIds,
-      proactiveTaskCount,
+      proactiveTaskCount: 0,
       warnings,
     };
   }
@@ -290,7 +274,6 @@ export class PersonaTemplateService {
    */
   private buildSoulData(
     template: PersonaTemplate,
-    _enabledProactiveTasks?: string[],
   ): Record<string, unknown> {
     // Parse the template's base soul JSON
     let baseSoul: Record<string, unknown> = {};
@@ -305,6 +288,14 @@ export class PersonaTemplateService {
       ...baseSoul,
       sourceTemplateId: template.id,
       sourceTemplateVersion: template.version,
+      ...(template.cognitiveOffload
+        ? {
+            automationProfileMetadata: {
+              primaryCategories: template.cognitiveOffload.primaryCategories,
+              proactiveTasks: template.cognitiveOffload.proactiveTasks,
+            },
+          }
+        : {}),
     };
   }
 
