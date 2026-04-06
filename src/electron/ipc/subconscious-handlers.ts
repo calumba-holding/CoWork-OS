@@ -9,6 +9,7 @@ import type {
   SubconsciousHistoryResetResult,
   SubconsciousSettings,
 } from "../../shared/subconscious";
+import { DEFAULT_SUBCONSCIOUS_SETTINGS } from "../../shared/subconscious";
 import {
   clearOwnerEnrollment,
   getImprovementEligibility,
@@ -31,12 +32,39 @@ export function setupSubconsciousHandlers(service: SubconsciousLoopService): voi
 
   ipcMain.handle(
     IPC_CHANNELS.SUBCONSCIOUS_SAVE_SETTINGS,
-    async (_event, settings: SubconsciousSettings): Promise<SubconsciousSettings> => {
+    async (_event, settings: Partial<SubconsciousSettings>): Promise<SubconsciousSettings> => {
       const validated = validateInput(
         SubconsciousSettingsSchema,
-        settings,
+        {
+          ...DEFAULT_SUBCONSCIOUS_SETTINGS,
+          ...settings,
+          phaseModels: {
+            ...DEFAULT_SUBCONSCIOUS_SETTINGS.phaseModels,
+            ...(settings.phaseModels || {}),
+          },
+          dispatchDefaults: {
+            ...DEFAULT_SUBCONSCIOUS_SETTINGS.dispatchDefaults,
+            ...(settings.dispatchDefaults || {}),
+            defaultKinds: {
+              ...DEFAULT_SUBCONSCIOUS_SETTINGS.dispatchDefaults.defaultKinds,
+              ...(settings.dispatchDefaults?.defaultKinds || {}),
+            },
+          },
+          notificationPolicy: {
+            ...DEFAULT_SUBCONSCIOUS_SETTINGS.notificationPolicy,
+            ...(settings.notificationPolicy || {}),
+          },
+          perExecutorPolicy: {
+            ...DEFAULT_SUBCONSCIOUS_SETTINGS.perExecutorPolicy,
+            ...(settings.perExecutorPolicy || {}),
+            codeChangeTask: {
+              ...DEFAULT_SUBCONSCIOUS_SETTINGS.perExecutorPolicy.codeChangeTask,
+              ...(settings.perExecutorPolicy?.codeChangeTask || {}),
+            },
+          },
+        },
         "subconscious settings",
-      ) as SubconsciousSettings;
+      ) as unknown as SubconsciousSettings;
       return service.saveSettings({
         ...validated,
         perExecutorPolicy: {
