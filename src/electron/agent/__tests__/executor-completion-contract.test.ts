@@ -109,6 +109,43 @@ describe("TaskExecutor completion contract integration", () => {
     vi.clearAllMocks();
   });
 
+  it("treats compile-into-report prompts as requiring artifact evidence", () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest trends in AI agents from the last 1 day and summarize findings. Search for AI agent trends across Reddit, X, and tech news sources. Compile and summarize the key findings, trends, and notable developments into a comprehensive report.",
+      lastOutput: "Prepared report",
+    });
+
+    const contract = (executor as Any).buildCompletionContract();
+
+    expect(contract.requiresArtifactEvidence).toBe(true);
+    expect(contract.artifactKind).toBe("file");
+  });
+
+  it("counts planCompletedEffectively as execution evidence during finalization", () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest trends in AI agents from the last 1 day and summarize findings. Compile the findings into a report.",
+      lastOutput: "Prepared report",
+    });
+
+    executor.plan = {
+      description: "Plan",
+      steps: [
+        {
+          id: "1",
+          description: "Research and prepare the report.",
+          status: "failed",
+        },
+      ],
+    };
+    (executor as Any).planCompletedEffectively = true;
+
+    expect((executor as Any).hasExecutionEvidence()).toBe(true);
+  });
+
   it("short-circuits simple non-execute answer-first prompts without running plan execution", async () => {
     const executor = createExecuteHarness({
       title: "Ethics question",

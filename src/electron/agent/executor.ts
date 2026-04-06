@@ -9254,6 +9254,11 @@ ${transcript}
     }
     const targetPaths = this.extractStepPathCandidates(step);
     const requiredExtensions = new Set<string>(extractArtifactExtensionsFromText(description));
+    if (this.isSinglePlanStepForTaskArtifactOutput(step)) {
+      for (const extension of this.buildCompletionContract().requiredArtifactExtensions) {
+        requiredExtensions.add(extension);
+      }
+    }
     for (const targetPath of targetPaths) {
       const ext = path.extname(String(targetPath || "")).trim().toLowerCase();
       if (ext) requiredExtensions.add(ext);
@@ -10008,7 +10013,7 @@ ${transcript}
 
   private hasExecutionEvidence(): boolean {
     if (!this.plan) return true;
-    return this.plan.steps.some((step) => step.status === "completed");
+    return this.planCompletedEffectively || this.plan.steps.some((step) => step.status === "completed");
   }
 
   private hasArtifactEvidence(contract: CompletionContract): boolean {
@@ -15661,6 +15666,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private stepRequiresArtifactEvidence(step: PlanStep): boolean {
+    if (this.isSinglePlanStepForTaskArtifactOutput(step)) return true;
     if (this.isVerificationStep(step)) return false;
     const desc = String(step.description || "").toLowerCase();
     if (!desc.trim()) return false;
@@ -15689,6 +15695,19 @@ You are continuing a previous conversation. The context from the previous conver
     const scaffoldProjectIntent = descriptionHasScaffoldIntent(desc);
 
     return scaffoldProjectIntent || hasExplicitExtension || (hasWriteVerb && hasArtifactCue);
+  }
+
+  private isSinglePlanStepForTaskArtifactOutput(step: PlanStep): boolean {
+    if (this.isVerificationStep(step)) return false;
+    const planSteps = Array.isArray(this.plan?.steps) ? this.plan.steps : [];
+    if (planSteps.length !== 1) return false;
+
+    const onlyStep = planSteps[0];
+    if (String(onlyStep?.id || "") !== String(step.id || "")) return false;
+    if (this.stepAllowsInlineDeliverable(step)) return false;
+    if (this.stepIndicatesInlineDiagramIntent(String(step.description || ""))) return false;
+
+    return this.buildCompletionContract().requiresArtifactEvidence;
   }
 
   private stepAllowsInlineDeliverable(step: PlanStep): boolean {
@@ -15763,6 +15782,9 @@ You are continuing a previous conversation. The context from the previous conver
   private resolveStepArtifactContractMode(
     step: PlanStep,
   ): "artifact_write_required" | "artifact_presence_required" {
+    if (this.isSinglePlanStepForTaskArtifactOutput(step)) {
+      return "artifact_write_required";
+    }
     const desc = String(step.description || "").toLowerCase();
     const hasWriteIntent = descriptionHasWriteIntent(desc);
     const hasReadOnlyIntent = descriptionHasReadOnlyIntent(desc);

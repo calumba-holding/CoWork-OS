@@ -2,6 +2,8 @@ import { isVerificationStepDescription } from "../../shared/plan-utils";
 import type { CompletionContract } from "./executor-helpers";
 import { extractArtifactExtensionsFromText } from "./step-contract";
 
+const ARTIFACT_CREATION_VERB_REGEX =
+  /\b(create|build|write|generate|produce|draft|prepare|save|export|compile|synthesize)\b/;
 const STRATEGY_CONTEXT_BLOCK_REGEX =
   /\[AGENT_STRATEGY_CONTEXT_V1\][\s\S]*?\[\/AGENT_STRATEGY_CONTEXT_V1\]/g;
 const ADDITIONAL_CONTEXT_HEADER = "ADDITIONAL CONTEXT:";
@@ -45,9 +47,7 @@ export function shouldRequireExecutionEvidence(taskTitle: string, taskPrompt: st
 
 export function promptRequestsArtifactOutput(taskTitle: string, taskPrompt: string): boolean {
   const prompt = `${taskTitle}\n${normalizePromptForContracts(taskPrompt)}`.toLowerCase();
-  const createVerb = /\b(create|build|write|generate|produce|draft|prepare|save|export)\b/.test(
-    prompt,
-  );
+  const createVerb = ARTIFACT_CREATION_VERB_REGEX.test(prompt);
   const artifactNoun =
     /\b(file|document|report|pdf|docx|markdown|md|spreadsheet|csv|xlsx|json|txt|pptx|slide|slides)\b/.test(
       prompt,
@@ -97,8 +97,7 @@ export function promptIsMultiFileWebAppCreation(prompt: string): boolean {
 
 export function inferRequiredArtifactExtensions(taskTitle: string, taskPrompt: string): string[] {
   const prompt = `${taskTitle}\n${normalizePromptForContracts(taskPrompt)}`.toLowerCase();
-  const hasCreateIntent =
-    /\b(create|build|write|generate|produce|draft|prepare|save|export|compile)\b/.test(prompt);
+  const hasCreateIntent = ARTIFACT_CREATION_VERB_REGEX.test(prompt);
   if (!hasCreateIntent) return [];
 
   const extensions = new Set<string>(extractArtifactExtensionsFromText(prompt));

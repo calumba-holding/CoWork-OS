@@ -201,4 +201,34 @@ describe("TaskExecutor tool allow-list semantics", () => {
     expect(Array.from(contract.requiredTools)).toContain("get_video_generation_job");
     expect(Array.from(contract.requiredTools)).not.toContain("write_file");
   });
+
+  it("promotes a single-step research report task to mutation-required when the task prompt asks for a report artifact", () => {
+    const executor = createExecutor();
+    executor.agentPolicyConfig = null;
+    executor.workspace = { path: process.cwd() };
+    executor.task = {
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest trends in AI agents from the last 1 day and summarize findings. Search for AI agent trends across Reddit, X, and tech news sources. Compile and summarize the key findings, trends, and notable developments into a comprehensive report.",
+      agentConfig: {},
+    };
+
+    const step = {
+      id: "research-report",
+      description:
+        "I'll research the latest AI agent trends from the last 24 hours. Let me first check the existing report format from previous days to maintain consistency, then execute the research.",
+      kind: "primary",
+      status: "pending",
+    };
+
+    executor.plan = {
+      description: "Plan",
+      steps: [step],
+    };
+
+    const contract = (executor as Any).resolveStepExecutionContract(step);
+
+    expect(contract.requiresArtifactEvidence).toBe(true);
+    expect(contract.mode).toBe("mutation_required");
+  });
 });
