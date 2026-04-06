@@ -46,8 +46,31 @@ import { WorkingStateRepository } from "./agents/WorkingStateRepository";
 import { CrossSignalService } from "./agents/CrossSignalService";
 import { FeedbackService } from "./agents/FeedbackService";
 import { LoreService } from "./agents/LoreService";
+import { AutomationProfileRepository } from "./agents/AutomationProfileRepository";
 import { ProactiveSuggestionsService } from "./agent/ProactiveSuggestionsService";
 import { AgentDaemon } from "./agent/daemon";
+import { CoreMemoryCandidateRepository } from "./core/CoreMemoryCandidateRepository";
+import { CoreMemoryCandidateService } from "./core/CoreMemoryCandidateService";
+import { CoreMemoryDistillRunRepository } from "./core/CoreMemoryDistillRunRepository";
+import { CoreMemoryDistiller } from "./core/CoreMemoryDistiller";
+import { CoreEvalCaseRepository } from "./core/CoreEvalCaseRepository";
+import { CoreEvalCaseService } from "./core/CoreEvalCaseService";
+import { CoreFailureClusterRepository } from "./core/CoreFailureClusterRepository";
+import { CoreFailureClusterService } from "./core/CoreFailureClusterService";
+import { CoreFailureMiningService } from "./core/CoreFailureMiningService";
+import { CoreFailureRecordRepository } from "./core/CoreFailureRecordRepository";
+import { CoreHarnessExperimentRepository } from "./core/CoreHarnessExperimentRepository";
+import { CoreHarnessExperimentRunner } from "./core/CoreHarnessExperimentRunner";
+import { CoreHarnessExperimentService } from "./core/CoreHarnessExperimentService";
+import { CoreLearningPipelineService } from "./core/CoreLearningPipelineService";
+import { CoreLearningsRepository } from "./core/CoreLearningsRepository";
+import { CoreLearningsService } from "./core/CoreLearningsService";
+import { CoreRegressionGateRepository } from "./core/CoreRegressionGateRepository";
+import { CoreRegressionGateService } from "./core/CoreRegressionGateService";
+import { CoreMemoryScopeResolver } from "./core/CoreMemoryScopeResolver";
+import { CoreMemoryScopeStateRepository } from "./core/CoreMemoryScopeStateRepository";
+import { CoreTraceRepository } from "./core/CoreTraceRepository";
+import { CoreTraceService } from "./core/CoreTraceService";
 import {
   ChannelMessageRepository,
   ChannelRepository,
@@ -194,9 +217,20 @@ let loreService: LoreService | null = null;
 let xMentionBridgeService: XMentionBridgeService | null = null;
 let strategicPlannerService: StrategicPlannerService | null = null;
 let eventTriggerService: EventTriggerService | null = null;
+let coreTraceService: CoreTraceService | null = null;
+let coreMemoryCandidateService: CoreMemoryCandidateService | null = null;
+let coreMemoryDistiller: CoreMemoryDistiller | null = null;
+let coreFailureMiningService: CoreFailureMiningService | null = null;
+let coreFailureClusterService: CoreFailureClusterService | null = null;
+let coreEvalCaseService: CoreEvalCaseService | null = null;
+let coreHarnessExperimentService: CoreHarnessExperimentService | null = null;
+let coreHarnessExperimentRunner: CoreHarnessExperimentRunner | null = null;
+let coreLearningsService: CoreLearningsService | null = null;
+let coreLearningPipelineService: CoreLearningPipelineService | null = null;
 let detachTaskLifecycleSync: (() => void) | null = null;
 let tempWorkspacePruneTimer: NodeJS.Timeout | null = null;
 let tempSandboxProfilePruneTimer: NodeJS.Timeout | null = null;
+let coreMemoryDistillTimer: NodeJS.Timeout | null = null;
 const TEMP_WORKSPACE_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TEMP_SANDBOX_PROFILE_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const managedBriefingRuns = new Map<
@@ -217,6 +251,219 @@ const logger = createLogger("Main");
 const TRANSIENT_MAIN_PROCESS_ERROR_RE =
   /(ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|socket hang up|Timed Out|Connection Closed)/i;
 let processErrorGuardsInstalled = false;
+const STARTER_AUTOMATION_ROLE_NAMES = ["assistant", "project_manager"];
+
+function normalizeTwinCoreBoundary(): void {
+  const db = dbManager.getDatabase();
+  const twinRoles = db
+    .prepare(
+      `SELECT id
+       FROM agent_roles
+       WHERE COALESCE(source_template_id, '') != ''
+          OR name LIKE 'twin-%'
+          OR display_name LIKE '%Twin%'`,
+    )
+    .all() as Array<{ id?: string }>;
+
+  const roleIds = twinRoles
+    .map((row) => (typeof row.id === "string" ? row.id : ""))
+    .filter(Boolean);
+  if (!roleIds.length) {
+    return;
+  }
+
+  const placeholders = roleIds.map(() => "?").join(", ");
+  db.exec("BEGIN");
+  try {
+    db.prepare(
+      `UPDATE agent_roles
+       SET role_kind = 'persona_template',
+           heartbeat_enabled = 0,
+           heartbeat_status = 'idle',
+           heartbeat_last_pulse_result = NULL,
+           heartbeat_last_dispatch_kind = NULL,
+           updated_at = ?
+       WHERE id IN (${placeholders})`,
+    ).run(Date.now(), ...roleIds);
+
+    db.prepare(
+      `UPDATE automation_profiles
+       SET enabled = 0,
+           updated_at = ?
+       WHERE agent_role_id IN (${placeholders})`,
+    ).run(Date.now(), ...roleIds);
+
+    db.prepare(
+      `DELETE FROM heartbeat_policies
+       WHERE agent_role_id IN (${placeholders})`,
+    ).run(...roleIds);
+
+    db.prepare(
+      `DELETE FROM subconscious_dispatch_records
+       WHERE target_key IN (${placeholders})`,
+    ).run(...roleIds.map((id) => `agent_role:${id}`));
+    db.prepare(
+      `DELETE FROM subconscious_backlog_items
+       WHERE target_key IN (${placeholders})`,
+    ).run(...roleIds.map((id) => `agent_role:${id}`));
+    db.prepare(
+      `DELETE FROM subconscious_decisions
+       WHERE target_key IN (${placeholders})`,
+    ).run(...roleIds.map((id) => `agent_role:${id}`));
+    db.prepare(
+      `DELETE FROM subconscious_critiques
+       WHERE target_key IN (${placeholders})`,
+    ).run(...roleIds.map((id) => `agent_role:${id}`));
+    db.prepare(
+      `DELETE FROM subconscious_hypotheses
+       WHERE target_key IN (${placeholders})`,
+    ).run(...roleIds.map((id) => `agent_role:${id}`));
+    db.prepare(
+      `DELETE FROM subconscious_runs
+       WHERE target_key IN (${placeholders})`,
+    ).run(...roleIds.map((id) => `agent_role:${id}`));
+    db.prepare(
+      `DELETE FROM subconscious_targets
+       WHERE target_key IN (${placeholders})`,
+    ).run(...roleIds.map((id) => `agent_role:${id}`));
+
+    db.exec("COMMIT");
+    logger.info("Normalized Twin roles out of core cognition ownership", {
+      roleCount: roleIds.length,
+    });
+  } catch (error) {
+    db.exec("ROLLBACK");
+    logger.error("Failed to normalize Twin cognition ownership:", error);
+  }
+}
+
+function buildDefaultAutomationProfile(role: import("../shared/types").AgentRole): {
+  enabled: boolean;
+  cadenceMinutes: number;
+  staggerOffsetMinutes: number;
+  dispatchCooldownMinutes: number;
+  maxDispatchesPerDay: number;
+  profile: import("../shared/types").HeartbeatProfile;
+  activeHours?: import("../shared/types").HeartbeatActiveHours;
+} {
+  const isStarter = STARTER_AUTOMATION_ROLE_NAMES.includes(role.name);
+  if (role.name === "project_manager") {
+    return {
+      enabled: true,
+      cadenceMinutes: 20,
+      staggerOffsetMinutes: 0,
+      dispatchCooldownMinutes: 90,
+      maxDispatchesPerDay: 4,
+      profile: "dispatcher",
+      activeHours: role.activeHours,
+    };
+  }
+  if (role.name === "assistant") {
+    return {
+      enabled: true,
+      cadenceMinutes: 30,
+      staggerOffsetMinutes: 5,
+      dispatchCooldownMinutes: 180,
+      maxDispatchesPerDay: 3,
+      profile: "observer",
+      activeHours: role.activeHours,
+    };
+  }
+  return {
+    enabled: false,
+    cadenceMinutes:
+      role.pulseEveryMinutes || role.heartbeatIntervalMinutes || (role.autonomyLevel === "lead" ? 20 : 30),
+    staggerOffsetMinutes: role.heartbeatStaggerOffset || 0,
+    dispatchCooldownMinutes: role.dispatchCooldownMinutes || (role.autonomyLevel === "lead" ? 90 : 120),
+    maxDispatchesPerDay: role.maxDispatchesPerDay || (role.autonomyLevel === "lead" ? 6 : 4),
+    profile: role.heartbeatProfile || (role.autonomyLevel === "lead" ? "dispatcher" : "observer"),
+    activeHours: role.activeHours,
+  };
+}
+
+function ensureCoreAutomationProfiles(): void {
+  const db = dbManager.getDatabase();
+  const agentRoleRepo = new AgentRoleRepository(db);
+  const automationProfileRepo = new AutomationProfileRepository(db);
+
+  const addedAgents = agentRoleRepo.syncNewDefaults();
+  if (addedAgents.length > 0) {
+    logger.info(`Added ${addedAgents.length} new default agent(s)`);
+  }
+
+  const eligibleRoles = agentRoleRepo
+    .findAll(false)
+    .filter(
+      (role) =>
+        role.roleKind !== "persona_template" &&
+        (role.roleKind === "system" || role.roleKind === "custom"),
+    );
+  if (!eligibleRoles.length) {
+    return;
+  }
+
+  const existingProfiles = new Map(
+    automationProfileRepo.listAll().map((profile) => [profile.agentRoleId, profile]),
+  );
+
+  let createdCount = 0;
+  for (const role of eligibleRoles) {
+    if (existingProfiles.has(role.id)) {
+      continue;
+    }
+    const seeded = buildDefaultAutomationProfile(role);
+    const created = automationProfileRepo.create({
+      agentRoleId: role.id,
+      enabled: seeded.enabled,
+      cadenceMinutes: seeded.cadenceMinutes,
+      staggerOffsetMinutes: seeded.staggerOffsetMinutes,
+      dispatchCooldownMinutes: seeded.dispatchCooldownMinutes,
+      maxDispatchesPerDay: seeded.maxDispatchesPerDay,
+      profile: seeded.profile,
+      activeHours: seeded.activeHours,
+    });
+    existingProfiles.set(role.id, created);
+    createdCount += 1;
+  }
+
+  const enabledEligibleProfiles = automationProfileRepo
+    .listEnabled()
+    .filter((profile) => eligibleRoles.some((role) => role.id === profile.agentRoleId));
+
+  if (enabledEligibleProfiles.length === 0) {
+    const starterRoles = eligibleRoles.filter((role) =>
+      STARTER_AUTOMATION_ROLE_NAMES.includes(role.name),
+    );
+    const fallbackRoles = starterRoles.length ? starterRoles : eligibleRoles.slice(0, 1);
+    for (const role of fallbackRoles) {
+      const seeded = buildDefaultAutomationProfile(role);
+      const existing = existingProfiles.get(role.id);
+      if (!existing) continue;
+      automationProfileRepo.update({
+        id: existing.id,
+        enabled: true,
+        cadenceMinutes: seeded.cadenceMinutes,
+        staggerOffsetMinutes: seeded.staggerOffsetMinutes,
+        dispatchCooldownMinutes: seeded.dispatchCooldownMinutes,
+        maxDispatchesPerDay: seeded.maxDispatchesPerDay,
+        profile: seeded.profile,
+        activeHours: seeded.activeHours,
+      });
+    }
+  }
+
+  const totalProfiles = automationProfileRepo.listAll();
+  const enabledProfiles = totalProfiles.filter((profile) => profile.enabled);
+  logger.info("Core automation profiles ready", {
+    eligibleRoleCount: eligibleRoles.length,
+    profileCount: totalProfiles.length,
+    enabledProfileCount: enabledProfiles.length,
+    createdCount,
+    enabledRoles: enabledProfiles
+      .map((profile) => agentRoleRepo.findById(profile.agentRoleId)?.name || profile.agentRoleId)
+      .slice(0, 10),
+  });
+}
 
 function isAllowedWebviewUrl(value: string): boolean {
   const raw = String(value || "").trim();
@@ -617,6 +864,70 @@ if (!gotTheLock) {
     // This MUST be done before provider factories so they can migrate legacy settings
     new SecureSettingsRepository(dbManager.getDatabase());
     logger.info("SecureSettingsRepository initialized");
+    normalizeTwinCoreBoundary();
+    ensureCoreAutomationProfiles();
+    try {
+      const db = dbManager.getDatabase();
+      const automationProfileRepo = new AutomationProfileRepository(db);
+      const coreTraceRepo = new CoreTraceRepository(db);
+      const coreMemoryCandidateRepo = new CoreMemoryCandidateRepository(db);
+      const coreMemoryDistillRunRepo = new CoreMemoryDistillRunRepository(db);
+      const coreMemoryScopeStateRepo = new CoreMemoryScopeStateRepository(db);
+      const coreFailureRecordRepo = new CoreFailureRecordRepository(db);
+      const coreFailureClusterRepo = new CoreFailureClusterRepository(db);
+      const coreEvalCaseRepo = new CoreEvalCaseRepository(db);
+      const coreHarnessExperimentRepo = new CoreHarnessExperimentRepository(db);
+      const coreRegressionGateRepo = new CoreRegressionGateRepository(db);
+      const coreLearningsRepo = new CoreLearningsRepository(db);
+      const coreMemoryScopeResolver = new CoreMemoryScopeResolver();
+      coreTraceService = new CoreTraceService(coreTraceRepo, coreMemoryCandidateRepo);
+      coreMemoryCandidateService = new CoreMemoryCandidateService(
+        coreTraceRepo,
+        coreMemoryCandidateRepo,
+        coreMemoryScopeResolver,
+      );
+      coreMemoryDistiller = new CoreMemoryDistiller(
+        coreTraceRepo,
+        coreMemoryCandidateRepo,
+        coreMemoryDistillRunRepo,
+        coreMemoryScopeStateRepo,
+        automationProfileRepo,
+        new WorkspaceRepository(db),
+        coreMemoryScopeResolver,
+      );
+      coreFailureMiningService = new CoreFailureMiningService(coreTraceRepo, coreFailureRecordRepo);
+      coreFailureClusterService = new CoreFailureClusterService(
+        coreFailureRecordRepo,
+        coreFailureClusterRepo,
+      );
+      coreEvalCaseService = new CoreEvalCaseService(coreFailureClusterRepo, coreEvalCaseRepo);
+      coreLearningsService = new CoreLearningsService(coreLearningsRepo);
+      coreHarnessExperimentService = new CoreHarnessExperimentService(
+        coreFailureClusterRepo,
+        coreHarnessExperimentRepo,
+        automationProfileRepo,
+      );
+      const coreRegressionGateService = new CoreRegressionGateService(coreRegressionGateRepo);
+      coreHarnessExperimentRunner = new CoreHarnessExperimentRunner(
+        coreHarnessExperimentRepo,
+        coreHarnessExperimentService,
+        coreFailureClusterRepo,
+        coreEvalCaseRepo,
+        automationProfileRepo,
+        coreRegressionGateService,
+        coreLearningsService,
+      );
+      coreLearningPipelineService = new CoreLearningPipelineService(
+        coreFailureMiningService,
+        coreFailureClusterService,
+        coreEvalCaseService,
+        coreHarnessExperimentService,
+        coreLearningsService,
+      );
+      logger.info("Core trace services initialized");
+    } catch (error) {
+      logger.error("Failed to initialize core trace services:", error);
+    }
 
     // Initialize provider factories (loads settings from disk, migrates legacy files)
     LLMProviderFactory.initialize();
@@ -797,8 +1108,16 @@ if (!gotTheLock) {
               );
             }
           },
+          isUserFocused: () => BrowserWindow.getAllWindows().some((window) => !window.isDestroyed() && window.isFocused()),
           getTriggerService: () => eventTriggerService,
-          getGlobalRoot: () => process.cwd(),
+          getGlobalRoot: () => getUserDataDir(),
+          automationProfileRepo: new AutomationProfileRepository(
+            dbManager.getDatabase(),
+          ),
+          coreTraceService: coreTraceService || undefined,
+          coreMemoryCandidateService: coreMemoryCandidateService || undefined,
+          coreMemoryDistiller: coreMemoryDistiller || undefined,
+          coreLearningPipelineService: coreLearningPipelineService || undefined,
         },
       );
       await subconsciousLoopService.start(agentDaemon);
@@ -1428,12 +1747,6 @@ if (!gotTheLock) {
       const db = dbManager.getDatabase();
       const agentRoleRepo = new AgentRoleRepository(db);
 
-      // Sync any new default agents to existing workspaces
-      const addedAgents = agentRoleRepo.syncNewDefaults();
-      if (addedAgents.length > 0) {
-        logger.info(`Added ${addedAgents.length} new default agent(s)`);
-      }
-
       const mentionRepo = new MentionRepository(db);
       const activityRepo = new ActivityRepository(db);
       const workingStateRepo = new WorkingStateRepository(db);
@@ -1604,6 +1917,13 @@ if (!gotTheLock) {
             isPrivate,
             options,
           ),
+        automationProfileRepo: new AutomationProfileRepository(
+          dbManager.getDatabase(),
+        ),
+        coreTraceService: coreTraceService || undefined,
+        coreMemoryCandidateService: coreMemoryCandidateService || undefined,
+        coreMemoryDistiller: coreMemoryDistiller || undefined,
+        coreLearningPipelineService: coreLearningPipelineService || undefined,
       };
 
       heartbeatService = new HeartbeatService(heartbeatDeps);
@@ -1705,9 +2025,19 @@ if (!gotTheLock) {
 
     // Setup Mission Control IPC handlers
     try {
-      if (!heartbeatService) {
+      if (
+        !heartbeatService ||
+        !coreTraceService ||
+        !coreMemoryDistiller ||
+        !coreFailureMiningService ||
+        !coreFailureClusterService ||
+        !coreEvalCaseService ||
+        !coreHarnessExperimentService ||
+        !coreHarnessExperimentRunner ||
+        !coreLearningsService
+      ) {
         logger.error(
-          "Mission Control handlers skipped: Heartbeat service unavailable",
+          "Mission Control handlers skipped: core automation services unavailable",
         );
       } else {
         const db = dbManager.getDatabase();
@@ -1723,6 +2053,14 @@ if (!gotTheLock) {
           heartbeatService,
           getPlannerService: () => strategicPlannerService,
           getMainWindow: () => mainWindow,
+          coreTraceService,
+          coreMemoryDistiller,
+          coreFailureMiningService,
+          coreFailureClusterService,
+          coreEvalCaseService,
+          coreHarnessExperimentService,
+          coreHarnessExperimentRunner,
+          coreLearningsService,
         });
 
         logger.info("Mission Control services initialized");
@@ -1730,6 +2068,32 @@ if (!gotTheLock) {
     } catch (error) {
       logger.error("Failed to initialize Mission Control:", error);
       // Don't fail app startup if Mission Control init fails
+    }
+
+    try {
+      if (coreMemoryDistiller) {
+        const db = dbManager.getDatabase();
+        const automationProfileRepo = new AutomationProfileRepository(db);
+        const runCoreDistill = async () => {
+          for (const profile of automationProfileRepo.listEnabled()) {
+            try {
+              await coreMemoryDistiller?.runOffline({ profileId: profile.id });
+            } catch (error) {
+              logger.warn("Core memory distillation failed for profile:", {
+                profileId: profile.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+        };
+        void runCoreDistill();
+        coreMemoryDistillTimer = setInterval(() => {
+          void runCoreDistill();
+        }, 6 * 60 * 60 * 1000);
+        coreMemoryDistillTimer.unref();
+      }
+    } catch (error) {
+      logger.error("Failed to schedule core memory distillation:", error);
     }
 
     try {
@@ -1864,7 +2228,7 @@ if (!gotTheLock) {
           try {
             const settings = ControlPlaneSettingsManager.loadSettings();
             if (settings?.token) {
-              logger.info(`Control Plane token: ${settings.token}`);
+              logger.info("Control Plane token present: yes");
             }
           } catch {
             // ignore
