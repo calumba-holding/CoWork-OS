@@ -2549,7 +2549,7 @@ a,
 }
 
 .home-automation-inbox-reader {
-  padding: 18px 20px;
+  padding: 14px 18px;
   border-bottom: 1px solid var(--color-border-subtle);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--color-accent) 6%, transparent), transparent 36%),
@@ -2584,24 +2584,62 @@ a,
 }
 
 .home-automation-inbox-reader-subject {
-  margin-top: 12px;
-  font-size: 18px;
+  margin-top: 10px;
+  font-size: 15px;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.015em;
   color: var(--color-text);
+  line-height: 1.35;
 }
 
 .home-automation-inbox-reader-body {
-  margin-top: 10px;
+  margin-top: 8px;
   color: var(--color-text-secondary);
-  font-size: 14px;
-  line-height: 1.65;
+  font-size: 13px;
+  line-height: 1.55;
+  max-height: 208px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.home-automation-inbox-reader-body > *:first-child {
+  margin-top: 0;
+}
+
+.home-automation-inbox-reader-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.home-automation-inbox-reader-body p,
+.home-automation-inbox-reader-body ul,
+.home-automation-inbox-reader-body ol,
+.home-automation-inbox-reader-body pre,
+.home-automation-inbox-reader-body table,
+.home-automation-inbox-reader-body blockquote,
+.home-automation-inbox-reader-body h1,
+.home-automation-inbox-reader-body h2,
+.home-automation-inbox-reader-body h3,
+.home-automation-inbox-reader-body h4 {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.home-automation-inbox-reader-body h1,
+.home-automation-inbox-reader-body h2,
+.home-automation-inbox-reader-body h3,
+.home-automation-inbox-reader-body h4 {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.home-automation-inbox-reader-body table {
+  font-size: 12px;
 }
 
 .home-automation-inbox-reader-box {
-  margin-top: 14px;
-  padding: 14px 16px;
-  border-radius: 14px;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
   border: 1px solid var(--color-border-subtle);
   background: var(--color-bg-elevated);
 }
@@ -2627,7 +2665,7 @@ a,
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 10px;
-  margin-top: 12px;
+  margin-top: 10px;
   font-size: 11px;
 }
 
@@ -2641,7 +2679,7 @@ a,
 .home-automation-inbox-actions {
   display: flex;
   gap: 10px;
-  margin-top: 14px;
+  margin-top: 10px;
 }
 
 .home-automation-inbox-action {
@@ -16586,9 +16624,21 @@ button {
   font-size: 13px;
   color: var(--color-text-secondary);
   line-height: 1.5;
-  white-space: pre-wrap;
-  max-height: 120px;
+  max-height: 320px;
   overflow-y: auto;
+  padding-right: 8px;
+}
+
+.release-notes-content.markdown-content {
+  overflow-wrap: anywhere;
+}
+
+.release-notes-content.markdown-content > :first-child {
+  margin-top: 0;
+}
+
+.release-notes-content.markdown-content > :last-child {
+  margin-bottom: 0;
 }
 
 .release-link {
@@ -17026,6 +17076,25 @@ button {
   background: var(--color-bg-glass);
   color: var(--color-text-secondary);
   font-size: 13px;
+}
+
+.mc-v2-empty-compact {
+  padding: 12px 0;
+}
+
+.mc-v2-ops-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.mc-v2-ops-heading {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
 }
 
 .mc-v2-error {
