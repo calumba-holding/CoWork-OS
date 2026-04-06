@@ -135,6 +135,7 @@ See [Remote Access](remote-access.md) for connection patterns and [Mission Contr
 
 Automation features are now grouped together in `Settings > Automations`:
 
+- **Core automation**: `Memory + Heartbeat + Subconscious` form one always-on runtime owned by automation profiles
 - **Task Queue**: concurrency, queueing, and background execution policy
 - **Subconscious**: reflective automation with target-scoped evidence, hypotheses, critique, winner selection, backlog, and dispatch
 - **Scheduled Tasks**: recurring time-based task execution
@@ -142,7 +143,14 @@ Automation features are now grouped together in `Settings > Automations`:
 - **Event Triggers**: condition-based actions triggered by channel, webhook, or runtime events
 - **Daily Briefing**: scheduled summaries with workspace, memory, and evolution context
 
-The home dashboard also surfaces recent automation runs so background work is visible without opening Settings.
+Ownership model:
+
+- `Mission Control` is the cockpit around the core runtime
+- `Triggers` are ingress and normalized evidence only
+- `Devices` are execution routing only
+- `Digital Twins` are optional persona presets and are not direct cognition owners
+
+The home dashboard also surfaces recent automation runs so background work is visible without opening Settings. See [Core Automation](core-automation.md).
 
 ### Zero-Human Company Ops
 
@@ -150,8 +158,9 @@ CoWork OS can also be configured as a founder-directed autonomous company shell 
 
 - **Venture operator workspace kit**: initializes `.cowork/` with `COMPANY.md`, `OPERATIONS.md`, `KPIS.md`, `PRIORITIES.md`, and `HEARTBEAT.md`
 - **Companies control surface**: `Settings > Companies` centralizes company creation, company-graph editing, linked operators, and direct handoff into Digital Twins or Mission Control
-- **Operator twins**: venture-oriented personas such as `Founder Office Operator`, `Company Planner`, `Growth Operator`, and `Customer Ops Lead`
-- **Heartbeat v3 follow-up**: operator and dispatcher twins can proactively review recurring checks defined in `HEARTBEAT.md`, while cheap Pulse cycles stay non-LLM until escalation is justified
+- **Operator personas**: venture-oriented templates such as `Founder Office Operator`, `Company Planner`, `Growth Operator`, and `Customer Ops Lead`
+- **Automation profiles**: always-on ownership for the chosen operator roles
+- **Heartbeat v3 follow-up**: automation-profile-backed operators can proactively review recurring checks defined in `HEARTBEAT.md`, while cheap Pulse cycles stay non-LLM until escalation is justified
 - **Strategic planner**: turns company goals, projects, and stalled work into planner-managed issues and optionally auto-dispatches them into tasks
 - **Mission Control ops view**: exposes planner config, planner runs, goals, projects, issues, linked tasks, issue comments, and run events
 - **Autonomy policy integration**: operator roles can carry reusable autonomy presets instead of relying on one global all-or-nothing mode
@@ -171,14 +180,26 @@ See [Zero-Human Company Operations](zero-human-company.md) for architecture, set
 `Subconscious` is the primary reflective automation layer in CoWork OS:
 
 - **Global coordinator, namespaced targets**: one brain ranks work globally while each workflow target keeps its own history, winner, backlog, and dispatch stream
-- **Stable target identities**: supports `global`, `workspace`, `agent_role`, `mailbox_thread`, `scheduled_task`, `event_trigger`, `briefing`, and `code_workspace`
+- **Stable target identities**: supports core-owned targets such as `global`, `workspace`, `agent_role`, `code_workspace`, and `pull_request`
 - **Fixed reflective pipeline**: collect evidence, generate 3-5 hypotheses, critique them, synthesize one winner, write backlog, and dispatch immediately when an executor exists
 - **Durable artifacts plus SQLite indexing**: files are written under `.cowork/subconscious/` and indexed for UI/search/filtering
-- **Automatic downstream execution**: dispatch kinds include `task`, `suggestion`, `scheduled_task`, `briefing`, `event_trigger_update`, `mailbox_automation`, and `code_change_task`
+- **Automatic downstream execution**: dispatch kinds include `task`, `suggestion`, `notify`, and `code_change_task`
 - **Recommendation-only success path**: if no executor mapping exists, the run still completes with a winner, rejected paths, and next-step backlog
 - **No maintainer-only enrollment gate**: safety remains enforced by the existing executor approval and capability policies
 
 See [Subconscious Reflective Loop](subconscious-loop.md) for the architecture and operational guidance.
+
+### Core Harness
+
+The always-on runtime now includes a learning loop around core traces:
+
+- failure mining
+- recurring failure clustering
+- living eval cases
+- gated experiments
+- promoted learnings
+
+Mission Control exposes this through the `Core Harness` view. See [Core Automation](core-automation.md).
 
 ### Reliability Flywheel
 
@@ -262,12 +283,11 @@ The runtime now includes a set of decision and recovery contracts aimed at keepi
 Pre-built AI agent templates that create role-specific digital twins for team members. Each twin absorbs cognitively draining work so the human can stay in deep focus.
 
 - **Built-in templates across engineering, management, product, data, operations, and venture/operator roles**: including Software Engineer, Engineering Manager, Product Manager, Company Planner, Founder Office Operator, Growth Operator, and Customer Ops Lead
-- **Heartbeat v3 default**: twins use cheap deterministic Pulse checks by default and escalate via Dispatch only when signals, cadence, or manual intervention justify visible work
-- **Profile-based execution**: `observer`, `operator`, and `dispatcher` profiles control maintenance eligibility and escalation authority
-- **Proactive task modes**: `pulse_only`, `dispatch`, and `cron_handoff`
+- **Persona-only by default**: activation creates a role preset, not a core runtime participant
+- **Optional automation pairing**: always-on behavior is attached separately through automation profiles in Mission Control
 - **10 cognitive offload categories**: context-switching, status-reporting, information-triage, decision-preparation, documentation, review-preparation, dependency-tracking, compliance-checks, knowledge-curation, routine-automation
 - **4 bundled skills**: `twin-status-report`, `twin-pr-triage`, `twin-meeting-prep`, `twin-decision-prep`
-- **One-click activation**: Browse gallery, customize name, Pulse cadence, heartbeat profile, and proactive tasks, then create
+- **One-click activation**: Browse gallery, customize name, prompt, skills, and company context, then create
 - **Enterprise scaling**: Activate one twin per team member across the organization
 
 Access from **Mission Control** > **Add Digital Twin**. See [Digital Twins](digital-twins.md) and [Heartbeat v3](heartbeat-v3.md) for the current runtime model.
@@ -276,7 +296,7 @@ Access from **Mission Control** > **Add Digital Twin**. See [Digital Twins](digi
 
 ## Plugin Packs & Customize
 
-Role-specific bundles that group skills, agent roles, connectors, and slash commands into installable packs. Each pack targets a job function and can optionally link to a Digital Twin Persona for proactive background work.
+Role-specific bundles that group skills, agent roles, connectors, and slash commands into installable packs. Each pack targets a job function and can optionally link to a Digital Twin Persona as an optional role preset.
 
 - **18 bundled packs**: Engineering, Engineering Management, Product Management, DevOps, Mobile Development, Game Development, Data Analysis, QA & Testing, Sales CRM, Customer Support, Content & Marketing, Technical Writing, Equity Research, Financial Analysis, Investment Banking, Private Equity, Wealth Management, and Geo SEO
 - **55+ built-in skills**: Code review prep, sprint health, feature triage, incident response, prospect research, DCF modeling, LBO analysis, and more
@@ -284,7 +304,7 @@ Role-specific bundles that group skills, agent roles, connectors, and slash comm
 - **Search & filter**: Real-time sidebar search across pack names, descriptions, categories, and skill names
 - **Per-skill toggles**: Enable or disable individual skills within a pack without toggling the entire pack
 - **Persistent state**: Pack and skill toggle states survive app restarts (stored in `pack-states.json`)
-- **Digital Twin integration**: 7 packs link to persona templates that inherit Heartbeat v3 for proactive automation
+- **Digital Twin integration**: 7 packs link to persona templates as optional role presets; always-on automation remains a separate core setup step
 - **Recommended connectors**: Packs display clickable connector chips that navigate to connector settings
 - **Update detection**: Background check against the remote registry with orange dot indicators on packs with newer versions
 - **"Try asking" in chat**: Empty chat state shows randomized prompt suggestions from enabled packs for one-click task creation
@@ -612,9 +632,10 @@ Centralized agent orchestration and monitoring dashboard. Access from **Settings
 
 | Panel | Purpose |
 |-------|---------|
-| **Agents** | Active agents list with status dots, Pulse/Dispatch state, cadence, and manual trigger controls |
+| **Agents** | Active agents list with status dots, Pulse/Dispatch state, automation-profile-backed cadence, and manual trigger controls |
 | **Mission Queue** | 5-column Kanban board (Inbox → Assigned → In Progress → Review → Done) with drag-and-drop |
 | **Feed & Details** | Real-time activity feed with event type and agent filters, plus task detail view with comments and mentions |
+| **Core Harness** | Runtime traces, failure clusters, evals, experiments, and learnings |
 
 **Header controls:** Agent Teams management, Performance Reviews, Standup Report generation, and workspace selector with live stats (active agents, queued tasks, pending mentions).
 
@@ -634,7 +655,7 @@ See [Mission Control](mission-control.md) for the full guide.
 
 ## Digital Twins (Persona Templates)
 
-Create role-specific AI digital twins from pre-built persona templates. Each twin absorbs cognitively draining tasks so the human stays in flow. Accessible via the **"Add Digital Twin"** button in Mission Control's agents panel.
+Create role-specific AI digital twins from pre-built persona templates. Each twin absorbs cognitively draining tasks so the human stays in flow. Twins are optional persona presets, not direct owners of the always-on runtime. Accessible via the **"Add Digital Twin"** button in Mission Control's agents panel.
 
 ### Templates (10 roles, 5 categories)
 
@@ -651,7 +672,6 @@ Create role-specific AI digital twins from pre-built persona templates. Each twi
 |-----------|-------------|
 | **System Prompt** | Role-tailored persona with behavior guidelines |
 | **Capabilities** | Skill tags (code, review, test, analyze, document, etc.) |
-| **Proactive Tasks** | Heartbeat v3 tasks evaluated in Pulse and escalated only when justified |
 | **Cognitive Offload** | Categorized by mental burden relieved: context switching, status reporting, review prep, decision prep, documentation, dependency tracking |
 | **Recommended Skills** | Pre-mapped skills with required/optional flags |
 | **Autonomy Level** | `specialist` (IC roles) or `lead` (management roles) |
@@ -661,10 +681,10 @@ Create role-specific AI digital twins from pre-built persona templates. Each twi
 1. Click **"Add Digital Twin"** in Mission Control agents panel
 2. Browse the **template gallery** — filter by category or search by name/tags
 3. Click a template card to open the **activation dialog**
-4. Customize: twin name, Pulse cadence (5min–4hr), heartbeat profile, and proactive tasks
-5. Click **"Create Digital Twin"** — creates a new AgentRole with Heartbeat v3 defaults
+4. Customize: twin name, prompt/persona settings, and recommended skills
+5. Click **"Create Digital Twin"** — creates a new AgentRole with persona defaults
 
-The twin appears in the agents panel and begins running cheap Pulse checks on the configured cadence, escalating only when Dispatch is warranted.
+The twin appears in the agents panel as a normal role. If you want it to participate in always-on automation, attach a separate automation profile afterwards.
 
 ---
 
