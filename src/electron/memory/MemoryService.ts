@@ -30,6 +30,7 @@ import {
 } from "./local-embedding";
 import { MarkdownMemoryIndexService } from "./MarkdownMemoryIndexService";
 import { MemoryTierService } from "./MemoryTierService";
+import type { CoreMemoryScopeKind } from "../../shared/types";
 
 // Privacy patterns to exclude - matches common sensitive data patterns
 const SENSITIVE_PATTERNS = [
@@ -98,6 +99,11 @@ export interface MemoryCaptureOptions {
   priority?: MemoryCompressionPriority;
   signalFamily?: string;
   batchable?: boolean;
+  profileId?: string;
+  coreTraceId?: string;
+  candidateId?: string;
+  scopeKind?: CoreMemoryScopeKind;
+  scopeRef?: string;
 }
 
 interface CompressionQueueEntry {
@@ -341,6 +347,22 @@ export class MemoryService {
     this.enforceStorageLimit(workspaceId, settings.maxStorageMb);
 
     return memory;
+  }
+
+  static async captureCoreMemory(
+    workspaceId: string,
+    taskId: string | undefined,
+    type: MemoryType,
+    content: string,
+    isPrivate = false,
+    options?: MemoryCaptureOptions,
+  ): Promise<Memory | null> {
+    return this.capture(workspaceId, taskId, type, content, isPrivate, {
+      ...options,
+      origin: options?.origin || "system",
+      batchable: options?.batchable ?? false,
+      priority: options?.priority || "high",
+    });
   }
 
   /**
