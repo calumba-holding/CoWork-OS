@@ -263,4 +263,96 @@ describe("TaskExecutor skill shortlist routing", () => {
       ]),
     );
   });
+
+  it("does not auto-apply a skill from planner tool transcript text embedded in a step", async () => {
+    listSkills.mockReturnValue([
+      {
+        id: "twitter",
+        name: "Twitter / X Writer",
+        description: "Write optimized X content.",
+        enabled: true,
+      },
+    ]);
+
+    const executor = createExecutor("Research AI agent trends.");
+    executor.currentStepId = "step-1";
+
+    const handled = await (
+      TaskExecutor as Any
+    ).prototype.maybeAutoApplyExplicitSkillInvocation.call(
+      executor,
+      [
+        "I'll create an execution plan for researching daily AI agent trends across Reddit, X, and tech news sources.",
+        "<minimax:tool_call>",
+        "task_list_create",
+        'goal: "Complete Daily AI Agent Trends Research"',
+        '{ ActiveForm: "Searching X/Twitter for AI agent trends" }',
+      ].join("\n"),
+      "step",
+      "the skill requested by step",
+    );
+
+    expect(handled).toBe(false);
+    expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
+    expect(executor.appliedSkills).toEqual([]);
+  });
+
+  it("does not auto-apply a skill from unrelated activation and skill words inside pasted content", async () => {
+    listSkills.mockReturnValue([
+      {
+        id: "learn",
+        name: "Learn",
+        description: "Record a durable insight.",
+        enabled: true,
+        parameters: [{ name: "what", type: "string", required: true }],
+      },
+    ]);
+
+    const executor = createExecutor("Summarize this article.");
+
+    const handled = await (
+      TaskExecutor as Any
+    ).prototype.maybeAutoApplyExplicitSkillInvocation.call(
+      executor,
+      [
+        "I need 3-4 diagrams to be added to this article in related places, write me text to image prompts for each so that I can create them one by one.",
+        "",
+        "You can swap providers, change models, or run local models.",
+        "A lot of agent systems learn only from success stories.",
+      ].join("\n"),
+      "task",
+      "the explicitly requested task skill",
+    );
+
+    expect(handled).toBe(false);
+    expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
+    expect(executor.appliedSkills).toEqual([]);
+  });
+
+  it("does not auto-apply explicit skills that require mandatory parameters", async () => {
+    listSkills.mockReturnValue([
+      {
+        id: "learn",
+        name: "Learn",
+        description: "Record a durable insight.",
+        enabled: true,
+        parameters: [{ name: "what", type: "string", required: true }],
+      },
+    ]);
+
+    const executor = createExecutor("Use the learn skill for this request.");
+
+    const handled = await (
+      TaskExecutor as Any
+    ).prototype.maybeAutoApplyExplicitSkillInvocation.call(
+      executor,
+      executor.task.prompt,
+      "task",
+      "the explicitly requested task skill",
+    );
+
+    expect(handled).toBe(false);
+    expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
+    expect(executor.appliedSkills).toEqual([]);
+  });
 });
