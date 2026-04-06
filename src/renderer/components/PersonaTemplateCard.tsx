@@ -16,21 +16,6 @@ interface PersonaTemplateData {
     systemPrompt: string;
     soul: string;
   };
-  heartbeat: {
-    enabled: boolean;
-    intervalMinutes: number;
-    staggerOffset: number;
-  };
-  cognitiveOffload: {
-    primaryCategories: string[];
-    proactiveTasks: Array<{
-      id: string;
-      name: string;
-      description: string;
-      category: string;
-      enabled: boolean;
-    }>;
-  };
   skills: Array<{ skillId: string; reason: string; required: boolean }>;
   tags: string[];
   seniorityRange: string[];
@@ -57,30 +42,14 @@ const CAPABILITY_LABELS: Record<string, string> = {
   product: "Product",
 };
 
-const OFFLOAD_LABELS: Record<string, string> = {
-  "context-switching": "Context Switching",
-  "status-reporting": "Status Reporting",
-  "information-triage": "Info Triage",
-  "decision-preparation": "Decision Prep",
-  documentation: "Documentation",
-  "review-preparation": "Review Prep",
-  "dependency-tracking": "Dep Tracking",
-  "compliance-checks": "Compliance",
-  "knowledge-curation": "Knowledge",
-  "routine-automation": "Automation",
-};
-
 interface PersonaTemplateCardProps {
   template: PersonaTemplateData;
   onActivate: (template: PersonaTemplateData) => void;
 }
 
 export function PersonaTemplateCard({ template, onActivate }: PersonaTemplateCardProps) {
-  const proactiveTasks = template.cognitiveOffload?.proactiveTasks ?? [];
   const capabilities = template.role?.capabilities ?? [];
-  const primaryCategories = template.cognitiveOffload?.primaryCategories ?? [];
   const skills = template.skills ?? [];
-  const enabledProactiveTasks = proactiveTasks.filter((t) => t.enabled);
 
   return (
     <div className="pt-card" onClick={() => onActivate(template)}>
@@ -107,11 +76,7 @@ export function PersonaTemplateCard({ template, onActivate }: PersonaTemplateCar
 
       <div className="pt-card-footer">
         <span className="pt-card-meta">
-          {enabledProactiveTasks.length} tasks &middot; {skills.length} skills &middot;{" "}
-          {primaryCategories
-            .slice(0, 2)
-            .map((c) => OFFLOAD_LABELS[c] || c)
-            .join(", ")}
+          Persona preset &middot; {skills.length} skills &middot; {template.role.autonomyLevel}
         </span>
         <span className="pt-card-action">Activate &rarr;</span>
       </div>
