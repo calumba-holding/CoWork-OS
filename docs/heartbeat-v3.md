@@ -1,6 +1,12 @@
 # Heartbeat V3
 
-Heartbeat v3 is the default heartbeat system in CoWork OS. It replaces the older queue-first heartbeat internals with a two-lane pipeline designed around three goals, in order:
+Heartbeat v3 is the default heartbeat system in CoWork OS. It is one leg of the core automation runtime:
+
+- `Memory`
+- `Heartbeat`
+- `Subconscious`
+
+It replaces the older queue-first heartbeat internals with a two-lane pipeline designed around three goals, in order:
 
 1. Hybrid control
 2. Lower cost
@@ -57,6 +63,22 @@ If a user-facing task is already active for the same workspace, Pulse records a 
 - no repeated low-value wake spam while the user is already working
 
 Manual `wake now` is still an override path and can bypass defer rules.
+
+## Automation Profiles
+
+Heartbeat ownership now lives on `AutomationProfile`, not directly on persona templates.
+
+An automation profile is attached to a generic operator role and stores:
+
+- enabled state
+- cadence
+- stagger offset
+- dispatch cooldown
+- dispatch budget
+- active hours
+- heartbeat profile
+
+Digital Twin activation does not create an automation profile automatically. Twins remain optional persona presets and can later be paired with a separate automation profile if you want an always-on operator.
 
 ## Heartbeat Profiles
 
@@ -120,6 +142,8 @@ Heartbeat v3 centers these operator-facing states:
 
 The healthy state is often quiet. A low-cost series of `idle` or `deferred` pulses is expected.
 
+Mission Control also shows the downstream `Core Harness` that learns from heartbeat and subconscious traces through failure clusters, living evals, experiments, and learnings.
+
 ## Ambient Monitoring
 
 Ambient monitoring is upstream of heartbeat v3. It is not the heartbeat system itself.
@@ -128,20 +152,23 @@ File, git, and other ambient sources emit low-priority mergeable signals that Pu
 
 ## Default Configuration
 
-Heartbeat-enabled agents now use the v3 decision model by default. The main config fields are:
+Automation-profile-backed operators now use the v3 decision model by default. The main config fields are:
 
-- `heartbeatEnabled`
-- `pulseEveryMinutes`
+- `enabled`
+- `cadenceMinutes`
+- `staggerOffsetMinutes`
 - `dispatchCooldownMinutes`
 - `maxDispatchesPerDay`
 - `activeHours`
-- `heartbeatProfile`
+- `profile`
 
 Legacy `heartbeatIntervalMinutes` may still exist as a compatibility fallback, but the v3 fields are the current source of truth for behavior.
 
 ## Practical Reading
 
 - Use Heartbeat v3 when you want cheap continuous awareness with selective escalation.
-- Use `observer` for specialist twins that should stay cheap and quiet.
-- Use `operator` or `dispatcher` for maintenance and company-ops twins that should actively review and escalate.
-- Use cron/runbook handoff for exact-time or heavyweight recurring work instead of stretching the generic heartbeat loop.
+- Use `observer` for roles that should stay cheap and quiet.
+- Use `operator` or `dispatcher` for automation-profile-backed operators that should actively review and escalate.
+- Keep exact-time or device-routed work in scheduler, trigger, or device surfaces instead of stretching heartbeat into a general control plane.
+
+See also [Core Automation](core-automation.md), [Subconscious Reflective Loop](subconscious-loop.md), and [Mission Control](mission-control.md).
