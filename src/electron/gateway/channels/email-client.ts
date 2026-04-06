@@ -241,7 +241,7 @@ function repairUtf8Mojibake(text: string): string {
 }
 
 function decodeMimeBuffer(buffer: Buffer, charset?: string): string {
-  const normalizedCharset = (charset || "utf-8").toLowerCase();
+  const normalizedCharset = (charset || "utf-8").toLowerCase().replace(/^x-/, "");
 
   if (normalizedCharset === "utf-8" || normalizedCharset === "utf8") {
     return repairUtf8Mojibake(buffer.toString("utf8"));
@@ -258,10 +258,18 @@ function decodeMimeBuffer(buffer: Buffer, charset?: string): string {
     return repairUtf8Mojibake(buffer.toString("latin1"));
   }
 
+  // Use TextDecoder for all other charsets (ISO-8859-9/Turkish, Windows-1254,
+  // ISO-8859-2 through ISO-8859-16, CJK encodings, etc.)
   try {
-    return repairUtf8Mojibake(buffer.toString("utf8"));
+    const decoder = new TextDecoder(normalizedCharset);
+    return decoder.decode(buffer);
   } catch {
-    return repairUtf8Mojibake(buffer.toString("latin1"));
+    // Charset not recognised by TextDecoder — fall back to UTF-8, then Latin-1
+    try {
+      return repairUtf8Mojibake(buffer.toString("utf8"));
+    } catch {
+      return repairUtf8Mojibake(buffer.toString("latin1"));
+    }
   }
 }
 
@@ -986,7 +994,8 @@ export class EmailClient extends EventEmitter {
       }
     }
 
-    return repairUtf8Mojibake(body.trim());
+    // 8bit / 7bit / binary — re-decode through charset-aware path
+    return decodeMimeBuffer(Buffer.from(body, "binary"), charset).trim();
   }
 
   /**
