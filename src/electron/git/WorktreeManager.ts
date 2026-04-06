@@ -11,10 +11,12 @@ import {
   MergeResult,
   PullRequestResult,
 } from "../../shared/types";
+import { createLogger } from "../utils/logger";
 
 const WORKTREES_DIR = ".cowork-worktrees";
 const SETTINGS_KEY = "worktree_settings";
 const SECURE_SETTINGS_CATEGORY = "worktree";
+const logger = createLogger("WorktreeManager");
 
 /**
  * High-level worktree lifecycle manager.
@@ -39,29 +41,30 @@ export class WorktreeManager {
    * Load worktree settings from database.
    */
   getSettings(): WorktreeSettings {
-    if (SecureSettingsRepository.isInitialized()) {
-      const stored = SecureSettingsRepository.getInstance().load<WorktreeSettings>(
-        SECURE_SETTINGS_CATEGORY,
-      );
-      if (stored) {
-        return { ...DEFAULT_WORKTREE_SETTINGS, ...stored };
+    const secureRepo = SecureSettingsRepository.isInitialized()
+      ? SecureSettingsRepository.getInstance()
+      : null;
+
+    if (secureRepo) {
+      const stored = secureRepo.loadWithStatus<WorktreeSettings>(SECURE_SETTINGS_CATEGORY);
+      if (stored.status === "success" && stored.data) {
+        return { ...DEFAULT_WORKTREE_SETTINGS, ...stored.data };
+      }
+
+      if (stored.status === "decryption_failed" || stored.status === "checksum_mismatch") {
+        console.warn(
+          `[WorktreeManager] Removing corrupted secure settings for ${SECURE_SETTINGS_CATEGORY} and falling back to legacy/default values.`,
+        );
+        secureRepo.delete(SECURE_SETTINGS_CATEGORY);
       }
     }
 
-    try {
-      const row = this.db
-        .prepare("SELECT value FROM settings WHERE key = ?")
-        .get(SETTINGS_KEY) as { value: string } | undefined;
-      if (row?.value) {
-        const parsed = { ...DEFAULT_WORKTREE_SETTINGS, ...JSON.parse(row.value) };
-        if (SecureSettingsRepository.isInitialized()) {
-          SecureSettingsRepository.getInstance().save(SECURE_SETTINGS_CATEGORY, parsed);
-        }
-        return parsed;
-      }
-    } catch {
-      // Legacy settings table may not exist.
+    const legacy = this.loadLegacySettings();
+    if (legacy) {
+      secureRepo?.save(SECURE_SETTINGS_CATEGORY, legacy);
+      return legacy;
     }
+
     return { ...DEFAULT_WORKTREE_SETTINGS };
   }
 
@@ -79,6 +82,22 @@ export class WorktreeManager {
       stmt.run(SETTINGS_KEY, JSON.stringify(settings));
     } catch {
       // Best-effort legacy fallback only.
+    }
+  }
+
+  private loadLegacySettings(): WorktreeSettings | null {
+    try {
+      const row = this.db
+        .prepare("SELECT value FROM settings WHERE key = ?")
+        .get(SETTINGS_KEY) as { value: string } | undefined;
+      if (!row?.value) {
+        return null;
+      }
+
+      return { ...DEFAULT_WORKTREE_SETTINGS, ...JSON.parse(row.value) };
+    } catch {
+      // Legacy settings table may not exist.
+      return null;
     }
   }
 
@@ -139,7 +158,7 @@ export class WorktreeManager {
     }
 
     // Ensure .cowork-worktrees is in .gitignore
-    await this.ensureGitignore(repoPath);
+    await this.ensureGitignore(repoPath, workspacePath);
 
     // Create the worktree
     await GitService.createWorktree(repoPath, worktreePath, branchName);
@@ -352,8 +371,19 @@ export class WorktreeManager {
    * Uses a session-level cache to avoid redundant file I/O, and writes the
    * full file content atomically to prevent partial writes from concurrent calls.
    */
-  private async ensureGitignore(repoPath: string): Promise<void> {
+  private async ensureGitignore(repoPath: string, workspacePath: string): Promise<void> {
     if (this.gitignoreUpdated.has(repoPath)) return;
+
+    const relativeToWorkspace = path.relative(path.resolve(workspacePath), path.resolve(repoPath));
+    if (
+      relativeToWorkspace.startsWith("..") ||
+      path.isAbsolute(relativeToWorkspace)
+    ) {
+      logger.warn(
+        `Skipping .gitignore update outside workspace boundary: repo=${repoPath} workspace=${workspacePath}`,
+      );
+      return;
+    }
 
     const gitignorePath = path.join(repoPath, ".gitignore");
     const entry = WORKTREES_DIR + "/";
@@ -372,7 +402,7 @@ export class WorktreeManager {
 
       this.gitignoreUpdated.add(repoPath);
     } catch (error) {
-      console.error("[WorktreeManager] Failed to update .gitignore:", error);
+      logger.error("Failed to update .gitignore:", error);
     }
   }
 
