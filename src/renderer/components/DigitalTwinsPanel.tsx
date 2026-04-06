@@ -1,20 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
-import { Plus, Trash2, Power, Edit3, Search, User, Play, Square, Zap } from "lucide-react";
+import { Plus, Trash2, Power, Edit3, Search, User } from "lucide-react";
 import { resolveTwinIcon } from "../utils/twin-icons";
-import type { AgentRoleData, AgentCapability, HeartbeatEvent } from "../../electron/preload";
-import type { Company, HeartbeatStatus } from "../../shared/types";
+import type { AgentRoleData, AgentCapability } from "../../electron/preload";
+import type { Company } from "../../shared/types";
 import { PersonaTemplateGallery } from "./PersonaTemplateGallery";
 import { AgentRoleEditor } from "./AgentRoleEditor";
 
 type AgentRole = AgentRoleData;
-
-interface TwinHeartbeatInfo {
-  agentRoleId: string;
-  heartbeatEnabled: boolean;
-  heartbeatStatus: HeartbeatStatus;
-  lastHeartbeatAt?: number;
-  nextHeartbeatAt?: number;
-}
 
 const COMPANY_OPERATOR_TEMPLATE_NAMES = [
   "Company Planner",
@@ -23,41 +15,8 @@ const COMPANY_OPERATOR_TEMPLATE_NAMES = [
   "Customer Ops Lead",
 ];
 
-function formatRelativeTime(timestamp: number): string {
-  const diff = timestamp - Date.now();
-  if (diff <= 0) return "now";
-  const mins = Math.ceil(diff / 60_000);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  return `${hrs}h ${mins % 60}m`;
-}
-
-function formatLastSeen(timestamp: number): string {
-  const diff = Date.now() - timestamp;
-  if (diff < 60_000) return "just now";
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
-
 interface DigitalTwinsPanelProps {
   initialCompanyId?: string | null;
-}
-
-function buildHeartbeatPolicyInput(role: AgentRole): import("../../shared/types").HeartbeatPolicyInput {
-  return {
-    enabled: role.heartbeatEnabled,
-    cadenceMinutes: role.pulseEveryMinutes || role.heartbeatIntervalMinutes,
-    staggerOffsetMinutes: role.heartbeatStaggerOffset,
-    dispatchCooldownMinutes: role.dispatchCooldownMinutes,
-    maxDispatchesPerDay: role.maxDispatchesPerDay,
-    profile: role.heartbeatProfile,
-    activeHours: role.activeHours ?? null,
-    primaryCategories: role.heartbeatPolicy?.primaryCategories,
-    proactiveTasks: role.heartbeatPolicy?.proactiveTasks,
-  };
 }
 
 export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanelProps) {
@@ -69,8 +28,6 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingRole, setEditingRole] = useState<AgentRole | null>(null);
   const [isCreating, setIsCreating] = useState(false);
-  const [heartbeatInfos, setHeartbeatInfos] = useState<Map<string, TwinHeartbeatInfo>>(new Map());
-  const [triggeringIds, setTriggeringIds] = useState<Set<string>>(new Set());
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
 
   const loadRoles = useCallback(async () => {
@@ -87,23 +44,9 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
     }
   }, [showInactive]);
 
-  const loadHeartbeatStatuses = useCallback(async () => {
-    try {
-      const statuses = await window.electronAPI.getAllHeartbeatStatus();
-      const map = new Map<string, TwinHeartbeatInfo>();
-      for (const s of statuses) {
-        map.set(s.agentRoleId, s);
-      }
-      setHeartbeatInfos(map);
-    } catch (err) {
-      console.error("Failed to load heartbeat statuses:", err);
-    }
-  }, []);
-
   useEffect(() => {
     loadRoles();
-    loadHeartbeatStatuses();
-  }, [loadRoles, loadHeartbeatStatuses]);
+  }, [loadRoles]);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,96 +75,6 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
       cancelled = true;
     };
   }, [initialCompanyId]);
-
-  // Subscribe to live heartbeat events
-  useEffect(() => {
-    const unsub = window.electronAPI.onHeartbeatEvent((event: HeartbeatEvent) => {
-      setHeartbeatInfos((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(event.agentRoleId);
-        if (existing) {
-          next.set(event.agentRoleId, {
-            ...existing,
-            heartbeatStatus:
-              event.type === "started"
-                ? "running"
-                : ["work_found", "no_work", "completed"].includes(event.type)
-                  ? "sleeping"
-                  : event.type === "error"
-                    ? "error"
-                    : existing.heartbeatStatus,
-            lastHeartbeatAt: ["completed", "no_work", "work_found"].includes(event.type)
-              ? event.timestamp
-              : existing.lastHeartbeatAt,
-          });
-        }
-        return next;
-      });
-
-      // Clear triggering state when heartbeat completes
-      if (["completed", "no_work", "work_found", "error"].includes(event.type)) {
-        setTriggeringIds((prev) => {
-          const next = new Set(prev);
-          next.delete(event.agentRoleId);
-          return next;
-        });
-      }
-    });
-    return unsub;
-  }, []);
-
-  const handleStartTwin = async (role: AgentRole) => {
-    try {
-      await window.electronAPI.updateHeartbeatConfig(role.id, { heartbeatEnabled: true });
-      setHeartbeatInfos((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(role.id);
-        next.set(role.id, {
-          agentRoleId: role.id,
-          heartbeatEnabled: true,
-          heartbeatStatus: existing?.heartbeatStatus || "sleeping",
-          lastHeartbeatAt: existing?.lastHeartbeatAt,
-          nextHeartbeatAt: existing?.nextHeartbeatAt,
-        });
-        return next;
-      });
-    } catch  {
-      setError("Failed to start automation");
-    }
-  };
-
-  const handleStopTwin = async (role: AgentRole) => {
-    try {
-      await window.electronAPI.updateHeartbeatConfig(role.id, { heartbeatEnabled: false });
-      setHeartbeatInfos((prev) => {
-        const next = new Map(prev);
-        const existing = next.get(role.id);
-        next.set(role.id, {
-          agentRoleId: role.id,
-          heartbeatEnabled: false,
-          heartbeatStatus: "idle",
-          lastHeartbeatAt: existing?.lastHeartbeatAt,
-        });
-        return next;
-      });
-    } catch  {
-      setError("Failed to stop automation");
-    }
-  };
-
-  const handleWakeTwin = async (role: AgentRole) => {
-    try {
-      setTriggeringIds((prev) => new Set(prev).add(role.id));
-      await window.electronAPI.triggerHeartbeat(role.id);
-    } catch  {
-      setTriggeringIds((prev) => {
-        const next = new Set(prev);
-        next.delete(role.id);
-        return next;
-      });
-      setError("Failed to wake agent");
-    }
-  };
 
   const handleCreateBlank = () => {
     setEditingRole({
@@ -268,7 +121,6 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
           toolRestrictions: role.toolRestrictions,
           autonomyLevel: role.autonomyLevel,
           soul: role.soul,
-          heartbeatPolicy: buildHeartbeatPolicyInput(role),
         });
         setRoles((prev) => [...prev, created]);
       } else {
@@ -292,7 +144,6 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
           sortOrder: role.sortOrder,
           autonomyLevel: role.autonomyLevel,
           soul: role.soul,
-          heartbeatPolicy: buildHeartbeatPolicyInput(role),
         });
         if (updated) {
           setRoles((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
@@ -301,8 +152,8 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
       setEditingRole(null);
       setIsCreating(false);
       setError(null);
-    } catch (err: Any) {
-      setError(err.message || "Failed to save agent");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save agent");
     }
   };
 
@@ -337,8 +188,6 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
   const handleActivated = (agentRole: AgentRoleData) => {
     setRoles((prev) => [...prev, agentRole as AgentRole]);
     setGalleryOpen(false);
-    // Refresh heartbeat statuses to include new twin
-    loadHeartbeatStatuses();
   };
 
   // Filter roles by search query
@@ -355,20 +204,8 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
   const activeRoles = filteredRoles.filter((r) => r.isActive);
   const inactiveRoles = filteredRoles.filter((r) => !r.isActive);
 
-  // Sort active roles: running (Working) first, then sleeping (Active), idle, then stopped
   const sortByActivity = (roles: AgentRole[]) =>
-    [...roles].sort((a, b) => {
-      const rank = (r: AgentRole) => {
-        const hb = heartbeatInfos.get(r.id);
-        if (hb?.heartbeatStatus === "running") return 0;
-        if (hb?.heartbeatEnabled && hb?.heartbeatStatus === "sleeping") return 1;
-        if (hb?.heartbeatEnabled) return 2;
-        return 3;
-      };
-      const diff = rank(a) - rank(b);
-      if (diff !== 0) return diff;
-      return (a.sortOrder ?? 100) - (b.sortOrder ?? 100);
-    });
+    [...roles].sort((a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100));
 
   const companyRoles = sortByActivity(
     selectedCompany ? activeRoles.filter((role) => role.companyId === selectedCompany.id) : [],
@@ -402,12 +239,6 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
   }
 
   const renderTwinCard = (role: AgentRole, isInactive: boolean) => {
-    const hb = heartbeatInfos.get(role.id);
-    const isRunning = hb?.heartbeatStatus === "running";
-    const isEnabled = hb?.heartbeatEnabled ?? false;
-    const isSleeping = hb?.heartbeatStatus === "sleeping";
-    const isTriggering = triggeringIds.has(role.id);
-
     return (
       <div key={role.id} className={`dt-card ${isInactive ? "dt-card-inactive" : ""}`}>
         <div className="dt-card-header">
@@ -434,18 +265,8 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
           </div>
           {!isInactive && (
             <div className="dt-status-area">
-              <span
-                className={`dt-status-dot ${isRunning ? "dt-status-running" : isEnabled && isSleeping ? "dt-status-sleeping" : isEnabled ? "dt-status-idle" : "dt-status-stopped"}`}
-              />
-              <span className="dt-status-label">
-                {isRunning
-                  ? "Working"
-                  : isEnabled && isSleeping
-                    ? "Active"
-                    : isEnabled
-                      ? "Idle"
-                      : "Stopped"}
-              </span>
+              <span className="dt-status-dot dt-status-idle" />
+              <span className="dt-status-label">Preset</span>
             </div>
           )}
         </div>
@@ -473,58 +294,8 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
           </div>
         )}
 
-        {/* Heartbeat info line */}
-        {!isInactive && hb && (
-          <div className="dt-heartbeat-info">
-            {hb.lastHeartbeatAt && (
-              <span className="dt-hb-detail">Last: {formatLastSeen(hb.lastHeartbeatAt)}</span>
-            )}
-            {isEnabled && hb.nextHeartbeatAt && (
-              <span className="dt-hb-detail">
-                Next: {formatRelativeTime(hb.nextHeartbeatAt)}
-              </span>
-            )}
-          </div>
-        )}
-
         {/* Actions row */}
         <div className="dt-card-actions">
-          {/* Start / Stop toggle */}
-          {!isInactive && (
-            <>
-              {isEnabled ? (
-                <button
-                  className="dt-card-action dt-action-stop"
-                  onClick={() => handleStopTwin(role)}
-                  title="Stop background automation"
-                >
-                  <Square size={12} strokeWidth={2} />
-                  <span>Stop</span>
-                </button>
-              ) : (
-                <button
-                  className="dt-card-action dt-action-start"
-                  onClick={() => handleStartTwin(role)}
-                  title="Start background automation"
-                >
-                  <Play size={12} strokeWidth={2} />
-                  <span>Start</span>
-                </button>
-              )}
-
-              {/* Wake now */}
-              <button
-                className="dt-card-action dt-action-wake"
-                onClick={() => handleWakeTwin(role)}
-                disabled={isTriggering || isRunning}
-                title="Run background review now"
-              >
-                <Zap size={12} strokeWidth={2} />
-                <span>{isTriggering ? "Waking..." : "Wake"}</span>
-              </button>
-            </>
-          )}
-
           <div className="dt-action-spacer" />
 
           <button className="dt-card-action" onClick={() => handleEdit(role)} title="Edit">
@@ -574,16 +345,16 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
           </div>
         </div>
         <p className="dt-subtitle">
-          Create agent personas from templates or build custom agents. Each persona can run
-          background reviews with an explicit automation policy.
+          Create digital twins as optional persona presets or build custom agents. Core automation
+          lives in Mission Control and is intentionally separated from Twins.
         </p>
         {selectedCompany ? (
           <div className="dt-company-context">
             <div className="dt-company-context-copy">
               <div className="dt-company-context-title">Company context: {selectedCompany.name}</div>
               <div className="dt-company-context-text">
-                Start with operator personas for this company, then enable automation so they can
-                participate in the operating loop.
+                Start with operator personas for this company, then configure core automation
+                separately in Mission Control if you want a generic operator to own it.
               </div>
               <div className="dt-company-context-tags">
                 {COMPANY_OPERATOR_TEMPLATE_NAMES.map((name) => (
@@ -594,7 +365,7 @@ export function DigitalTwinsPanel({ initialCompanyId = null }: DigitalTwinsPanel
               </div>
             </div>
             <button className="dt-btn dt-btn-primary" onClick={() => setGalleryOpen(true)}>
-              <Zap size={14} strokeWidth={1.5} />
+              <User size={14} strokeWidth={1.5} />
               Operator Templates
             </button>
           </div>
