@@ -6116,6 +6116,7 @@ export const IPC_CHANNELS = {
   DAILY_BRIEFING_GENERATE: "dailyBriefing:generate",
   // Proactive Suggestions
   SUGGESTIONS_LIST: "suggestions:list",
+  SUGGESTIONS_LIST_FOR_WORKSPACES: "suggestions:listForWorkspaces",
   SUGGESTIONS_DISMISS: "suggestions:dismiss",
   SUGGESTIONS_ACT: "suggestions:act",
 

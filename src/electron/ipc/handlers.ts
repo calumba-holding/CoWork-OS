@@ -738,6 +738,14 @@ rateLimiter.configure(
   RATE_LIMIT_CONFIGS.standard,
 );
 rateLimiter.configure(
+  IPC_CHANNELS.SUGGESTIONS_LIST,
+  RATE_LIMIT_CONFIGS.frequent,
+);
+rateLimiter.configure(
+  IPC_CHANNELS.SUGGESTIONS_LIST_FOR_WORKSPACES,
+  RATE_LIMIT_CONFIGS.frequent,
+);
+rateLimiter.configure(
   IPC_CHANNELS.LLM_SAVE_SETTINGS,
   RATE_LIMIT_CONFIGS.limited,
 );
@@ -7016,6 +7024,31 @@ export async function setupIpcHandlers(
       const { ProactiveSuggestionsService } =
         await import("../agent/ProactiveSuggestionsService");
       return ProactiveSuggestionsService.listActive(validatedWorkspaceId);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.SUGGESTIONS_LIST_FOR_WORKSPACES,
+    async (_, workspaceIds: unknown) => {
+      checkRateLimit(IPC_CHANNELS.SUGGESTIONS_LIST_FOR_WORKSPACES);
+      const normalizedWorkspaceIds = validateInput(
+        z.array(WorkspaceIdSchema),
+        workspaceIds,
+        "workspace IDs",
+      );
+      const uniqueWorkspaceIds = [...new Set(normalizedWorkspaceIds)];
+      if (uniqueWorkspaceIds.length === 0) return [];
+      const { ProactiveSuggestionsService } =
+        await import("../agent/ProactiveSuggestionsService");
+      const allSuggestions = ProactiveSuggestionsService.listActive(
+        uniqueWorkspaceIds[0],
+        undefined,
+        uniqueWorkspaceIds,
+      );
+      return uniqueWorkspaceIds.map((workspaceId) => ({
+        workspaceId,
+        suggestions: allSuggestions.filter((suggestion) => suggestion.workspaceId === workspaceId),
+      }));
     },
   );
 

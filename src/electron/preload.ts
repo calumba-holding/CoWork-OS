@@ -1152,6 +1152,7 @@ const LEGACY_IPC_CHANNELS_MIRROR = {
   DAILY_BRIEFING_GENERATE: "dailyBriefing:generate",
   // Proactive Suggestions
   SUGGESTIONS_LIST: "suggestions:list",
+  SUGGESTIONS_LIST_FOR_WORKSPACES: "suggestions:listForWorkspaces",
   SUGGESTIONS_DISMISS: "suggestions:dismiss",
   SUGGESTIONS_ACT: "suggestions:act",
 
@@ -4492,6 +4493,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Proactive Suggestions
   listSuggestions: (workspaceId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.SUGGESTIONS_LIST, workspaceId),
+  listSuggestionsForWorkspaces: (workspaceIds: string[]) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUGGESTIONS_LIST_FOR_WORKSPACES, workspaceIds),
   dismissSuggestion: (workspaceId: string, suggestionId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.SUGGESTIONS_DISMISS, workspaceId, suggestionId),
   actOnSuggestion: (workspaceId: string, suggestionId: string) =>
@@ -6801,6 +6804,9 @@ export interface ElectronAPI {
 
   // Proactive Suggestions
   listSuggestions: (workspaceId: string) => Promise<Any[]>;
+  listSuggestionsForWorkspaces: (
+    workspaceIds: string[],
+  ) => Promise<Array<{ workspaceId: string; suggestions: Any[] }>>;
   dismissSuggestion: (workspaceId: string, suggestionId: string) => Promise<{ success: boolean }>;
   actOnSuggestion: (
     workspaceId: string,

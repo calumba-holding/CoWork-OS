@@ -148,12 +148,36 @@ describe("XMentionBridgeService", () => {
 
     service.start();
     await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
 
     expect(getXMentionTriggerStatusStore().snapshot()).toMatchObject({
       mode: "bridge",
       running: false,
       lastError: expect.stringContaining("Missing auth_token"),
     });
+    expect(runBirdCommandMock).toHaveBeenCalledTimes(1);
+
+    service.stop();
+  });
+
+  it("resumes polling after auth is refreshed and triggerNow is invoked", async () => {
+    runBirdCommandMock
+      .mockRejectedValueOnce(
+        new Error("Command failed: bird --cookie-source chrome: Missing auth_token"),
+      )
+      .mockResolvedValueOnce({ data: [] });
+
+    const service = new XMentionBridgeService({} as Any, {
+      isNativeXChannelEnabled: () => false,
+    });
+
+    service.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runBirdCommandMock).toHaveBeenCalledTimes(1);
+
+    service.triggerNow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runBirdCommandMock).toHaveBeenCalledTimes(2);
 
     service.stop();
   });

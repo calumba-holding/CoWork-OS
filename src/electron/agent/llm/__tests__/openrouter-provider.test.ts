@@ -510,4 +510,138 @@ describe("OpenRouterProvider attribution headers", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("caches runtime image-input 404s and fast-fails subsequent image requests for the same model", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/models?output_modalities=all")) {
+        return {
+          ok: false,
+          status: 500,
+          statusText: "Server Error",
+          json: vi.fn().mockResolvedValue({}),
+        } as unknown as Response;
+      }
+
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      expect(body.model).toBe("openai/gpt-4o");
+      return {
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        json: vi.fn().mockResolvedValue({
+          error: { message: "No endpoints found that support image input" },
+        }),
+      } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = new OpenRouterProvider({
+      type: "openrouter",
+      model: "openai/gpt-4o",
+      openrouterApiKey: "test-key",
+    });
+
+    const request = {
+      model: "openai/gpt-4o",
+      maxTokens: 32,
+      system: "",
+      messages: [
+        {
+          role: "user" as const,
+          content: [
+            { type: "text" as const, text: "Describe the image." },
+            { type: "image" as const, mimeType: "image/png", data: "AA==" },
+          ],
+        },
+      ],
+    };
+
+    await expect(provider.createMessage(request)).rejects.toMatchObject({
+      status: 404,
+      retryable: true,
+      providerMessage: "No endpoints found that support image input",
+    });
+
+    await expect(provider.createMessage(request)).rejects.toMatchObject({
+      status: 404,
+      retryable: true,
+      providerMessage: "No endpoints found that support image input for model openai/gpt-4o",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not emit provider error logs for retryable OpenRouter route failures", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        json: vi.fn().mockResolvedValue({
+          error: {
+            message: "Provider returned error",
+          },
+        }),
+      } as unknown as Response),
+    );
+
+    const provider = new OpenRouterProvider({
+      type: "openrouter",
+      model: "minimax/minimax-m2.5:free",
+      openrouterApiKey: "test-key",
+    });
+
+    await expect(
+      provider.createMessage({
+        model: "minimax/minimax-m2.5:free",
+        maxTokens: 32,
+        system: "",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      retryable: true,
+    });
+
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("still emits provider error logs for non-retryable OpenRouter failures", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        statusText: "Unauthorized",
+        json: vi.fn().mockResolvedValue({
+          error: {
+            message: "Invalid API key",
+          },
+        }),
+      } as unknown as Response),
+    );
+
+    const provider = new OpenRouterProvider({
+      type: "openrouter",
+      model: "openrouter/free",
+      openrouterApiKey: "bad-key",
+    });
+
+    await expect(
+      provider.createMessage({
+        model: "openrouter/free",
+        maxTokens: 32,
+        system: "",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    ).rejects.toMatchObject({
+      status: 401,
+      retryable: false,
+    });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
 });

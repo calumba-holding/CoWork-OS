@@ -19,6 +19,7 @@ export class XMentionBridgeService {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private pollInFlight = false;
+  private pausedForAuth = false;
   private consecutiveFailures = 0;
   private readonly ingress: HookAgentIngress;
   private readonly statusStore = getXMentionTriggerStatusStore();
@@ -43,12 +44,14 @@ export class XMentionBridgeService {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.pausedForAuth = false;
     console.log("[X Mentions] Bridge service started");
     this.schedulePoll(0);
   }
 
   stop(): void {
     this.running = false;
+    this.pausedForAuth = false;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -59,6 +62,7 @@ export class XMentionBridgeService {
 
   triggerNow(): void {
     if (!this.running) return;
+    this.pausedForAuth = false;
     this.schedulePoll(0);
   }
 
@@ -161,15 +165,23 @@ export class XMentionBridgeService {
     } catch (error) {
       const failure = classifyXMentionFailure(error);
       this.consecutiveFailures += 1;
-      nextDelayMs = this.getFailureBackoffMs(failure.code, nextDelayMs);
+      if (failure.code === "auth") {
+        this.pausedForAuth = true;
+      } else {
+        nextDelayMs = this.getFailureBackoffMs(failure.code, nextDelayMs);
+      }
       this.statusStore.setMode("bridge", false);
       console.warn(
-        `[X Mentions] Bridge poll failed (${failure.code}). Next poll in ${Math.round(nextDelayMs / 1000)}s: ${failure.message}`,
+        failure.code === "auth"
+          ? `[X Mentions] Bridge poll failed (${failure.code}). Polling paused until settings are refreshed: ${failure.message}`
+          : `[X Mentions] Bridge poll failed (${failure.code}). Next poll in ${Math.round(nextDelayMs / 1000)}s: ${failure.message}`,
       );
       this.statusStore.markError(failure.message);
     } finally {
       this.pollInFlight = false;
-      this.schedulePoll(nextDelayMs);
+      if (!this.pausedForAuth) {
+        this.schedulePoll(nextDelayMs);
+      }
     }
   }
 }

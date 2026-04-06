@@ -83,10 +83,21 @@ export class OpenRouterProvider implements LLMProvider {
         throw new Error("Request cancelled");
       }
 
-      logger.error("API error:", {
-        message: error.message,
-        status: error.status,
-      });
+      if (this.shouldDemoteErrorLog(error)) {
+        logger.debug("Retryable route error:", {
+          model,
+          message: error.message,
+          status: error.status,
+          providerMessage: error.providerMessage,
+        });
+      } else {
+        logger.error("API error:", {
+          model,
+          message: error.message,
+          status: error.status,
+          providerMessage: error.providerMessage,
+        });
+      }
       throw error;
     }
   }
@@ -150,6 +161,20 @@ export class OpenRouterProvider implements LLMProvider {
       (normalized.includes("requires moderation on openinference") ||
         (normalized.includes("openinference") && normalized.includes("input was flagged")))
     );
+  }
+
+  private shouldDemoteErrorLog(error: Any): boolean {
+    if (error?.retryable === true) {
+      return true;
+    }
+
+    const status = Number(error?.status);
+    if ([408, 429, 500, 502, 503, 504].includes(status)) {
+      return true;
+    }
+
+    const providerMessage = String(error?.providerMessage || "").toLowerCase();
+    return this.isImageInputUnsupportedError(status, providerMessage);
   }
 
   private convertMessages(
@@ -293,6 +318,9 @@ export class OpenRouterProvider implements LLMProvider {
         error?: { message?: string };
       };
       const detail = errorData.error?.message || response.statusText;
+      if (this.isImageInputUnsupportedError(response.status, detail)) {
+        this.modelImageSupport.set(params.model, false);
+      }
       const fullMessage =
         `OpenRouter API error: ${response.status} ${response.statusText}` +
         (detail ? ` - ${detail}` : "");

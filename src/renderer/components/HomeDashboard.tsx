@@ -446,16 +446,11 @@ export function HomeDashboard({
           : []
         ).filter((item: CompanionNotification) => item.type === "companion_suggestion");
 
-        const suggestionResults = await Promise.all(
-          visibleWorkspaces.map(async (item) => {
-            try {
-              const list = await window.electronAPI.listSuggestions(item.id);
-              return { workspaceId: item.id, suggestions: Array.isArray(list) ? list : [] };
-            } catch {
-              return { workspaceId: item.id, suggestions: [] };
-            }
-          }),
-        );
+        const suggestionResults = visibleWorkspaces.length
+          ? await window.electronAPI.listSuggestionsForWorkspaces(
+              visibleWorkspaces.map((item) => item.id),
+            )
+          : [];
 
         if (cancelled) return;
 
