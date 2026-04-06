@@ -17,6 +17,9 @@ import {
   normalizeSystemBlocks,
 } from "./prompt-cache";
 import { buildOpenAICompatibleSystemMessages } from "./openai-compatible";
+import { createLogger } from "../../utils/logger";
+
+const logger = createLogger("OpenRouter");
 
 /**
  * OpenRouter API provider implementation
@@ -27,6 +30,9 @@ export class OpenRouterProvider implements LLMProvider {
   private apiKey: string;
   private baseUrl: string;
   private defaultModel: string;
+  private modelImageSupport = new Map<string, boolean>();
+  private modelCatalogLoaded = false;
+  private modelCatalogLoadPromise: Promise<void> | null = null;
 
   constructor(config: LLMProviderConfig) {
     const apiKey = config.openrouterApiKey;
@@ -42,66 +48,42 @@ export class OpenRouterProvider implements LLMProvider {
   }
 
   async createMessage(request: LLMRequest): Promise<LLMResponse> {
+    const model = request.model || this.defaultModel;
     const promptCache =
       request.promptCache?.mode === "anthropic_auto"
         ? { ...request.promptCache, mode: "anthropic_explicit" as const }
         : request.promptCache?.mode === "disabled"
           ? undefined
           : request.promptCache;
-    const messages = this.convertMessages(request, promptCache);
     const tools = request.tools ? this.convertTools(request.tools) : undefined;
+    const hasInlineImages = this.hasInlineImages(request.messages);
+    if (hasInlineImages) {
+      const supportsImages = await this.modelSupportsImageInput(model);
+      if (!supportsImages) {
+        throw this.buildImageInputUnsupportedError(model);
+      }
+    }
+    const messages = this.convertMessages(request, promptCache);
 
     try {
-      console.log(`[OpenRouter] Calling API with model: ${request.model || this.defaultModel}`);
-
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-          ...getOpenRouterAttributionHeaders(),
-        },
-        body: JSON.stringify({
-          model: request.model || this.defaultModel,
-          messages,
-          max_tokens: request.maxTokens,
-          ...(tools && tools.length > 0
-            ? {
-                tools,
-                tool_choice: request.toolChoice || "auto",
-              }
-            : {}),
-        }),
-        // Pass abort signal to allow cancellation
+      logger.debug(`Calling API with model: ${model}`);
+      const data = await this.sendChatCompletion({
+        model,
+        messages,
+        maxTokens: request.maxTokens,
+        tools,
+        toolChoice: request.toolChoice,
         signal: request.signal,
       });
-
-      if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as {
-          error?: { message?: string };
-        };
-        const detail = errorData.error?.message || response.statusText;
-        const fullMessage =
-          `OpenRouter API error: ${response.status} ${response.statusText}` +
-          (detail ? ` - ${detail}` : "");
-        const err = new Error(fullMessage) as LLMProviderError;
-        err.status = response.status;
-        err.providerMessage = detail || undefined;
-        err.errorData = errorData;
-        err.retryable = this.isRetryableOpenRouterError(response.status, detail);
-        throw err;
-      }
-
-      const data = (await response.json()) as Any;
       return this.convertResponse(data);
     } catch (error: Any) {
       // Handle abort errors gracefully
       if (error.name === "AbortError" || error.message?.includes("aborted")) {
-        console.log(`[OpenRouter] Request aborted`);
+        logger.info("Request aborted");
         throw new Error("Request cancelled");
       }
 
-      console.error(`[OpenRouter] API error:`, {
+      logger.error("API error:", {
         message: error.message,
         status: error.status,
       });
@@ -147,6 +129,17 @@ export class OpenRouterProvider implements LLMProvider {
   private isRetryableOpenRouterError(status: number, detail: string): boolean {
     const normalized = String(detail || "").toLowerCase();
     if (status === 429 || /rate limit|too many requests|free-models-per-min/i.test(normalized)) {
+      return true;
+    }
+
+    // OpenRouter sometimes returns a generic 400 when the upstream route fails
+    // even though the request shape itself is valid. Treat that as a route-level
+    // incompatibility so the executor can advance to the next fallback model.
+    if (status === 400 && normalized === "provider returned error") {
+      return true;
+    }
+
+    if (this.isImageInputUnsupportedError(status, normalized)) {
       return true;
     }
 
@@ -259,6 +252,138 @@ export class OpenRouterProvider implements LLMProvider {
     ];
   }
 
+  private async sendChatCompletion(params: {
+    model: string;
+    messages: Array<{ role: string; content: Any; tool_call_id?: string }>;
+    maxTokens: number;
+    tools?: Array<{
+      type: "function";
+      function: {
+        name: string;
+        description: string;
+        parameters: Any;
+      };
+    }>;
+    toolChoice?: LLMRequest["toolChoice"];
+    signal?: AbortSignal;
+  }): Promise<Any> {
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+        ...getOpenRouterAttributionHeaders(),
+      },
+      body: JSON.stringify({
+        model: params.model,
+        messages: params.messages,
+        max_tokens: params.maxTokens,
+        ...(params.tools && params.tools.length > 0
+          ? {
+              tools: params.tools,
+              tool_choice: params.toolChoice || "auto",
+            }
+          : {}),
+      }),
+      signal: params.signal,
+    });
+
+    if (!response.ok) {
+      const errorData = (await response.json().catch(() => ({}))) as {
+        error?: { message?: string };
+      };
+      const detail = errorData.error?.message || response.statusText;
+      const fullMessage =
+        `OpenRouter API error: ${response.status} ${response.statusText}` +
+        (detail ? ` - ${detail}` : "");
+      const err = new Error(fullMessage) as LLMProviderError;
+      err.status = response.status;
+      err.providerMessage = detail || undefined;
+      err.errorData = errorData;
+      err.retryable = this.isRetryableOpenRouterError(response.status, detail);
+      throw err;
+    }
+
+    return (await response.json()) as Any;
+  }
+
+  private hasInlineImages(messages: LLMRequest["messages"]): boolean {
+    return messages.some((message) =>
+      Array.isArray(message.content) &&
+      message.content.some((item) => item.type === "image"),
+    );
+  }
+
+  private isImageInputUnsupportedError(status: number | undefined, detail: string): boolean {
+    return (
+      status === 404 &&
+      String(detail || "").toLowerCase().includes("no endpoints found that support image input")
+    );
+  }
+
+  private buildImageInputUnsupportedError(model: string): LLMProviderError {
+    const detail = `No endpoints found that support image input for model ${model}`;
+    const err = new Error(`OpenRouter API error: 404 Not Found - ${detail}`) as LLMProviderError;
+    err.status = 404;
+    err.providerMessage = detail;
+    err.errorData = { error: { message: detail } };
+    err.retryable = true;
+    return err;
+  }
+
+  private async modelSupportsImageInput(model: string): Promise<boolean> {
+    const cached = this.modelImageSupport.get(model);
+    if (cached != null) {
+      return cached;
+    }
+
+    await this.loadModelCatalog();
+    const resolved = this.modelImageSupport.get(model);
+    return resolved ?? true;
+  }
+
+  private async loadModelCatalog(): Promise<void> {
+    if (this.modelCatalogLoaded) {
+      return;
+    }
+    if (this.modelCatalogLoadPromise) {
+      await this.modelCatalogLoadPromise;
+      return;
+    }
+
+    this.modelCatalogLoadPromise = (async () => {
+      try {
+        const response = await fetch(`${this.baseUrl}/models?output_modalities=all`, {
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            ...getOpenRouterAttributionHeaders(),
+          },
+        });
+
+        if (!response.ok) {
+          return;
+        }
+
+        const data = (await response.json()) as { data?: Any[] };
+        for (const model of data.data || []) {
+          const modelId = typeof model?.id === "string" ? model.id : "";
+          if (!modelId) continue;
+          const inputModalities = Array.isArray(model?.architecture?.input_modalities)
+            ? model.architecture.input_modalities
+            : [];
+          this.modelImageSupport.set(modelId, inputModalities.includes("image"));
+        }
+      } catch (error) {
+        logger.warn("Failed to fetch OpenRouter model capabilities:", error);
+      } finally {
+        this.modelCatalogLoaded = true;
+        this.modelCatalogLoadPromise = null;
+      }
+    })();
+
+    await this.modelCatalogLoadPromise;
+  }
+
   private convertTools(tools: LLMTool[]): Array<{
     type: "function";
     function: {
@@ -309,7 +434,10 @@ export class OpenRouterProvider implements LLMProvider {
                 ? JSON.parse(toolCall.function.arguments || "{}")
                 : (toolCall.function.arguments as Record<string, Any>) || {};
           } catch (err) {
-            console.error("Failed to parse OpenRouter tool arguments:", toolCall.function.arguments, err);
+            logger.error(
+              `Failed to parse OpenRouter tool arguments for "${toolCall.function.name}":`,
+              err,
+            );
             throw new Error(
               `OpenRouter tool call "${toolCall.function.name}" has malformed arguments: ${err instanceof Error ? err.message : String(err)}`,
             );
@@ -380,7 +508,7 @@ export class OpenRouterProvider implements LLMProvider {
         context_length: model.context_length || 0,
       }));
     } catch (error) {
-      console.error("Failed to fetch OpenRouter models:", error);
+      logger.error("Failed to fetch OpenRouter models:", error);
       return [];
     }
   }
