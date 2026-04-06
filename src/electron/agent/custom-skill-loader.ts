@@ -25,6 +25,7 @@ import { getSkillRegistry as _getSkillRegistry } from "./skill-registry";
 import { InputSanitizer } from "./security";
 import { getUserDataDir } from "../utils/user-data-dir";
 import { createLogger } from "../utils/logger";
+import { matchesExplicitSkillInvocationPhrase } from "./skill-invocation-utils";
 
 const SKILLS_FOLDER_NAME = "skills";
 const SKILL_FILE_EXTENSION = ".json";
@@ -685,23 +686,23 @@ export class CustomSkillLoader {
     return skill.id === "codex-cli";
   }
 
-  private matchesExplicitSkillInvocation(skill: CustomSkill, query: string): boolean {
+  private matchesExplicitSkillInvocationTarget(query: string, phrase: string): boolean {
     const normalizedQuery = this.normalizeRoutingPhrase(this.sanitizeRoutingQuery(query));
-    if (!normalizedQuery) return false;
+    const normalizedPhrase = this.normalizeRoutingPhrase(phrase);
+    return matchesExplicitSkillInvocationPhrase(
+      normalizedQuery,
+      normalizedPhrase,
+      (segment) => this.escapeRegExp(segment),
+    );
+  }
 
-    const activationCue =
-      /\b(?:use|run|call|invoke|activate|apply|launch|start|enable|turn on|work on|help with|help me with)\b/;
-    const skillCue = /\bskill\b/;
-    if (!activationCue.test(normalizedQuery) && !skillCue.test(normalizedQuery)) {
-      return false;
-    }
-
+  private matchesExplicitSkillInvocation(skill: CustomSkill, query: string): boolean {
     const skillId = String(skill.id || "").trim();
     const skillName = String(skill.name || "").trim();
 
     return (
-      (skillId.length > 0 && this.queryContainsRoutingPhrase(normalizedQuery, skillId)) ||
-      (skillName.length > 0 && this.queryContainsRoutingPhrase(normalizedQuery, skillName))
+      (skillId.length > 0 && this.matchesExplicitSkillInvocationTarget(query, skillId)) ||
+      (skillName.length > 0 && this.matchesExplicitSkillInvocationTarget(query, skillName))
     );
   }
 
