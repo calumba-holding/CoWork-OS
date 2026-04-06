@@ -20,6 +20,7 @@ export class SubconsciousSettingsManager {
           settings = {
             ...DEFAULT_SUBCONSCIOUS_SETTINGS,
             ...stored,
+            durableTargetKinds: stored.durableTargetKinds || DEFAULT_SUBCONSCIOUS_SETTINGS.durableTargetKinds,
             phaseModels: {
               ...DEFAULT_SUBCONSCIOUS_SETTINGS.phaseModels,
               ...(stored.phaseModels || {}),
@@ -31,6 +32,10 @@ export class SubconsciousSettingsManager {
                 ...DEFAULT_SUBCONSCIOUS_SETTINGS.dispatchDefaults.defaultKinds,
                 ...(stored.dispatchDefaults?.defaultKinds || {}),
               },
+            },
+            notificationPolicy: {
+              ...DEFAULT_SUBCONSCIOUS_SETTINGS.notificationPolicy,
+              ...(stored.notificationPolicy || {}),
             },
             perExecutorPolicy: {
               ...DEFAULT_SUBCONSCIOUS_SETTINGS.perExecutorPolicy,
@@ -74,6 +79,23 @@ export class SubconsciousSettingsManager {
               SUBCONSCIOUS_TARGET_KINDS.includes(kind as (typeof SUBCONSCIOUS_TARGET_KINDS)[number]),
             )
           : [...SUBCONSCIOUS_TARGET_KINDS],
+      durableTargetKinds:
+        Array.isArray(input.durableTargetKinds)
+          ? input.durableTargetKinds.filter((kind): kind is (typeof SUBCONSCIOUS_TARGET_KINDS)[number] =>
+              SUBCONSCIOUS_TARGET_KINDS.includes(kind as (typeof SUBCONSCIOUS_TARGET_KINDS)[number]),
+            )
+          : [...DEFAULT_SUBCONSCIOUS_SETTINGS.durableTargetKinds],
+      catchUpOnRestart: input.catchUpOnRestart !== false,
+      journalingEnabled: input.journalingEnabled !== false,
+      dreamsEnabled: input.dreamsEnabled !== false,
+      dreamCadenceHours: Math.min(Math.max(Math.round(input.dreamCadenceHours || 24), 1), 24 * 30),
+      autonomyMode:
+        input.autonomyMode === "recommendation_first" || input.autonomyMode === "strong_autonomy"
+          ? input.autonomyMode
+          : "balanced_autopilot",
+      trustedTargetKeys: Array.isArray(input.trustedTargetKeys)
+        ? input.trustedTargetKeys.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : [],
       phaseModels: {
         collectingEvidence:
           typeof input.phaseModels?.collectingEvidence === "string"
@@ -101,17 +123,18 @@ export class SubconsciousSettingsManager {
       },
       artifactRetentionDays: Math.min(Math.max(Math.round(input.artifactRetentionDays || 30), 1), 365),
       maxHypothesesPerRun: Math.min(Math.max(Math.round(input.maxHypothesesPerRun || 4), 3), 5),
+      notificationPolicy: {
+        inputNeeded: input.notificationPolicy?.inputNeeded !== false,
+        importantActionTaken: input.notificationPolicy?.importantActionTaken !== false,
+        completedWhileAway: input.notificationPolicy?.completedWhileAway !== false,
+        throttleMinutes: Math.min(Math.max(Math.round(input.notificationPolicy?.throttleMinutes || 30), 0), 24 * 60),
+        quietHoursStart: Math.min(Math.max(Math.round(input.notificationPolicy?.quietHoursStart ?? 22), 0), 23),
+        quietHoursEnd: Math.min(Math.max(Math.round(input.notificationPolicy?.quietHoursEnd ?? 8), 0), 23),
+      },
       perExecutorPolicy: {
         task: { enabled: input.perExecutorPolicy?.task?.enabled !== false },
         suggestion: { enabled: input.perExecutorPolicy?.suggestion?.enabled !== false },
-        scheduledTask: { enabled: input.perExecutorPolicy?.scheduledTask?.enabled !== false },
-        briefing: { enabled: input.perExecutorPolicy?.briefing?.enabled !== false },
-        eventTriggerUpdate: {
-          enabled: input.perExecutorPolicy?.eventTriggerUpdate?.enabled !== false,
-        },
-        mailboxAutomation: {
-          enabled: input.perExecutorPolicy?.mailboxAutomation?.enabled !== false,
-        },
+        notify: { enabled: input.perExecutorPolicy?.notify?.enabled !== false },
         codeChangeTask: {
           enabled: input.perExecutorPolicy?.codeChangeTask?.enabled !== false,
           requireWorktree: input.perExecutorPolicy?.codeChangeTask?.requireWorktree !== false,
