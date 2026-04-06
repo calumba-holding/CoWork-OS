@@ -2,11 +2,8 @@ export type SubconsciousTargetKind =
   | "global"
   | "workspace"
   | "agent_role"
-  | "mailbox_thread"
-  | "scheduled_task"
-  | "event_trigger"
-  | "briefing"
-  | "code_workspace";
+  | "code_workspace"
+  | "pull_request";
 
 export type SubconsciousRunStage =
   | "collecting_evidence"
@@ -19,8 +16,12 @@ export type SubconsciousRunStage =
   | "failed";
 
 export type SubconsciousRunOutcome =
-  | "completed"
-  | "completed_no_dispatch"
+  | "sleep"
+  | "suggest"
+  | "dispatch"
+  | "notify"
+  | "defer"
+  | "dismiss"
   | "blocked"
   | "failed";
 
@@ -30,10 +31,7 @@ export type SubconsciousBacklogStatus = "open" | "dispatched" | "done" | "reject
 export type SubconsciousDispatchKind =
   | "task"
   | "suggestion"
-  | "scheduled_task"
-  | "briefing"
-  | "event_trigger_update"
-  | "mailbox_automation"
+  | "notify"
   | "code_change_task";
 export type SubconsciousDispatchStatus =
   | "queued"
@@ -44,6 +42,32 @@ export type SubconsciousDispatchStatus =
 export type SubconsciousHealth = "healthy" | "watch" | "blocked";
 export type SubconsciousTargetState = "idle" | "active" | "stale";
 export type SubconsciousBrainStatus = "idle" | "running" | "paused";
+export type SubconsciousAutonomyMode =
+  | "recommendation_first"
+  | "balanced_autopilot"
+  | "strong_autonomy";
+export type SubconsciousPersistence = "sessionOnly" | "durable";
+export type SubconsciousMissedRunPolicy = "skip" | "catchUp" | "reconsider";
+export type SubconsciousRiskLevel = "low" | "medium" | "high";
+export type SubconsciousPermissionDecision = "allowed" | "escalated" | "blocked";
+export type SubconsciousNotificationIntent =
+  | "input_needed"
+  | "important_action_taken"
+  | "completed_while_away";
+export type SubconsciousMemoryBucket =
+  | "user_preference"
+  | "project_state"
+  | "open_thread"
+  | "reliable_pattern"
+  | "watch_item"
+  | "stale_or_invalidated";
+export type SubconsciousJournalEntryKind =
+  | "observation"
+  | "decision"
+  | "action"
+  | "notification"
+  | "sleep"
+  | "dream";
 
 export interface SubconsciousTargetRef {
   key: string;
@@ -51,11 +75,8 @@ export interface SubconsciousTargetRef {
   label: string;
   workspaceId?: string;
   agentRoleId?: string;
-  mailboxThreadId?: string;
-  scheduledTaskId?: string;
-  eventTriggerId?: string;
-  briefingId?: string;
   codeWorkspacePath?: string;
+  pullRequestId?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -83,6 +104,12 @@ export interface SubconsciousRun {
   dispatchStatus?: SubconsciousDispatchStatus;
   blockedReason?: string;
   error?: string;
+  confidence?: number;
+  riskLevel?: SubconsciousRiskLevel;
+  evidenceSources?: string[];
+  evidenceFreshness?: number;
+  permissionDecision?: SubconsciousPermissionDecision;
+  notificationIntent?: SubconsciousNotificationIntent;
   rejectedHypothesisIds: string[];
   startedAt: number;
   completedAt?: number;
@@ -128,6 +155,43 @@ export interface SubconsciousDecision {
   createdAt: number;
 }
 
+export interface SubconsciousJournalEntry {
+  id: string;
+  targetKey?: string;
+  runId?: string;
+  kind: SubconsciousJournalEntryKind;
+  summary: string;
+  details?: string;
+  outcome?: SubconsciousRunOutcome;
+  createdAt: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SubconsciousMemoryItem {
+  id: string;
+  targetKey?: string;
+  bucket: SubconsciousMemoryBucket;
+  summary: string;
+  details?: string;
+  confidence: number;
+  stale: boolean;
+  sourceRunIds: string[];
+  createdAt: number;
+  updatedAt: number;
+  lastValidatedAt?: number;
+  invalidatedAt?: number;
+}
+
+export interface SubconsciousDreamArtifact {
+  id: string;
+  targetKey?: string;
+  createdAt: number;
+  digest: string[];
+  backlogProposals: string[];
+  targetHealthSummary?: string;
+  memoryUpdates: SubconsciousMemoryItem[];
+}
+
 export interface SubconsciousBacklogItem {
   id: string;
   targetKey: string;
@@ -161,6 +225,14 @@ export interface SubconsciousTargetSummary {
   target: SubconsciousTargetRef;
   health: SubconsciousHealth;
   state: SubconsciousTargetState;
+  persistence: SubconsciousPersistence;
+  missedRunPolicy: SubconsciousMissedRunPolicy;
+  nextEligibleAt?: number;
+  lastObservedAt?: number;
+  lastActionAt?: number;
+  expiresAt?: number;
+  jitterMs?: number;
+  lastMeaningfulOutcome?: SubconsciousRunOutcome;
   lastWinner?: string;
   lastRunAt?: number;
   lastEvidenceAt?: number;
@@ -179,15 +251,20 @@ export interface SubconsciousTargetDetail {
   latestDecision?: SubconsciousDecision;
   backlog: SubconsciousBacklogItem[];
   dispatchHistory: SubconsciousDispatchRecord[];
+  journal: SubconsciousJournalEntry[];
+  memory: SubconsciousMemoryItem[];
+  dreams: SubconsciousDreamArtifact[];
 }
 
 export interface SubconsciousBrainSummary {
   status: SubconsciousBrainStatus;
   enabled: boolean;
+  autonomyMode: SubconsciousAutonomyMode;
   cadenceMinutes: number;
   targetCount: number;
   activeRunCount: number;
   lastRunAt?: number;
+  lastDreamAt?: number;
   updatedAt: number;
 }
 
@@ -206,10 +283,7 @@ export interface SubconsciousDispatchDefaults {
 export interface SubconsciousExecutorPolicy {
   task: { enabled: boolean };
   suggestion: { enabled: boolean };
-  scheduledTask: { enabled: boolean };
-  briefing: { enabled: boolean };
-  eventTriggerUpdate: { enabled: boolean };
-  mailboxAutomation: { enabled: boolean };
+  notify: { enabled: boolean };
   codeChangeTask: {
     enabled: boolean;
     requireWorktree: boolean;
@@ -223,10 +297,25 @@ export interface SubconsciousSettings {
   autoRun: boolean;
   cadenceMinutes: number;
   enabledTargetKinds: SubconsciousTargetKind[];
+  durableTargetKinds: SubconsciousTargetKind[];
+  catchUpOnRestart: boolean;
+  journalingEnabled: boolean;
+  dreamsEnabled: boolean;
+  dreamCadenceHours: number;
+  autonomyMode: SubconsciousAutonomyMode;
+  trustedTargetKeys: string[];
   phaseModels: SubconsciousModelRouting;
   dispatchDefaults: SubconsciousDispatchDefaults;
   artifactRetentionDays: number;
   maxHypothesesPerRun: number;
+  notificationPolicy: {
+    inputNeeded: boolean;
+    importantActionTaken: boolean;
+    completedWhileAway: boolean;
+    throttleMinutes: number;
+    quietHoursStart: number;
+    quietHoursEnd: number;
+  };
   perExecutorPolicy: SubconsciousExecutorPolicy;
 }
 
@@ -252,11 +341,8 @@ export const SUBCONSCIOUS_TARGET_KINDS: SubconsciousTargetKind[] = [
   "global",
   "workspace",
   "agent_role",
-  "mailbox_thread",
-  "scheduled_task",
-  "event_trigger",
-  "briefing",
   "code_workspace",
+  "pull_request",
 ];
 
 export const DEFAULT_SUBCONSCIOUS_SETTINGS: SubconsciousSettings = {
@@ -264,6 +350,13 @@ export const DEFAULT_SUBCONSCIOUS_SETTINGS: SubconsciousSettings = {
   autoRun: true,
   cadenceMinutes: 24 * 60,
   enabledTargetKinds: [...SUBCONSCIOUS_TARGET_KINDS],
+  durableTargetKinds: ["global", "workspace", "code_workspace", "pull_request"],
+  catchUpOnRestart: true,
+  journalingEnabled: true,
+  dreamsEnabled: true,
+  dreamCadenceHours: 24,
+  autonomyMode: "balanced_autopilot",
+  trustedTargetKeys: [],
   phaseModels: {
     ideation: "cheap",
     critique: "strong",
@@ -275,22 +368,24 @@ export const DEFAULT_SUBCONSCIOUS_SETTINGS: SubconsciousSettings = {
       global: "suggestion",
       workspace: "task",
       agent_role: "task",
-      mailbox_thread: "mailbox_automation",
-      scheduled_task: "scheduled_task",
-      event_trigger: "event_trigger_update",
-      briefing: "briefing",
       code_workspace: "code_change_task",
+      pull_request: "suggestion",
     },
   },
   artifactRetentionDays: 30,
   maxHypothesesPerRun: 4,
+  notificationPolicy: {
+    inputNeeded: true,
+    importantActionTaken: true,
+    completedWhileAway: true,
+    throttleMinutes: 30,
+    quietHoursStart: 22,
+    quietHoursEnd: 8,
+  },
   perExecutorPolicy: {
     task: { enabled: true },
     suggestion: { enabled: true },
-    scheduledTask: { enabled: true },
-    briefing: { enabled: true },
-    eventTriggerUpdate: { enabled: true },
-    mailboxAutomation: { enabled: true },
+    notify: { enabled: true },
     codeChangeTask: {
       enabled: true,
       requireWorktree: true,
