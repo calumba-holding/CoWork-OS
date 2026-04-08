@@ -90,4 +90,34 @@ describe("PermissionSettingsManager", () => {
       }),
     );
   });
+
+  it("normalizes domain-scoped permission rules", () => {
+    repository.load.mockReturnValue({
+      version: 1,
+      defaultMode: "default",
+      rules: [
+        {
+          effect: "allow",
+          source: "profile",
+          scope: {
+            kind: "domain",
+            toolName: "http_request",
+            domain: "API.Example.COM",
+          },
+        },
+      ],
+    });
+
+    const settings = PermissionSettingsManager.loadSettings();
+
+    expect(settings.rules).toEqual([
+      expect.objectContaining({
+        scope: {
+          kind: "domain",
+          toolName: "http_request",
+          domain: "api.example.com",
+        },
+      }),
+    ]);
+  });
 });
