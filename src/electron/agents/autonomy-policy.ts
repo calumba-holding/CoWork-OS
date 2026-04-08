@@ -22,7 +22,7 @@ function normalizeApprovalTypes(value: unknown): ApprovalType[] | undefined {
         entry === "delete_multiple" ||
         entry === "bulk_rename",
     );
-  return normalized.length > 0 ? normalized : undefined;
+  return normalized;
 }
 
 export function resolveOperationalAutonomyPolicy(
@@ -70,12 +70,13 @@ export function buildAgentConfigFromAutonomyPolicy(
   }
 
   const autoApproveTypes =
-    policy.autoApproveTypes ||
-    (policy.preset === "founder_edge"
-      ? FOUNDER_EDGE_APPROVE_TYPES
-      : policy.preset === "safe_autonomy"
-        ? SAFE_AUTONOMY_APPROVE_TYPES
-        : DEFAULT_AUTO_APPROVE_TYPES);
+    policy.autoApproveTypes !== undefined
+      ? policy.autoApproveTypes
+      : policy.preset === "founder_edge"
+        ? FOUNDER_EDGE_APPROVE_TYPES
+        : policy.preset === "safe_autonomy"
+          ? SAFE_AUTONOMY_APPROVE_TYPES
+          : DEFAULT_AUTO_APPROVE_TYPES;
   return {
     autonomousMode: policy.autonomousMode ?? true,
     autoApproveTypes,
