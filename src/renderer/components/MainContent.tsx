@@ -31,8 +31,20 @@ import {
   ExecutionMode,
   TaskDomain,
   InputRequest,
+  QuotedAssistantMessage,
 } from "../../shared/types";
 import { parseLeadingSkillSlashCommand } from "../../shared/skill-slash-commands";
+import {
+  ONBOARDING_COMMAND_OPTIONS,
+  parseOnboardingSlashCommand,
+} from "../../shared/onboarding";
+import {
+  LLM_WIKI_AUDIT_GUI_PROMPT,
+  LLM_WIKI_BRIEF_GUI_PROMPT,
+  LLM_WIKI_EXPLORE_GUI_PROMPT,
+  LLM_WIKI_GUI_PROMPT,
+  LLM_WIKI_QUERY_GUI_PROMPT,
+} from "../../shared/starter-missions";
 import { detectModeSuggestions, type ModeSuggestion } from "../../shared/mode-suggestion-detection";
 import { CollaborativeAgentLines } from "./CollaborativeAgentLines";
 import { CollaborativeSummaryPanel } from "./CollaborativeSummaryPanel";
@@ -42,7 +54,7 @@ import { isCliAgentChildTask, resolveCliAgentType } from "../../shared/cli-agent
 import { MultiLlmSelectionPanel } from "./MultiLlmSelectionPanel";
 import { AssistantMessageContent } from "./AssistantMessageContent";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
-import type { AgentRoleData } from "../../electron/preload";
+import type { AgentRoleData, LlmWikiVaultEntry, LlmWikiVaultSummary } from "../../electron/preload";
 import { useVoiceInput } from "../hooks/useVoiceInput";
 import { useVoiceTalkMode } from "../hooks/useVoiceTalkMode";
 import { useAgentContext, type AgentContext } from "../hooks/useAgentContext";
@@ -51,6 +63,7 @@ import {
   hasTaskOutputs,
   resolveTaskOutputSummaryFromCompletionEvent,
 } from "../utils/task-outputs";
+import { shouldShowPersistentNeedsUserActionBanner } from "../utils/task-completion-ux";
 import {
   ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES,
   filterVerboseTimelineNoise,
@@ -99,6 +112,8 @@ const CODE_PREVIEWS_EXPANDED_KEY = "cowork:codePreviewsExpanded";
 const TASK_TITLE_MAX_LENGTH = 50;
 const TITLE_ELLIPSIS_REGEX = /(\.\.\.|\u2026)$/u;
 const MAX_ATTACHMENTS = 10;
+const MAX_QUOTED_ASSISTANT_MESSAGE_CHARS = 4000;
+const MAX_QUOTED_ASSISTANT_PREVIEW_CHARS = 280;
 const ACTIVE_WORK_SIGNAL_WINDOW_MS = 30_000;
 const ACTIVE_WORK_EVENT_TYPES: EventType[] = [
   "executing",
@@ -403,7 +418,8 @@ type MentionOption = {
   color?: string;
 };
 
-type SlashCommandOption = {
+type SkillSlashCommandOption = {
+  kind: "skill";
   id: string;
   name: string;
   description: string;
@@ -411,6 +427,17 @@ type SlashCommandOption = {
   hasParams: boolean;
   skill: CustomSkill;
 };
+
+type BuiltinSlashCommandOption = {
+  kind: "builtin";
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  command: string;
+};
+
+type SlashCommandOption = SkillSlashCommandOption | BuiltinSlashCommandOption;
 
 const normalizeMentionSearch = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -456,6 +483,7 @@ import {
   normalizeInlineHeadings,
   unwrapMarkdownCodeBlocks,
 } from "../utils/markdown-inline-lists";
+import { resolveDisclosureExpanded } from "../utils/disclosure-state";
 
 // Mermaid diagram component — theme-aware init for reliable text visibility
 let mermaidLastTheme: boolean | null = null;
@@ -797,6 +825,30 @@ function highlightCode(code: string, language?: string): string | null {
   }
 }
 
+function summarizeQuotedAssistantMessage(message: string, maxChars = MAX_QUOTED_ASSISTANT_PREVIEW_CHARS): string {
+  const collapsed = message.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= maxChars) return collapsed;
+  return `${collapsed.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+export function createQuotedAssistantMessage(
+  message: string,
+  eventId?: string,
+  taskId?: string,
+): QuotedAssistantMessage | null {
+  const cleaned = cleanAssistantMessageForDisplay(message).trim();
+  if (!cleaned) return null;
+  const truncated = cleaned.length > MAX_QUOTED_ASSISTANT_MESSAGE_CHARS;
+  return {
+    ...(eventId ? { eventId } : {}),
+    ...(taskId ? { taskId } : {}),
+    message: truncated
+      ? `${cleaned.slice(0, MAX_QUOTED_ASSISTANT_MESSAGE_CHARS - 1).trimEnd()}…`
+      : cleaned,
+    ...(truncated ? { truncated: true } : {}),
+  };
+}
+
 // Highlighted code preview for file creation/modification events
 function HighlightedCodePreview({ code, language }: { code: string; language?: string }) {
   const html = useMemo(() => highlightCode(code, language), [code, language]);
@@ -859,6 +911,31 @@ const MessageCopyButton = memo(function MessageCopyButton({ text }: { text: stri
         </svg>
       )}
       <span>{copied ? "Copied" : "Copy"}</span>
+    </button>
+  );
+});
+
+const MessageQuoteButton = memo(function MessageQuoteButton({
+  onQuote,
+}: {
+  onQuote: () => void;
+}) {
+  return (
+    <button type="button" className="message-quote-btn" onClick={onQuote} title="Quote this message">
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M10 8L6 12l4 4" />
+        <path d="M6 12h9a5 5 0 0 1 5 5v0" />
+      </svg>
+      <span>Quote</span>
     </button>
   );
 });
@@ -2624,6 +2701,18 @@ const FOCUSED_CARD_POOL: FocusedCard[] = [
     category: "task",
   },
   {
+    id: "research-vault",
+    emoji: "🧠",
+    iconName: "book",
+    title: "Build a research vault",
+    desc: "Create a persistent Obsidian-friendly knowledge base",
+    action: {
+      type: "prompt",
+      prompt: LLM_WIKI_GUI_PROMPT,
+    },
+    category: "task",
+  },
+  {
     id: "validate-idea",
     emoji: "💡",
     iconName: "zap",
@@ -2743,7 +2832,12 @@ interface MainContentProps {
   childEvents?: TaskEvent[];
   onSelectChildTask?: (taskId: string) => void;
   onSelectTask?: (taskId: string) => void;
-  onSendMessage: (message: string, images?: ImageAttachment[]) => void;
+  onSendMessage: (
+    message: string,
+    images?: ImageAttachment[],
+    quotedAssistantMessage?: QuotedAssistantMessage,
+  ) => void;
+  onStartOnboarding?: () => void;
   onCreateTask?: (
     title: string,
     prompt: string,
@@ -2810,6 +2904,9 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   const markdownComponents = props.markdownComponents as any;
   const messageFeedbackMap = props.messageFeedbackMap as Map<string, string>;
   const onOpenBrowserView = props.onOpenBrowserView as ((url?: string) => void) | undefined;
+  const onQuoteAssistantMessage = props.onQuoteAssistantMessage as
+    | ((quote: QuotedAssistantMessage) => void)
+    | undefined;
   const onSelectChildTask = props.onSelectChildTask as ((taskId: string) => void) | undefined;
   const onSelectTask = props.onSelectTask as ((taskId: string) => void) | undefined;
   const onViewTaskOutputs = props.onViewTaskOutputs as
@@ -2840,6 +2937,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   const shouldRenderTimelineEventInStepFeed = props.shouldRenderTimelineEventInStepFeed as (
     event: TaskEvent,
   ) => boolean;
+  const shouldDefaultExpand = props.shouldDefaultExpand as (event: TaskEvent) => boolean;
   const toolCallPairing = props.toolCallPairing as { completions: Map<string, TaskEvent>; claimedResultIds: Set<string> };
   const hasEventDetails = props.hasEventDetails as (event: TaskEvent) => boolean;
   const isEventExpanded = props.isEventExpanded as (event: TaskEvent) => boolean;
@@ -3019,15 +3117,19 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                     }
                     return -1;
                   })();
+                  const isLatestActionBlock = timelineIndex === lastActionBlockIndex;
                   const isActive =
-                    timelineIndex === lastActionBlockIndex && (isTaskWorking || isReplayMode);
+                    isLatestActionBlock && (isTaskWorking || isReplayMode);
                   const { summary, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
                     item.events,
                     events,
                     { isActive },
                   );
-                  const expanded =
-                    isActive || expandedActionBlocks.has(item.blockId);
+                  const expanded = resolveDisclosureExpanded({
+                    forceExpanded: isActive,
+                    defaultExpanded: isLatestActionBlock,
+                    toggled: expandedActionBlocks.has(item.blockId),
+                  });
                   const onToggle = () => {
                     setExpandedActionBlocks((prev) => {
                       const next = new Set(prev);
@@ -3147,6 +3249,8 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                             .filter((s: CommandOutputSession) => !inlineRunCommandSessionIds.has(s.id));
 
                           if (parallelGroup) {
+                            const shouldDefaultExpandGroup =
+                              isLatestActionBlock && idx === visibleBlockEvents.length - 1;
                             return (
                               <Fragment key={event.id || `event-${eventIndex}`}>
                                 <ParallelGroupFeed
@@ -3155,7 +3259,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                                   formatTime={formatTime}
                                   showConnectorAbove={showChildConnectorAbove}
                                   showConnectorBelow={showChildConnectorBelow}
-                                  defaultExpanded={isActive}
+                                  defaultExpanded={isActive || shouldDefaultExpandGroup}
                                 />
                                 {renderCommandOutputs(perEventCmdSessions)}
                               </Fragment>
@@ -3205,8 +3309,15 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                             );
                           }
                           const isExpandable = hasEventDetails(event);
-                          const isExpanded =
-                            isExpandable && isActive ? !toggledEvents.has(event.id) : isEventExpanded(event);
+                          const shouldDefaultExpandChild =
+                            isExpandable &&
+                            (shouldDefaultExpand(event) ||
+                              (isLatestActionBlock && idx === visibleBlockEvents.length - 1));
+                          const isExpanded = resolveDisclosureExpanded({
+                            forceExpanded: isExpandable && isActive,
+                            defaultExpanded: shouldDefaultExpandChild,
+                            toggled: toggledEvents.has(event.id),
+                          });
                           const toolCallResultEvent = toolCallPairing.completions.get(event.id);
                           const renderEvent = toolCallResultEvent ?? event;
                           const eventTitle = renderEventTitle(
@@ -3248,6 +3359,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                                     ? renderEventDetails(event, voiceEnabled, markdownComponents, {
                                         workspacePath: workspace?.path,
                                         onOpenViewer: setViewerFilePath,
+                                        onQuoteAssistantMessage,
                                         events,
                                         onViewOutputs: onViewTaskOutputs,
                                         hideVerificationSteps: true,
@@ -3326,40 +3438,84 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                   }
                   const rawMessage = event.payload?.message || "User message";
                   const messageText = stripStrategyContextBlock(stripPptxBubbleContent(rawMessage));
+                  const quotedAssistantMessage = event.payload?.quotedAssistantMessage as
+                    | QuotedAssistantMessage
+                    | undefined;
                   const attachmentNames = extractAttachmentNames(rawMessage);
                   return (
                     <Fragment key={event.id || `event-${item.eventIndex}`}>
                       <div className="chat-message user-message">
-                        <CollapsibleUserBubble>
-                          <ReactMarkdown
-                            remarkPlugins={userMarkdownPlugins}
-                            components={markdownComponents}
-                          >
-                            {messageText}
-                          </ReactMarkdown>
-                          {attachmentNames.length > 0 && (
-                            <div className="bubble-attachments">
-                              {attachmentNames.map((name, i) => (
-                                <span className="bubble-attachment-chip" key={i}>
-                                  <svg
-                                    width="12"
-                                    height="12"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2"
-                                  >
-                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                    <path d="M14 2v6h6" />
-                                  </svg>
-                                  <span className="bubble-attachment-name" title={name}>
-                                    {name}
-                                  </span>
-                                </span>
-                              ))}
+                        {quotedAssistantMessage?.message ? (
+                          <div className="quoted-follow-up-shell">
+                            <div className="quoted-follow-up-context">
+                              <span className="quoted-follow-up-context-icon">↪</span>
+                              <span className="quoted-follow-up-context-text">
+                                {summarizeQuotedAssistantMessage(quotedAssistantMessage.message, 520)}
+                              </span>
                             </div>
-                          )}
-                        </CollapsibleUserBubble>
+                            <div className="quoted-follow-up-reply markdown-content">
+                              <ReactMarkdown
+                                remarkPlugins={userMarkdownPlugins}
+                                components={markdownComponents}
+                              >
+                                {messageText}
+                              </ReactMarkdown>
+                            </div>
+                            {attachmentNames.length > 0 && (
+                              <div className="bubble-attachments quoted-follow-up-attachments">
+                                {attachmentNames.map((name, i) => (
+                                  <span className="bubble-attachment-chip" key={i}>
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                    >
+                                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                      <path d="M14 2v6h6" />
+                                    </svg>
+                                    <span className="bubble-attachment-name" title={name}>
+                                      {name}
+                                    </span>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <CollapsibleUserBubble>
+                            <ReactMarkdown
+                              remarkPlugins={userMarkdownPlugins}
+                              components={markdownComponents}
+                            >
+                              {messageText}
+                            </ReactMarkdown>
+                            {attachmentNames.length > 0 && (
+                              <div className="bubble-attachments">
+                                {attachmentNames.map((name, i) => (
+                                  <span className="bubble-attachment-chip" key={i}>
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                    >
+                                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                      <path d="M14 2v6h6" />
+                                    </svg>
+                                    <span className="bubble-attachment-name" title={name}>
+                                      {name}
+                                    </span>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </CollapsibleUserBubble>
+                        )}
                         <MessageCopyButton text={messageText} />
                       </div>
                       {renderCommandOutputs(commandOutputsAfterEvent)}
@@ -3371,6 +3527,11 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                 if (isAssistantMessage || isCompletionSummaryMessage) {
                   const messageText = isCompletionSummaryMessage ? completionSummaryText : event.payload?.message || "";
                   const cleanedMessageText = cleanAssistantMessageForDisplay(messageText);
+                  const quotedAssistantMessage = createQuotedAssistantMessage(
+                    cleanedMessageText,
+                    event.id,
+                    event.taskId,
+                  );
                   const isLastAssistant = event === lastAssistantMessage;
                   return (
                     <Fragment key={event.id || `event-${item.eventIndex}`}>
@@ -3431,6 +3592,11 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                         <div className="message-actions">
                           <MessageCopyButton text={messageText} />
                           <MessageSpeakButton text={messageText} voiceEnabled={voiceEnabled} />
+                          {quotedAssistantMessage && onQuoteAssistantMessage && (
+                            <MessageQuoteButton
+                              onQuote={() => onQuoteAssistantMessage(quotedAssistantMessage)}
+                            />
+                          )}
                           {event.id && !isTaskWorking && (
                             <>
                               <button
@@ -3680,6 +3846,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                           ? renderEventDetails(event, voiceEnabled, markdownComponents, {
                               workspacePath: workspace?.path,
                               onOpenViewer: setViewerFilePath,
+                              onQuoteAssistantMessage,
                               events,
                               onViewOutputs: onViewTaskOutputs,
                               hideVerificationSteps: true,
@@ -3721,6 +3888,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
       expandedActionBlocks,
       handleCanvasClose,
       handleMessageFeedback,
+      onQuoteAssistantMessage,
       handleStepFeedback,
       isChatTask,
       isTaskWorking,
@@ -3728,6 +3896,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
       markdownComponents,
       messageFeedbackMap,
       onOpenBrowserView,
+      onQuoteAssistantMessage,
       onSelectChildTask,
       onSelectTask,
       onViewTaskOutputs,
@@ -3779,6 +3948,7 @@ export function MainContent({
   onSelectChildTask,
   onSelectTask,
   onSendMessage,
+  onStartOnboarding,
   onCreateTask,
   onChangeWorkspace,
   onSelectWorkspace,
@@ -3804,6 +3974,9 @@ export function MainContent({
   // Agent personality context for personalized messages
   const agentContext = useAgentContext();
   const [inputValue, setInputValue] = useState("");
+  const [quotedAssistantMessage, setQuotedAssistantMessage] = useState<QuotedAssistantMessage | null>(
+    null,
+  );
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -3829,6 +4002,10 @@ export function MainContent({
   const placeholderDebounceRef = useRef<number | null>(null);
   const placeholderPlaylistCacheRef = useRef<Map<string, string[]>>(new Map());
   const placeholderRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    setQuotedAssistantMessage(null);
+  }, [task?.id]);
 
   // Gather all user signals, run persona detection, and build the playlist
   useEffect(() => {
@@ -4105,6 +4282,8 @@ export function MainContent({
     },
   });
   const [viewerFilePath, setViewerFilePath] = useState<string | null>(null);
+  const [llmWikiVaultSummary, setLlmWikiVaultSummary] = useState<LlmWikiVaultSummary | null>(null);
+  const [llmWikiVaultLoading, setLlmWikiVaultLoading] = useState(false);
   // Extract citations from task events for inline badge rendering
   const citations = useMemo(() => {
     const reversed = [...events].reverse();
@@ -4202,6 +4381,42 @@ export function MainContent({
         } => entry !== null,
       );
   }, [events, researchWorkflowEnabled]);
+
+  useEffect(() => {
+    if (!workspace?.path || workspace.isTemp || isTempWorkspaceId(workspace.id)) {
+      setLlmWikiVaultSummary(null);
+      setLlmWikiVaultLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLlmWikiVaultLoading(true);
+    window.electronAPI
+      .getLlmWikiVaultSummary({
+        workspacePath: workspace.path,
+        vaultPath: "research/wiki",
+      })
+      .then((summary) => {
+        if (!cancelled) {
+          setLlmWikiVaultSummary(summary);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load llm-wiki vault summary:", error);
+        if (!cancelled) {
+          setLlmWikiVaultSummary(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLlmWikiVaultLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace?.id, workspace?.isTemp, workspace?.path]);
 
   const markdownComponents = useMemo(
     () =>
@@ -5734,10 +5949,10 @@ export function MainContent({
   // Check if an event is currently expanded using its ID
   // If the event should default expand, clicking toggles it to collapsed (and vice versa)
   const isEventExpanded = useCallback((event: TaskEvent): boolean => {
-    const defaultExpanded = shouldDefaultExpand(event);
-    const isToggled = toggledEvents.has(event.id);
-    // XOR: if toggled, invert the default state
-    return defaultExpanded ? !isToggled : isToggled;
+    return resolveDisclosureExpanded({
+      defaultExpanded: shouldDefaultExpand(event),
+      toggled: toggledEvents.has(event.id),
+    });
   }, [shouldDefaultExpand, toggledEvents]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -5773,6 +5988,16 @@ export function MainContent({
     return () => {
       if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
     };
+  }, []);
+
+  const handleQuoteAssistantMessage = useCallback((quote: QuotedAssistantMessage) => {
+    setQuotedAssistantMessage(quote);
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.focus();
+      const cursorPosition = textarea.value.length;
+      textarea.setSelectionRange(cursorPosition, cursorPosition);
+    }
   }, []);
 
   // Programmatic input updates still need a resize pass.
@@ -5880,7 +6105,11 @@ export function MainContent({
 
   const handleAttachFiles = async () => {
     try {
-      const files = await window.electronAPI.selectFiles();
+      const pickerDefaultPath =
+        workspace && !workspace.isTemp && !isTempWorkspaceId(workspace.id)
+          ? workspace.path
+          : undefined;
+      const files = await window.electronAPI.selectFiles(pickerDefaultPath);
       if (!files || files.length === 0) return;
       appendPendingAttachments(
         files.map((file) => ({
@@ -6078,8 +6307,23 @@ export function MainContent({
 
     const trimmedInput = inputValue.trim();
     const hasAttachments = pendingAttachments.length > 0;
+    const onboardingSlashCommand = parseOnboardingSlashCommand(trimmedInput);
 
     if (!trimmedInput && !hasAttachments) return;
+    if (onboardingSlashCommand.matched && !hasAttachments && onStartOnboarding) {
+      pendingProgrammaticResizeRef.current = true;
+      setInputValue("");
+      setPendingAttachments([]);
+      setMentionOpen(false);
+      setMentionQuery("");
+      setMentionTarget(null);
+      setSlashOpen(false);
+      setSlashQuery("");
+      setSlashTarget(null);
+      setModeSuggestions([]);
+      onStartOnboarding();
+      return;
+    }
 
     let importedAttachments: ImportedAttachment[] = [];
     setIsPreparingMessage(true);
@@ -6173,11 +6417,12 @@ export function MainContent({
         setVerificationAgentEnabled(false);
       } else {
         // Task is selected (even if not in current list) - send follow-up message
-        onSendMessage(message, imagePayload);
+        onSendMessage(message, imagePayload, quotedAssistantMessage ?? undefined);
       }
 
       pendingProgrammaticResizeRef.current = true;
       setInputValue("");
+      setQuotedAssistantMessage(null);
       setPendingAttachments([]);
       setMentionOpen(false);
       setMentionQuery("");
@@ -6336,7 +6581,24 @@ export function MainContent({
   const slashOptions = useMemo<SlashCommandOption[]>(() => {
     if (!slashOpen) return [];
     const query = slashQuery.toLowerCase();
-    return customSkills
+    const builtinOptions: SlashCommandOption[] = onStartOnboarding
+      ? ONBOARDING_COMMAND_OPTIONS.filter((option) => {
+          if (!query) return true;
+          return (
+            option.name.toLowerCase().includes(query) ||
+            option.description.toLowerCase().includes(query)
+          );
+        }).map((option) => ({
+          kind: "builtin",
+          id: option.id,
+          name: option.name,
+          description: option.description,
+          icon: option.icon,
+          command: `/${option.name}`,
+        }))
+      : [];
+
+    const skillOptions: SlashCommandOption[] = customSkills
       .filter((skill) => {
         if (!query) return true;
         return (
@@ -6347,6 +6609,7 @@ export function MainContent({
       })
       .slice(0, 10)
       .map((skill) => ({
+        kind: "skill",
         id: skill.id,
         name: skill.name,
         description: skill.description,
@@ -6354,7 +6617,9 @@ export function MainContent({
         hasParams: !!(skill.parameters && skill.parameters.length > 0),
         skill,
       }));
-  }, [slashOpen, slashQuery, customSkills]);
+
+    return [...builtinOptions, ...skillOptions].slice(0, 10);
+  }, [slashOpen, slashQuery, customSkills, onStartOnboarding]);
 
   // Reset slash selected index when options change
   useEffect(() => {
@@ -6407,6 +6672,17 @@ export function MainContent({
     setSlashOpen(false);
     setSlashQuery("");
     setSlashTarget(null);
+
+    if (option.kind === "builtin") {
+      pendingProgrammaticResizeRef.current = true;
+      setPendingAttachments([]);
+      setModeSuggestions([]);
+      if (onStartOnboarding) {
+        setInputValue("");
+        onStartOnboarding();
+      }
+      return;
+    }
 
     if (option.hasParams) {
       // Show parameter modal
@@ -6653,6 +6929,142 @@ export function MainContent({
     setInputValue(action);
   };
 
+  const formatVaultUpdatedAt = useCallback((updatedAt: string) => {
+    const timestamp = Date.parse(updatedAt);
+    if (!Number.isFinite(timestamp)) return "";
+    return new Date(timestamp).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+    });
+  }, []);
+
+  const renderVaultEntryGroup = useCallback(
+    (
+      title: string,
+      entries: LlmWikiVaultEntry[],
+      emptyLabel: string,
+    ) => (
+      <div className="vault-browser-group">
+        <div className="vault-browser-group-title">{title}</div>
+        {entries.length === 0 ? (
+          <div className="vault-browser-empty">{emptyLabel}</div>
+        ) : (
+          <div className="vault-browser-list">
+            {entries.map((entry) => (
+              <button
+                key={`${entry.section}:${entry.path}`}
+                type="button"
+                className="vault-browser-item"
+                onClick={() => setViewerFilePath(entry.path)}
+                title={entry.path}
+              >
+                <span className="vault-browser-item-name">{entry.name}</span>
+                <span className="vault-browser-item-meta">
+                  <span className="vault-browser-item-path">{entry.path}</span>
+                  <span>{formatVaultUpdatedAt(entry.updatedAt)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    ),
+    [formatVaultUpdatedAt],
+  );
+
+  const renderLlmWikiVaultPanel = () => {
+    if (!workspace?.path || workspace.isTemp || isTempWorkspaceId(workspace.id)) {
+      return null;
+    }
+
+    const summary = llmWikiVaultSummary;
+    const rootIndexFile =
+      summary?.rootFiles.find((entry) => entry.path.endsWith("/index.md") || entry.path === "research/wiki/index.md") ||
+      summary?.rootFiles.find((entry) => entry.path.endsWith("index.md"));
+
+    return (
+      <section className="vault-browser-panel" aria-label="Research vault">
+        <div className="vault-browser-header">
+          <div>
+            <div className="vault-browser-kicker">Research vault</div>
+            <h2 className="vault-browser-heading">
+              {summary?.displayPath || "research/wiki"}
+            </h2>
+            <p className="vault-browser-copy">
+              Durable markdown notes, immutable raw captures, and generated outputs that stay in the workspace.
+            </p>
+          </div>
+          <div className="vault-browser-actions">
+            <button type="button" className="vault-browser-action" onClick={() => handleQuickAction(LLM_WIKI_GUI_PROMPT)}>
+              Ingest
+            </button>
+            <button type="button" className="vault-browser-action" onClick={() => handleQuickAction(LLM_WIKI_QUERY_GUI_PROMPT)}>
+              Query
+            </button>
+            <button type="button" className="vault-browser-action" onClick={() => handleQuickAction(LLM_WIKI_AUDIT_GUI_PROMPT)}>
+              Audit
+            </button>
+            <button type="button" className="vault-browser-action" onClick={() => handleQuickAction(LLM_WIKI_EXPLORE_GUI_PROMPT)}>
+              Explore
+            </button>
+            <button type="button" className="vault-browser-action" onClick={() => handleQuickAction(LLM_WIKI_BRIEF_GUI_PROMPT)}>
+              Brief
+            </button>
+            {rootIndexFile && (
+              <button
+                type="button"
+                className="vault-browser-action vault-browser-action-secondary"
+                onClick={() => setViewerFilePath(rootIndexFile.path)}
+              >
+                Open index
+              </button>
+            )}
+          </div>
+        </div>
+
+        {llmWikiVaultLoading ? (
+          <div className="vault-browser-loading">Loading vault summary...</div>
+        ) : summary?.exists ? (
+          <>
+            <div className="vault-browser-stats" role="list" aria-label="Vault stats">
+              <div className="vault-browser-stat" role="listitem">
+                <span className="vault-browser-stat-value">{summary.counts.pages}</span>
+                <span className="vault-browser-stat-label">pages</span>
+              </div>
+              <div className="vault-browser-stat" role="listitem">
+                <span className="vault-browser-stat-value">{summary.counts.queries}</span>
+                <span className="vault-browser-stat-label">queries</span>
+              </div>
+              <div className="vault-browser-stat" role="listitem">
+                <span className="vault-browser-stat-value">{summary.counts.rawSources}</span>
+                <span className="vault-browser-stat-label">raw sources</span>
+              </div>
+              <div className="vault-browser-stat" role="listitem">
+                <span className="vault-browser-stat-value">{summary.counts.outputs}</span>
+                <span className="vault-browser-stat-label">outputs</span>
+              </div>
+            </div>
+
+            <div className="vault-browser-groups">
+              {renderVaultEntryGroup("Core files", summary.rootFiles, "Initialize the vault to create index, inbox, log, and schema files.")}
+              {renderVaultEntryGroup("Recent notes", summary.recentPages, "No durable notes yet.")}
+              {renderVaultEntryGroup("Recent queries", summary.recentQueries, "No filed queries yet.")}
+              {renderVaultEntryGroup("Recent outputs", summary.recentOutputs, "No slide decks or charts yet.")}
+              {renderVaultEntryGroup("Recent raw captures", summary.recentRawSources, "No raw source captures yet.")}
+            </div>
+          </>
+        ) : (
+          <div className="vault-browser-empty-state">
+            <div className="vault-browser-empty-title">No research vault yet</div>
+            <div className="vault-browser-empty-copy">
+              Start with a normal prompt. CoWork will create the vault in this workspace and keep it durable.
+            </div>
+          </div>
+        )}
+      </section>
+    );
+  };
+
   useEffect(() => {
     if (task?.status === "paused" && textareaRef.current) {
       const inputEl = textareaRef.current;
@@ -6754,6 +7166,19 @@ export function MainContent({
     }
     return undefined;
   }, [events]);
+  const latestCompletionEvent = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      if (getEffectiveTaskEventType(event) === "task_completed") {
+        return event;
+      }
+    }
+    return undefined;
+  }, [events]);
+  const showPersistentNeedsUserActionBanner = useMemo(
+    () => shouldShowPersistentNeedsUserActionBanner(latestCompletionEvent?.payload),
+    [latestCompletionEvent],
+  );
   const hasNonConversationEvents = useMemo(() => {
     if (isChatTask) return false;
     return events.some((event) => {
@@ -7062,6 +7487,8 @@ export function MainContent({
                 </div>
               )}
             </div>
+
+            {renderLlmWikiVaultPanel()}
 
             {/* Input Area */}
             {renderAttachmentPanel()}
@@ -8100,6 +8527,7 @@ export function MainContent({
       markdownComponents={markdownComponents}
       messageFeedbackMap={messageFeedbackMap}
       onOpenBrowserView={onOpenBrowserView}
+      onQuoteAssistantMessage={handleQuoteAssistantMessage}
       onSelectChildTask={onSelectChildTask}
       onSelectTask={onSelectTask}
       onViewTaskOutputs={onViewTaskOutputs}
@@ -8116,6 +8544,7 @@ export function MainContent({
       setViewerFilePath={setViewerFilePath}
       formatTime={formatTime}
       shouldRenderTimelineEventInStepFeed={shouldRenderTimelineEventInStepFeed}
+      shouldDefaultExpand={shouldDefaultExpand}
       toolCallPairing={toolCallPairing}
       hasEventDetails={hasEventDetails}
       isEventExpanded={isEventExpanded}
@@ -8485,14 +8914,47 @@ export function MainContent({
               </div>
             </div>
           )}
-          {task.status === "completed" && task.terminalStatus === "needs_user_action" && (
+          {task.status === "completed" &&
+            task.terminalStatus === "needs_user_action" &&
+            showPersistentNeedsUserActionBanner && (
             <div className="task-status-banner task-status-banner-blocked">
               <div className="task-status-banner-content">
                 <strong>Completed - action required</strong>
                 <span className="task-status-banner-detail">
-                  Verification is pending user evidence before this can be fully marked done.
+                  {typeof latestCompletionEvent?.payload?.verificationMessage === "string" &&
+                  latestCompletionEvent.payload.verificationMessage.trim().length > 0
+                    ? latestCompletionEvent.payload.verificationMessage
+                    : "Verification is pending user evidence before this can be fully marked done."}
                 </span>
               </div>
+            </div>
+          )}
+          {quotedAssistantMessage && (
+            <div className="composer-quoted-assistant">
+              <div className="composer-quoted-assistant-copy">
+                <span className="composer-quoted-assistant-icon">↪</span>
+                <span className="composer-quoted-assistant-text">
+                  {summarizeQuotedAssistantMessage(quotedAssistantMessage.message, 420)}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="composer-quoted-assistant-clear"
+                onClick={() => setQuotedAssistantMessage(null)}
+                title="Remove quoted message"
+                aria-label="Remove quoted message"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
             </div>
           )}
           <div className="input-row">
@@ -9656,6 +10118,7 @@ function renderEventDetails(
   options?: {
     workspacePath?: string;
     onOpenViewer?: (path: string) => void;
+    onQuoteAssistantMessage?: (quote: QuotedAssistantMessage) => void;
     events?: TaskEvent[];
     onViewOutputs?: (taskId: string, primaryOutputPath?: string) => void;
     hideVerificationSteps?: boolean;
@@ -9668,6 +10131,7 @@ function renderEventDetails(
 ) {
   const workspacePath = options?.workspacePath;
   const onOpenViewer = options?.onOpenViewer;
+  const onQuoteAssistantMessage = options?.onQuoteAssistantMessage;
   const eventStream = options?.events || [];
   const onViewOutputs = options?.onViewOutputs;
   const summaryMode = options?.summaryMode === true;
@@ -10005,6 +10469,7 @@ function renderEventDetails(
       );
     case "assistant_message": {
       const linkedMessage = cleanAssistantMessageForDisplay(event.payload.message);
+      const quote = createQuotedAssistantMessage(linkedMessage, event.id, event.taskId);
       return (
         <div className="event-details assistant-message event-details-scrollable">
           <div className="markdown-content">
@@ -10018,6 +10483,9 @@ function renderEventDetails(
           <div className="message-actions">
             <MessageCopyButton text={event.payload.message} />
             <MessageSpeakButton text={event.payload.message} voiceEnabled={voiceEnabled} />
+            {quote && onQuoteAssistantMessage && (
+              <MessageQuoteButton onQuote={() => onQuoteAssistantMessage(quote)} />
+            )}
           </div>
         </div>
       );
