@@ -29,6 +29,7 @@ import {
   ApprovalResponseAction,
   ApprovalType,
   DEFAULT_TRUSTED_COMMAND_PATTERNS,
+  SensitiveSourceRef,
   PermissionEffect,
   PermissionEvaluationResult,
   PermissionMode,
@@ -57,6 +58,7 @@ import {
   TeamThoughtEvent,
   isTempWorkspaceId,
   ImageAttachment,
+  QuotedAssistantMessage,
   MULTI_LLM_PROVIDER_DISPLAY,
   AgentTeamRun,
   AgentTeamItem,
@@ -109,6 +111,7 @@ import {
   permissionScopeFingerprint,
   summarizePermissionScope,
 } from "../security/permission-utils";
+import { buildPermissionSecurityContext } from "./security/export-permission-context";
 import { PlaybookService } from "../memory/PlaybookService";
 import { UserProfileService } from "../memory/UserProfileService";
 import { RelationshipMemoryService } from "../memory/RelationshipMemoryService";
@@ -2593,6 +2596,18 @@ export class AgentDaemon extends EventEmitter {
     return this.sessionAutoApproveAll;
   }
 
+  recordSensitiveSourceRead(taskId: string, source: SensitiveSourceRef): void {
+    this.getExecutorForTask(taskId)?.runtime?.recordSensitiveSourceRead(source);
+  }
+
+  listRecentSensitiveSources(taskId: string): SensitiveSourceRef[] {
+    return this.getExecutorForTask(taskId)?.runtime?.listRecentSensitiveSources() || [];
+  }
+
+  private canSessionAutoApproveType(type: ApprovalType | undefined): boolean {
+    return type === "run_command" || type === "network_access";
+  }
+
   private getExecutorForTask(taskId: string): TaskExecutor | null {
     const cached = this.activeTasks.get(taskId);
     return cached?.executor || null;
@@ -2685,6 +2700,8 @@ export class AgentDaemon extends EventEmitter {
         return "delete_file";
       case "network_access":
         return "web_fetch";
+      case "data_export":
+        return "http_request";
       default:
         return approvalType === "external_service" ? "external_service" : approvalType;
     }
@@ -2767,23 +2784,6 @@ export class AgentDaemon extends EventEmitter {
     }
 
     const rules = this.buildPermissionRules(taskId, task, workspace);
-    const autoApproveTypes = task?.agentConfig?.autoApproveTypes;
-    if (
-      task?.agentConfig?.autonomousMode === true &&
-      (!Array.isArray(autoApproveTypes) || autoApproveTypes.length === 0)
-    ) {
-      rules.push({
-        source: "session",
-        effect: "allow",
-        scope: {
-          kind: "tool",
-          toolName,
-        },
-        metadata: {
-          legacyAutonomy: true,
-        },
-      });
-    }
     const evaluation = PermissionEngine.evaluate({
       workspace:
         workspace ||
@@ -2861,6 +2861,15 @@ export class AgentDaemon extends EventEmitter {
       scopePreview: evaluation.scopePreview,
       suggestedActions: evaluation.suggestions,
       ...(serverName ? { serverName } : {}),
+      ...(() => {
+        const securityContext = buildPermissionSecurityContext({
+          workspace,
+          toolName,
+          toolInput: details?.params ?? details,
+          recentSensitiveSources: runtime?.listRecentSensitiveSources?.() || [],
+        });
+        return securityContext ? { securityContext } : {};
+      })(),
     };
     runtime?.setLatestPermissionPromptContext(promptDetails);
     return {
@@ -3037,30 +3046,6 @@ export class AgentDaemon extends EventEmitter {
     const allowAutoApprove = opts?.allowAutoApprove !== false;
     const enrichedDetails =
       details && typeof details === "object" && !Array.isArray(details) ? { ...details } : { value: details };
-
-    // Session-level auto-approve (set via "Approve all" UI button)
-    if (allowAutoApprove && this.sessionAutoApproveAll) {
-      const approval = this.approvalRepo.create({
-        taskId,
-        type: type as Any,
-        description,
-        details: enrichedDetails,
-        status: "approved",
-        requestedAt: Date.now(),
-      });
-      this.approvalRepo.update(approval.id, "approved");
-      this.logEvent(taskId, "approval_requested", {
-        approval,
-        autoApproved: true,
-      });
-      this.logEvent(taskId, "approval_granted", {
-        approvalId: approval.id,
-        autoApproved: true,
-        reason: "session_auto_approve",
-      });
-      return true;
-    }
-
     const permission = this.evaluatePermissionRequest(
       taskId,
       type as ApprovalType,
@@ -3071,6 +3056,10 @@ export class AgentDaemon extends EventEmitter {
       ...enrichedDetails,
       permissionPrompt: permission.promptDetails,
     };
+    const safeSessionAutoApprove =
+      allowAutoApprove &&
+      this.sessionAutoApproveAll &&
+      this.canSessionAutoApproveType(type as ApprovalType | undefined);
 
     if (permission.evaluation.decision === "allow") {
       permission.runtime?.recordPermissionSuccess(permission.trackingKey);
@@ -3117,6 +3106,30 @@ export class AgentDaemon extends EventEmitter {
         permissionReason: permission.evaluation.reason,
       });
       return false;
+    }
+
+    if (safeSessionAutoApprove) {
+      permission.runtime?.recordPermissionSuccess(permission.trackingKey);
+      const approval = this.approvalRepo.create({
+        taskId,
+        type: type as Any,
+        description,
+        details: permissionDetails,
+        status: "approved",
+        requestedAt: Date.now(),
+      });
+      this.approvalRepo.update(approval.id, "approved");
+      this.logEvent(taskId, "approval_requested", {
+        approval,
+        autoApproved: true,
+      });
+      this.logEvent(taskId, "approval_granted", {
+        approvalId: approval.id,
+        autoApproved: true,
+        reason: "session_auto_approve",
+        permissionReason: permission.evaluation.reason,
+      });
+      return true;
     }
 
     const approval = this.approvalRepo.create({
@@ -3302,6 +3315,10 @@ export class AgentDaemon extends EventEmitter {
 
       pending.resolved = true;
       this.approvalRepo.update(approvalId, "denied");
+      this.logEvent(taskId, "approval_denied", {
+        approvalId,
+        reason: "task_ended",
+      });
       pending.reject(new Error(rejectionMessage));
       cleared += 1;
     }
@@ -3691,7 +3708,11 @@ export class AgentDaemon extends EventEmitter {
       return;
     }
 
-    if (!features.transcriptStoreEnabled && !features.backgroundConsolidationEnabled) {
+    if (
+      !features.transcriptStoreEnabled &&
+      !features.backgroundConsolidationEnabled &&
+      !features.checkpointCaptureEnabled
+    ) {
       return;
     }
 
@@ -3708,18 +3729,334 @@ export class AgentDaemon extends EventEmitter {
         legacyType: (legacyType as EventType) || timelineEvent.legacyType,
       };
       await TranscriptStore.appendEvent(workspace.path, legacyEvent).catch(() => undefined);
-      if (legacyType === "conversation_snapshot") {
-        await TranscriptStore.writeCheckpoint(workspace.path, taskId, {
-          ...(legacyPayload as Record<string, unknown>),
-          sourceEventId: timelineEvent.eventId,
-          sourceTimestamp: timelineEvent.timestamp,
-          resumeStrategy: "checkpoint",
-        }).catch(() => undefined);
-      }
+    }
+
+    if (features.checkpointCaptureEnabled !== false) {
+      await this.maybeCaptureRuntimeCheckpoint({
+        task,
+        workspacePath: workspace.path,
+        event: timelineEvent,
+        legacyType,
+        legacyPayload,
+      }).catch(() => undefined);
     }
 
     if (features.backgroundConsolidationEnabled && legacyType === "task_completed") {
       this.scheduleMemoryConsolidation(task);
+    }
+  }
+
+  private extractCheckpointEventText(payload: unknown): string {
+    if (typeof payload === "string") {
+      return payload.replace(/\s+/g, " ").trim();
+    }
+    if (!payload || typeof payload !== "object") {
+      return "";
+    }
+
+    const record = payload as Record<string, unknown>;
+    const preferredFields = [
+      "message",
+      "text",
+      "content",
+      "summary",
+      "result",
+      "response",
+      "assistantText",
+      "userText",
+    ];
+    for (const field of preferredFields) {
+      const value = record[field];
+      if (typeof value === "string" && value.trim()) {
+        return value.replace(/\s+/g, " ").trim();
+      }
+    }
+    try {
+      return JSON.stringify(payload).replace(/\s+/g, " ").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  private isMeaningfulExchangeEvent(type: string | undefined, payload: unknown): boolean {
+    if (type !== "user_message" && type !== "assistant_message") {
+      return false;
+    }
+    return this.extractCheckpointEventText(payload).length > 0;
+  }
+
+  private collectMeaningfulExchangeEvents(taskId: string): TaskEvent[] {
+    return this.getTaskEventsForReplay(taskId).filter((event) => {
+      const effectiveType =
+        typeof event.legacyType === "string" && event.legacyType.trim().length > 0
+          ? event.legacyType
+          : event.type;
+      return this.isMeaningfulExchangeEvent(effectiveType, event.payload);
+    });
+  }
+
+  private getSnapshotSummaryBlock(payload: Record<string, unknown>): string {
+    if (typeof payload.explicitChatSummaryBlock === "string" && payload.explicitChatSummaryBlock.trim()) {
+      return payload.explicitChatSummaryBlock.trim();
+    }
+    const transcript =
+      payload.transcript && typeof payload.transcript === "object"
+        ? (payload.transcript as Record<string, unknown>)
+        : null;
+    if (
+      transcript &&
+      typeof transcript.explicitChatSummaryBlock === "string" &&
+      transcript.explicitChatSummaryBlock.trim()
+    ) {
+      return transcript.explicitChatSummaryBlock.trim();
+    }
+    return "";
+  }
+
+  private parseStructuredCheckpointSummary(rawText: string, source: "snapshot" | "compaction_summary" | "completion" | "fallback"): {
+    source: "snapshot" | "compaction_summary" | "completion" | "fallback";
+    rawText?: string;
+    decisions: string[];
+    openLoops: string[];
+    nextActions: string[];
+    keyFindings: string[];
+  } {
+    const raw = String(rawText || "").trim();
+    const sections = {
+      decisions: [] as string[],
+      openLoops: [] as string[],
+      nextActions: [] as string[],
+      keyFindings: [] as string[],
+    };
+    if (!raw) {
+      return { source, decisions: [], openLoops: [], nextActions: [], keyFindings: [] };
+    }
+
+    let activeSection: keyof typeof sections | null = null;
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const normalized = trimmed.toLowerCase();
+      if (normalized.startsWith("decisions:")) {
+        activeSection = "decisions";
+        continue;
+      }
+      if (normalized.startsWith("open loops:")) {
+        activeSection = "openLoops";
+        continue;
+      }
+      if (normalized.startsWith("next actions:")) {
+        activeSection = "nextActions";
+        continue;
+      }
+      if (normalized.startsWith("key findings:")) {
+        activeSection = "keyFindings";
+        continue;
+      }
+      if (trimmed.startsWith("- ") && activeSection) {
+        sections[activeSection].push(trimmed.replace(/^-+\s*/, ""));
+      }
+    }
+
+    if (
+      sections.decisions.length === 0 &&
+      sections.openLoops.length === 0 &&
+      sections.nextActions.length === 0 &&
+      sections.keyFindings.length === 0
+    ) {
+      sections.keyFindings.push(raw.slice(0, 400));
+    }
+
+    return {
+      source,
+      rawText: raw,
+      ...sections,
+    };
+  }
+
+  private buildStructuredCheckpointSummary(task: Task, snapshotPayload?: Record<string, unknown>): {
+    source: "snapshot" | "compaction_summary" | "completion" | "fallback";
+    rawText?: string;
+    decisions: string[];
+    openLoops: string[];
+    nextActions: string[];
+    keyFindings: string[];
+  } {
+    const snapshotSummary = snapshotPayload ? this.getSnapshotSummaryBlock(snapshotPayload) : "";
+    if (snapshotSummary) {
+      return this.parseStructuredCheckpointSummary(snapshotSummary, "compaction_summary");
+    }
+
+    const bestKnownOutcome = getTaskBestKnownOutcome(task);
+    const completionSummary =
+      (typeof task.resultSummary === "string" && task.resultSummary.trim()) ||
+      (typeof bestKnownOutcome?.resultSummary === "string" && bestKnownOutcome.resultSummary.trim()) ||
+      "";
+    if (completionSummary) {
+      return this.parseStructuredCheckpointSummary(completionSummary, "completion");
+    }
+
+    return this.parseStructuredCheckpointSummary(task.prompt.slice(0, 400), "fallback");
+  }
+
+  private buildCheckpointEvidencePacket(taskId: string, messageEvents: TaskEvent[]): {
+    generatedAt: number;
+    spanHash: string;
+    spanCount: number;
+    spans: Array<{
+      sourceType: "task_message";
+      objectId: string;
+      taskId: string;
+      timestamp: number;
+      type: string;
+      excerpt: string;
+      eventId?: string;
+      seq?: number;
+    }>;
+  } {
+    const spans = messageEvents
+      .map((event) => {
+        const excerpt = this.extractCheckpointEventText(event.payload).slice(0, 500);
+        if (!excerpt) return null;
+        const objectId =
+          event.eventId || event.id || `${taskId}:${typeof event.seq === "number" ? event.seq : event.timestamp}`;
+        return {
+          sourceType: "task_message" as const,
+          objectId,
+          taskId,
+          timestamp: event.timestamp,
+          type:
+            typeof event.legacyType === "string" && event.legacyType.trim().length > 0
+              ? event.legacyType
+              : event.type,
+          excerpt,
+          ...(event.eventId ? { eventId: event.eventId } : {}),
+          ...(typeof event.seq === "number" ? { seq: event.seq } : {}),
+        };
+      })
+      .filter((span): span is NonNullable<typeof span> => span !== null);
+
+    const hashInput = spans
+      .map((span) => `${span.objectId}:${span.timestamp}:${span.type}:${span.excerpt}`)
+      .join("|");
+
+    return {
+      generatedAt: Date.now(),
+      spanHash: crypto.createHash("sha256").update(hashInput).digest("hex"),
+      spanCount: spans.length,
+      spans,
+    };
+  }
+
+  private async maybeCaptureRuntimeCheckpoint(params: {
+    task: Task;
+    workspacePath: string;
+    event: TaskEvent;
+    legacyType?: string;
+    legacyPayload: Record<string, unknown>;
+  }): Promise<void> {
+    const effectiveType =
+      typeof params.legacyType === "string" && params.legacyType.trim().length > 0
+        ? params.legacyType
+        : params.event.type;
+    const meaningfulEvents = this.collectMeaningfulExchangeEvents(params.task.id);
+    const meaningfulExchangeCount = meaningfulEvents.length;
+    const latestCheckpoint = await TranscriptStore.loadCheckpoint(params.workspacePath, params.task.id);
+    const latestSnapshotEvent = [...this.getTaskEventsForReplay(params.task.id)]
+      .reverse()
+      .find((event) => {
+        const type =
+          typeof event.legacyType === "string" && event.legacyType.trim().length > 0
+            ? event.legacyType
+            : event.type;
+        return type === "conversation_snapshot";
+      });
+    const latestSnapshotPayload =
+      latestSnapshotEvent?.payload && typeof latestSnapshotEvent.payload === "object"
+        ? (latestSnapshotEvent.payload as Record<string, unknown>)
+        : undefined;
+
+    if (effectiveType === "conversation_snapshot") {
+      const summary = this.buildStructuredCheckpointSummary(params.task, params.legacyPayload);
+      const evidencePacket = this.buildCheckpointEvidencePacket(
+        params.task.id,
+        meaningfulEvents.slice(-Math.max(1, Math.min(meaningfulExchangeCount, 12))),
+      );
+      const checkpointKind = this.getSnapshotSummaryBlock(params.legacyPayload)
+        ? "pre_compaction"
+        : "snapshot";
+      await TranscriptStore.writeCheckpoint(params.workspacePath, params.task.id, {
+        ...(params.legacyPayload as Record<string, unknown>),
+        checkpointKind,
+        sourceEventId: params.event.eventId,
+        sourceTimestamp: params.event.timestamp,
+        resumeStrategy: "checkpoint",
+        structuredSummary: summary,
+        evidencePacket,
+        dedupeHash: evidencePacket.spanHash,
+        sourceMetadata: {
+          triggerEventType: effectiveType,
+          meaningfulExchangeCount,
+        },
+      });
+      return;
+    }
+
+    if (this.isMeaningfulExchangeEvent(effectiveType, params.legacyPayload) && meaningfulExchangeCount > 0) {
+      const PERIODIC_EXCHANGE_INTERVAL = 12;
+      if (meaningfulExchangeCount % PERIODIC_EXCHANGE_INTERVAL === 0) {
+        const messageWindow = meaningfulEvents.slice(-PERIODIC_EXCHANGE_INTERVAL);
+        const evidencePacket = this.buildCheckpointEvidencePacket(params.task.id, messageWindow);
+        if (
+          latestCheckpoint?.checkpointKind === "periodic" &&
+          latestCheckpoint?.dedupeHash === evidencePacket.spanHash
+        ) {
+          return;
+        }
+        await TranscriptStore.writeCheckpoint(params.workspacePath, params.task.id, {
+          ...(latestSnapshotPayload || {}),
+          checkpointKind: "periodic",
+          sourceEventId: params.event.eventId,
+          sourceTimestamp: params.event.timestamp,
+          resumeStrategy: "checkpoint",
+          structuredSummary: this.buildStructuredCheckpointSummary(params.task, latestSnapshotPayload),
+          evidencePacket,
+          dedupeHash: evidencePacket.spanHash,
+          sourceMetadata: {
+            triggerEventType: effectiveType,
+            meaningfulExchangeCount,
+          },
+        });
+      }
+      return;
+    }
+
+    if (effectiveType === "task_completed") {
+      const hasMeaningfulOutcome = hasSubstantiveOutcomeEvidence({
+        resultSummary: params.task.resultSummary,
+        bestKnownOutcome: getTaskBestKnownOutcome(params.task),
+      });
+      if (!hasMeaningfulOutcome) {
+        return;
+      }
+      const evidencePacket = this.buildCheckpointEvidencePacket(
+        params.task.id,
+        meaningfulEvents.slice(-Math.max(1, Math.min(meaningfulExchangeCount, 12))),
+      );
+      await TranscriptStore.writeCheckpoint(params.workspacePath, params.task.id, {
+        ...(latestSnapshotPayload || {}),
+        checkpointKind: "completion",
+        sourceEventId: params.event.eventId,
+        sourceTimestamp: params.event.timestamp,
+        resumeStrategy: "checkpoint",
+        structuredSummary: this.buildStructuredCheckpointSummary(params.task, latestSnapshotPayload),
+        evidencePacket,
+        dedupeHash: evidencePacket.spanHash,
+        sourceMetadata: {
+          triggerEventType: effectiveType,
+          meaningfulExchangeCount,
+        },
+      });
     }
   }
 
@@ -4432,6 +4769,9 @@ export class AgentDaemon extends EventEmitter {
       "task_events",
       "task_history",
       "search_memories",
+      "search_sessions",
+      "memory_topics_load",
+      "memory_curated_read",
       "scratchpad_read",
       "glob",
       "list_directory",
@@ -7331,6 +7671,7 @@ export class AgentDaemon extends EventEmitter {
     taskId: string,
     message: string,
     images?: ImageAttachment[],
+    quotedAssistantMessage?: QuotedAssistantMessage,
   ): Promise<{ queued: boolean }> {
     let cached = this.activeTasks.get(taskId);
     let executor: TaskExecutor;
@@ -7374,16 +7715,19 @@ export class AgentDaemon extends EventEmitter {
     // If the executor is busy (mutex locked), queue the message for the running
     // loop to pick up and return immediately so the IPC doesn't block.
     if (executor.isRunning) {
-      executor.queueFollowUp(message, images);
+      executor.queueFollowUp(message, images, quotedAssistantMessage);
       // Emit user_message event immediately so the UI shows the message right away.
       // The executor's sendMessageLegacy won't re-emit because the message is
       // injected directly into the conversation loop, not through sendMessage.
-      this.logEvent(taskId, "user_message", { message });
+      this.logEvent(taskId, "user_message", {
+        message,
+        ...(quotedAssistantMessage ? { quotedAssistantMessage } : {}),
+      });
       return { queued: true };
     }
 
     // Send the message (executor is idle, acquire mutex normally)
-    await executor.sendMessage(message, images);
+    await executor.sendMessage(message, images, quotedAssistantMessage);
     return { queued: false };
   }
 
@@ -7460,7 +7804,12 @@ export class AgentDaemon extends EventEmitter {
       _chain = _chain
         .then(() => {
           executor.suppressNextUserMessageEvent();
-          return this.sendMessage(taskId, followUp.message, followUp.images);
+          return this.sendMessage(
+            taskId,
+            followUp.message,
+            followUp.images,
+            followUp.quotedAssistantMessage,
+          );
         })
         .then(() => {
           /* result intentionally ignored */
