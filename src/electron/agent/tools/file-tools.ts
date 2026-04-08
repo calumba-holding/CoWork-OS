@@ -1,7 +1,7 @@
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
 import * as path from "path";
-import { Task, Workspace, WorkspacePathAliasPolicy } from "../../../shared/types";
+import { SensitiveSourceRef, Task, Workspace, WorkspacePathAliasPolicy } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { GuardrailManager } from "../../guardrails/guardrail-manager";
 import {
@@ -11,7 +11,7 @@ import {
 } from "../../security/project-access";
 import mammoth from "mammoth";
 import { extractPptxContentFromFile } from "../../utils/pptx-extractor";
-import { extractPdfReviewData } from "../../utils/pdf-review";
+import { extractPdfText } from "../../utils/pdf-text";
 import {
   detectWorkspacePathAlias,
   shouldRewriteWorkspaceAliasPath,
@@ -21,6 +21,11 @@ import {
   isAlreadyInManagedOutputZone,
   shouldUseManagedAutomatedOutput,
 } from "../managed-output-paths";
+import {
+  buildSensitiveSourceRefForPath,
+  buildUntrustedContentBanner,
+  isUntrustedExternalSource,
+} from "../security/export-permission-context";
 
 // Limits to prevent context overflow
 const DEFAULT_READ_WINDOW_CHARS = 300 * 1024; // 300KB default read window
@@ -81,6 +86,18 @@ export class FileTools {
       return value;
     }
     return "rewrite_and_retry";
+  }
+
+  private buildReadProvenance(absolutePath: string): SensitiveSourceRef {
+    return buildSensitiveSourceRefForPath(this.workspace, absolutePath);
+  }
+
+  private applyReadProvenance(content: string, provenance: SensitiveSourceRef): string {
+    if (!isUntrustedExternalSource(provenance)) {
+      return content;
+    }
+    this.daemon.recordSensitiveSourceRead(this.taskId, provenance);
+    return buildUntrustedContentBanner(provenance) + content;
   }
 
   /**
@@ -618,6 +635,7 @@ export class FileTools {
     format?: string;
     path: string;
     window?: ReadWindow;
+    provenance?: SensitiveSourceRef;
   }> {
     // Validate input
     if (!relativePath || typeof relativePath !== "string") {
@@ -677,23 +695,39 @@ export class FileTools {
         if (rel) return rel;
         return canonicalPath;
       })();
+      const provenance = this.buildReadProvenance(canonicalPath);
 
       // Handle DOCX files
       if (ext === ".docx") {
         const out = await this.readDocxFile(fullPath, stats.size, readWindow);
-        return { ...out, path: outputPath };
+        return {
+          ...out,
+          content: this.applyReadProvenance(out.content, provenance),
+          path: outputPath,
+          provenance,
+        };
       }
 
       // Handle PDF files
       if (ext === ".pdf") {
         const out = await this.readPdfFile(fullPath, stats.size, readWindow);
-        return { ...out, path: outputPath };
+        return {
+          ...out,
+          content: this.applyReadProvenance(out.content, provenance),
+          path: outputPath,
+          provenance,
+        };
       }
 
       // Handle PPTX files
       if (ext === ".pptx") {
         const out = await this.readPptxFile(fullPath, stats.size, readWindow);
-        return { ...out, path: outputPath };
+        return {
+          ...out,
+          content: this.applyReadProvenance(out.content, provenance),
+          path: outputPath,
+          provenance,
+        };
       }
 
       // Legacy PPT files
@@ -723,6 +757,7 @@ export class FileTools {
       if (truncated) {
         content += `\n\n[... File window ${start}-${end} of ${stats.size} bytes ...]`;
       }
+      content = this.applyReadProvenance(content, provenance);
 
       return {
         content,
@@ -730,6 +765,7 @@ export class FileTools {
         truncated,
         path: outputPath,
         window: { start, end, total: stats.size },
+        provenance,
       };
     } catch (error: Any) {
       throw new Error(`Failed to read file: ${error.message}`);
@@ -873,20 +909,26 @@ export class FileTools {
     truncated?: boolean;
     format: string;
     window: ReadWindow;
+    pdf_extraction: {
+      status: "complete" | "recovered" | "ocr" | "preview" | "empty";
+      mode: string;
+      used_fallback: boolean;
+      preview_limited: boolean;
+      note: string;
+      page_count: number;
+    };
   }> {
     try {
-      const review = await extractPdfReviewData(fullPath, {
-        maxPages: 20,
-        maxCharsPerPage: 2000,
-        maxOcrPages: 4,
+      const extractedPdf = await extractPdfText(fullPath, {
         includeOcr: true,
       });
 
-      let extracted = review.content;
+      let extracted = extractedPdf.text;
 
       // Add metadata header
       const metadata: string[] = [];
-      if (review.pageCount) metadata.push(`Pages: ${review.pageCount}`);
+      if (extractedPdf.pageCount) metadata.push(`Pages: ${extractedPdf.pageCount}`);
+      if (extractedPdf.extractionNote) metadata.push(`Extraction: ${extractedPdf.extractionNote}`);
 
       if (metadata.length > 0) {
         extracted = `[PDF Metadata: ${metadata.join(" | ")}]\n\n${extracted}`;
@@ -904,6 +946,14 @@ export class FileTools {
         truncated: sliced.truncated,
         format: "pdf",
         window: sliced.window,
+        pdf_extraction: {
+          status: extractedPdf.extractionStatus,
+          mode: extractedPdf.extractionMode,
+          used_fallback: extractedPdf.usedFallback,
+          preview_limited: extractedPdf.previewLimited,
+          note: extractedPdf.extractionNote,
+          page_count: extractedPdf.pageCount,
+        },
       };
     } catch (error: Any) {
       throw new Error(`Failed to read PDF file: ${error.message}`);
