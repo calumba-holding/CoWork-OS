@@ -36,6 +36,9 @@ hero:
       text: Skills Runtime
       link: /skills-runtime-model
     - theme: alt
+      text: LLM Wiki
+      link: /llm-wiki
+    - theme: alt
       text: Release Notes 0.5.23
       link: /release-notes-0.5.23
     - theme: alt
@@ -79,8 +82,8 @@ features:
     details: The automations surface now separates core automation from trigger ingress, device routing, schedules, webhooks, and optional twin features.
   - title: Heartbeat V3
     details: Default two-lane background automation with cheap Pulse checks, selective Dispatch escalation, signal compression, automation-profile ownership, and truthful Mission Control state.
-  - title: 137 Built-in Skills
-    details: Document creation, web research, code generation, image analysis, and more. Extensible via custom skills, ClawHub installs, external skill imports, and optional read-only external skill directories, with staged scanning and warning/quarantine handling for managed imports.
+  - title: 138 Built-in Skills
+    details: Document creation, web research, code generation, image analysis, and specialized bundled workflows such as `llm-wiki` for persistent research vaults and `manim-video` for technical animation. Extensible via custom skills, ClawHub installs, external skill imports, and optional read-only external skill directories, with staged scanning and warning/quarantine handling for managed imports.
   - title: Additive Skill Routing
     details: Skills can still be proactively shortlisted from the task, but they add context and scoped runtime directives instead of replacing the canonical user request.
   - title: Profiles & Portability
