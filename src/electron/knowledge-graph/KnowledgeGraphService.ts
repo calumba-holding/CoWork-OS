@@ -14,6 +14,7 @@ import type {
   CreateEdgeInput,
   AddObservationInput,
 } from "../../shared/knowledge-graph-types";
+import { MemoryFeaturesManager } from "../settings/memory-features-manager";
 
 const MAX_CONTEXT_ENTITIES = 5;
 const MAX_CONTEXT_CHARS = 1500;
@@ -36,6 +37,10 @@ function compactText(text: string, max = 240): string {
     .replace(/\s+/g, " ")
     .trim();
   return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized;
+}
+
+function normalizeEdgeTime(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) ? (value as number) : fallback;
 }
 
 export class KnowledgeGraphService {
@@ -151,16 +156,37 @@ export class KnowledgeGraphService {
       throw new Error("Cannot create an edge from an entity to itself");
     }
 
+    const now = Date.now();
+    const normalizedValidFrom = normalizeEdgeTime(input.validFrom, now);
+    const normalizedValidTo = Number.isFinite(input.validTo) ? (input.validTo as number) : undefined;
+    if (normalizedValidTo !== undefined && normalizedValidFrom >= normalizedValidTo) {
+      throw new Error("valid_to must be greater than valid_from");
+    }
+
     // Check for duplicate edge
-    const existingEdges = repo.getEdgesBetween(input.sourceEntityId, input.targetEntityId);
-    const duplicate = existingEdges.find(
-      (e) =>
-        e.edgeType === input.edgeType.toLowerCase().trim() &&
-        e.sourceEntityId === input.sourceEntityId &&
-        e.targetEntityId === input.targetEntityId,
+    const existingEdges = repo.getRelationEdges(
+      workspaceId,
+      input.sourceEntityId,
+      input.targetEntityId,
+      input.edgeType,
     );
-    if (duplicate) {
-      return duplicate; // Idempotent
+    const duplicateCurrent = existingEdges.find(
+      (edge) =>
+        edge.validTo === undefined &&
+        normalizedValidTo === undefined &&
+        input.validFrom === undefined &&
+        (edge.validFrom ?? edge.createdAt) <= now,
+    );
+    if (duplicateCurrent) {
+      return duplicateCurrent;
+    }
+    const duplicateInterval = existingEdges.find(
+      (edge) =>
+        (edge.validFrom ?? edge.createdAt) === normalizedValidFrom &&
+        (edge.validTo ?? undefined) === normalizedValidTo,
+    );
+    if (duplicateInterval) {
+      return duplicateInterval;
     }
 
     return repo.createEdge(
@@ -172,11 +198,17 @@ export class KnowledgeGraphService {
       input.confidence ?? 1.0,
       source,
       sourceTaskId,
+      normalizedValidFrom,
+      normalizedValidTo,
     );
   }
 
   static deleteEdge(edgeId: string): boolean {
     return this.getRepo().deleteEdge(edgeId);
+  }
+
+  static invalidateEdge(edgeId: string, validTo = Date.now()): KGEdge | undefined {
+    return this.getRepo().invalidateEdge(edgeId, validTo);
   }
 
   // ─── Observation Operations ───────────────────────────────────────
@@ -203,12 +235,17 @@ export class KnowledgeGraphService {
     return this.getRepo().searchEntities(workspaceId, query, limit);
   }
 
-  static getNeighbors(entityId: string, depth = 1, edgeTypes?: string[]): KGNeighborResult[] {
-    return this.getRepo().getNeighbors(entityId, depth, edgeTypes);
+  static getNeighbors(
+    entityId: string,
+    depth = 1,
+    edgeTypes?: string[],
+    asOf?: number,
+  ): KGNeighborResult[] {
+    return this.getRepo().getNeighbors(entityId, depth, edgeTypes, asOf);
   }
 
-  static getSubgraph(entityIds: string[]): KGSubgraph {
-    return this.getRepo().getSubgraph(entityIds);
+  static getSubgraph(entityIds: string[], asOf?: number): KGSubgraph {
+    return this.getRepo().getSubgraph(entityIds, asOf);
   }
 
   static getStats(workspaceId: string): KGStats {
@@ -408,6 +445,8 @@ export class KnowledgeGraphService {
     if (!this.initialized) return "";
 
     try {
+      const temporalKnowledgeEnabled = MemoryFeaturesManager.loadSettings().temporalKnowledgeEnabled !== false;
+      const asOf = temporalKnowledgeEnabled ? Date.now() : undefined;
       const results = this.getRepo().searchEntities(workspaceId, taskPrompt, MAX_CONTEXT_ENTITIES);
       if (results.length === 0) return "";
 
@@ -422,7 +461,7 @@ export class KnowledgeGraphService {
         }
 
         // Add immediate relationships
-        const neighbors = this.getRepo().getNeighbors(e.id, 1);
+        const neighbors = this.getRepo().getNeighbors(e.id, 1, undefined, asOf);
         if (neighbors.length > 0) {
           const rels = neighbors
             .slice(0, 3)
