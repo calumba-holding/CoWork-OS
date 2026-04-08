@@ -182,27 +182,31 @@ export class RelationshipMemoryService {
     }
 
     const contextMatch = text.match(
-      /\b(?:i(?:'m| am) working on|for my team|for my company|we are building|this project is)\s+([^.!?\n]{3,150})/i,
+      /\b(?:remember that|please remember|for future reference)\s+([^.!?\n]{3,150})/i,
     );
     if (contextMatch) {
       candidates.push({
         layer: "context",
         text: contextMatch[0].trim(),
-        confidence: 0.75,
+        confidence: 0.8,
         source: "conversation",
         lastTaskId: taskId,
       });
     }
 
     const commitmentMatch = text.match(
-      /\b(?:remind me to|i need to|i must|please remember to)\s+([^.!?\n]{3,150})/i,
+      /\b(?:remind me to|please remember to|i need to|i must)\s+([^.!?\n]{3,150})/i,
     );
     if (commitmentMatch) {
       const dueAt = this.parseDueAt(text, Date.now());
+      const normalizedLeadIn = commitmentMatch[0].toLowerCase();
       candidates.push({
         layer: "commitments",
         text: commitmentMatch[0].trim(),
-        confidence: 0.82,
+        confidence:
+          normalizedLeadIn.startsWith("i need to") || normalizedLeadIn.startsWith("i must")
+            ? 0.74
+            : 0.82,
         source: "conversation",
         status: "open",
         dueAt,
