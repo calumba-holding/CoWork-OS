@@ -76,6 +76,10 @@ const READ_PARALLEL_TOOLS = new Set([
   "task_history",
   "task_list_list",
   "search_memories",
+  "search_quotes",
+  "search_sessions",
+  "memory_topics_load",
+  "memory_curated_read",
   "scratchpad_read",
 ]);
 
@@ -120,6 +124,10 @@ const IDEMPOTENT_TOOLS = new Set([
   "task_history",
   "task_list_list",
   "search_memories",
+  "search_quotes",
+  "search_sessions",
+  "memory_topics_load",
+  "memory_curated_read",
   "scratchpad_read",
 ]);
 
