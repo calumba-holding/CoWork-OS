@@ -316,6 +316,14 @@ export function normalizeWhatsAppNaturalCommand(text: string): string | undefine
     return rest ? `/batch ${rest}` : "/batch";
   }
 
+  const llmWikiMatch = normalized.match(
+    /^(?:llm[- ]wiki|build (?:a |an )?(?:llm wiki|research vault|obsidian vault)|create (?:a |an )?(?:research vault|obsidian vault)|wiki this research)(?:\s+(.*))?$/i,
+  );
+  if (llmWikiMatch) {
+    const rest = llmWikiMatch[1]?.trim();
+    return rest ? `/llm-wiki ${rest}` : "/llm-wiki";
+  }
+
   const scheduleMatch = normalized.match(/^(?:schedule|remind me|reminder)\s+(.*)$/i);
   if (scheduleMatch) {
     const rest = scheduleMatch[1].trim();
