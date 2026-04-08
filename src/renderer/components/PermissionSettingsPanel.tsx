@@ -11,6 +11,7 @@ type RuleDraft = {
   effect: "allow" | "deny" | "ask";
   scopeKind: PermissionRuleScope["kind"];
   toolName: string;
+  domain: string;
   path: string;
   prefix: string;
   serverName: string;
@@ -26,6 +27,7 @@ const DEFAULT_RULE_DRAFT: RuleDraft = {
   effect: "allow",
   scopeKind: "tool",
   toolName: "run_command",
+  domain: "",
   path: "",
   prefix: "",
   serverName: "",
@@ -35,10 +37,14 @@ interface PermissionSettingsPanelProps {
   workspaceId?: string;
 }
 
-function scopeToLabel(scope: PermissionRuleScope): string {
+export function scopeToLabel(scope: PermissionRuleScope): string {
   switch (scope.kind) {
     case "tool":
       return `Tool: ${scope.toolName}`;
+    case "domain":
+      return scope.toolName
+        ? `Domain: ${scope.domain} (${scope.toolName})`
+        : `Domain: ${scope.domain}`;
     case "path":
       return scope.toolName
         ? `Path: ${scope.path} (${scope.toolName})`
@@ -52,8 +58,14 @@ function scopeToLabel(scope: PermissionRuleScope): string {
   return exhaustiveCheck;
 }
 
-function buildScope(draft: RuleDraft): PermissionRuleScope {
+export function buildScope(draft: RuleDraft): PermissionRuleScope {
   switch (draft.scopeKind) {
+    case "domain":
+      return {
+        kind: "domain",
+        domain: draft.domain.trim(),
+        ...(draft.toolName.trim() ? { toolName: draft.toolName.trim() } : {}),
+      };
     case "path":
       return {
         kind: "path",
@@ -189,6 +201,8 @@ export function PermissionSettingsPanel({ workspaceId }: PermissionSettingsPanel
     switch (ruleDraft.scopeKind) {
       case "tool":
         return !!ruleDraft.toolName.trim();
+      case "domain":
+        return !!ruleDraft.domain.trim();
       case "path":
         return !!ruleDraft.path.trim();
       case "command_prefix":
@@ -228,6 +242,7 @@ export function PermissionSettingsPanel({ workspaceId }: PermissionSettingsPanel
         >
           <option value="default">Default</option>
           <option value="plan">Plan</option>
+          <option value="dangerous_only">Dangerous only</option>
           <option value="accept_edits">Accept edits</option>
           <option value="dont_ask">Don't ask</option>
           <option value="bypass_permissions">Bypass permissions</option>
@@ -294,6 +309,7 @@ export function PermissionSettingsPanel({ workspaceId }: PermissionSettingsPanel
             }
           >
             <option value="tool">Tool</option>
+            <option value="domain">Domain</option>
             <option value="path">Path</option>
             <option value="command_prefix">Command prefix</option>
             <option value="mcp_server">MCP server</option>
@@ -330,6 +346,29 @@ export function PermissionSettingsPanel({ workspaceId }: PermissionSettingsPanel
                 value={ruleDraft.path}
                 onChange={(e) => setRuleDraft((prev) => ({ ...prev, path: e.target.value }))}
                 placeholder="/Users/you/project/src"
+              />
+            </div>
+          </>
+        )}
+
+        {ruleDraft.scopeKind === "domain" && (
+          <>
+            <div className="settings-inline-input">
+              <label>Tool name</label>
+              <input
+                className="settings-input"
+                value={ruleDraft.toolName}
+                onChange={(e) => setRuleDraft((prev) => ({ ...prev, toolName: e.target.value }))}
+                placeholder="http_request"
+              />
+            </div>
+            <div className="settings-inline-input">
+              <label>Domain</label>
+              <input
+                className="settings-input"
+                value={ruleDraft.domain}
+                onChange={(e) => setRuleDraft((prev) => ({ ...prev, domain: e.target.value }))}
+                placeholder="api.example.com"
               />
             </div>
           </>
