@@ -24,7 +24,7 @@ Compared features:
 
 High level:
 
-- **OpenClaw** appears stronger on plain-markdown workspace memory, public skill registry/discovery, and explicit session-history tooling.
+- **OpenClaw** appears stronger on plain-markdown workspace memory and public skill registry/discovery.
 - **CoWork OS** appears stronger on structured memory architecture, the `Subconscious` reflective loop, approval-gated skill creation, built-in governance/security controls, and now a shared turn kernel / tool scheduler / orchestration graph stack for delegated work.
 - Some items in the screenshot are not first-class product terms in either repo, so a few rows are marked **Partial** or **Unclear**.
 
@@ -32,7 +32,7 @@ High level:
 
 | Feature | CoWork OS | OpenClaw | Notes |
 |---|---|---|---|
-| Memory system | Yes | Yes | CoWork OS has multi-layer memory, knowledge graph, relationship memory, workspace kit, and imported ChatGPT history. OpenClaw uses workspace markdown memory files such as `MEMORY.md` and `memory/YYYY-MM-DD.md`. |
+| Memory system | Yes | Yes | CoWork OS now has layered memory with curated hot memory, archive recall, session recall, topic packs, knowledge graph, workspace kit, and imported ChatGPT history. OpenClaw uses workspace markdown memory files such as `MEMORY.md` and `memory/YYYY-MM-DD.md`. |
 | Memory size | Partial / not explicit | Partial / not explicit | Neither repo clearly presents a specific memory-capacity feature or configurable marketed size in the reviewed docs. Both focus more on compaction and management. |
 | Memory nudges | Partial | Yes | CoWork OS has failure-pattern nudges and proactive reminder-style behavior via memory/persona systems, but not a clearly named “memory nudge” feature. OpenClaw explicitly references heartbeat nudges. |
 | Memory flush | Yes | Yes | CoWork OS flushes compaction summaries into durable memory. OpenClaw documents automatic pre-compaction memory flush and silent memory flush to disk. |
@@ -42,7 +42,7 @@ High level:
 | Autonomous skill creation | Partial, approval-gated | Partial / unclear | CoWork OS supports `skill_proposal.create` but requires approval before a skill is materialized. OpenClaw supports publish/install/discovery flows, but reviewed docs do not clearly show autonomous self-authoring by the agent. |
 | Reflective learning loop | Yes | Partial | CoWork OS has explicit subconscious-loop documentation, reinforcement loops, correction capture, and `memory_save`. OpenClaw has learning references, but not as clearly productized in the reviewed sources. |
 | Skill security scanning | Yes | Partial | CoWork OS documents skill validation/audit tooling. OpenClaw shows install gating and unsafe-skill reporting, but no equally explicit skill scan pipeline was found in the reviewed material. |
-| Session history search | Yes | Yes | CoWork OS supports persistent memory search and imported/global history retrieval. OpenClaw includes a dedicated sessions history tool. |
+| Session history search | Yes | Yes | CoWork OS supports explicit recent-run recall through `search_sessions` plus archive/global retrieval. OpenClaw includes a dedicated sessions history tool. |
 | Cross-session user modeling | Yes | Partial | CoWork OS has relationship memory, user profile extraction, and adaptive style/personalization. OpenClaw has personal assistant and profile/persona concepts, but less explicit structured cross-session user modeling in the reviewed docs. |
 | Cache-stable memory | Yes | Yes | CoWork OS now documents provider-aware stable-prefix prompt caching driven by session-scoped prompt sections and persisted prompt-cache state. OpenClaw explicitly documents cache-stable prompt behavior by keeping the time-zone section stable. |
 
@@ -114,7 +114,7 @@ Both repos clearly have a real skill system.
 
 **CoWork OS**
 
-- README advertises 137 built-in skills.
+- README advertises 138 built-in skills.
 - `resources/skills/` contains bundled skills.
 - Plugin packs can expose and toggle individual skills.
 
@@ -178,8 +178,8 @@ Both repos clearly have a real skill system.
 
 **CoWork OS**
 
-- `docs/features.md` documents unified memory search and imported memory search.
-- Session continuity is also supported through compaction summaries and persistent memory.
+- `docs/features.md` documents unified archive search plus explicit session recall via `search_sessions`.
+- `docs/workspace-memory-flow.md` documents transcript spans/checkpoints and tool-driven recall.
 
 **OpenClaw**
 
@@ -215,7 +215,7 @@ Both repos clearly have a real skill system.
 If the goal is a feature-for-feature comparison against the provided list:
 
 - **CoWork OS leads** on structured memory architecture, reflective learning, user modeling, approval-gated skill creation, and skill validation/audit.
-- **OpenClaw leads** on explicit session-history tooling, public skill-registry/discovery workflows, simple workspace-native memory files, and heartbeat-style nudges.
+- **OpenClaw leads** on public skill-registry/discovery workflows, simple workspace-native memory files, and heartbeat-style nudges.
 - **Both** support core memory and skills, but they package these capabilities differently:
   - **CoWork OS** favors governance, structure, and production controls.
   - **OpenClaw** favors personal-assistant workflows, workspace-native simplicity, and extensible operator tooling.
