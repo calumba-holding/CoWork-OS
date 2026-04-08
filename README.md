@@ -8,7 +8,7 @@
 
 <p align="center">
   <strong>CoWork OS is a local-first option for production workflows.</strong><br>
-  Security-hardened, local-first AI operating system — 34 LLM provider options, 17 messaging channels, 137 built-in skills
+  Security-hardened, local-first AI operating system — 34 LLM provider options, 17 messaging channels, 138 built-in skills
 </p>
 
 <p align="center">
@@ -46,7 +46,7 @@
 - **17 messaging channels** — WhatsApp, Telegram, Discord, Slack, Teams, Google Chat, Feishu/Lark, WeCom, iMessage, Signal, X, and more. Chat with your AI from anywhere.
 - **44 MCP connectors** — Pre-built enterprise integrations across CRM, support, productivity, analytics, and payments, with native connector support for the most common internal surfaces.
 - **18 bundled role-specific packs** — including Mobile Development, Game Development, and 5 Financial packs, with 55+ skills, in-app Plugin Store for installing community packs, remote registry, and enterprise admin policies for organization-wide control.
-- **137 built-in skills** — Documents, code review, web search, image generation, cloud integrations, game development, mobile development, financial analysis, infrastructure-as-code, and more.
+- **138 built-in skills** — Documents, code review, web search, image generation, cloud integrations, game development, mobile development, financial analysis, infrastructure-as-code, and more, including bundled workflows such as `llm-wiki` for persistent research vaults and `manim-video` for programmatic technical animation.
 - **Profiles & portability** — run separate CoWork profiles with isolated app data, export/import complete profile bundles, and keep credentials, channels, skills, and sessions separated by profile.
 - **Active Context sidebar** — Always-visible panel showing 44 available MCP connectors with branded Lucide icons and enabled skills, auto-refreshed every 30 seconds.
 - **Agent teams** — Multi-agent collaboration with shared checklists, graph-backed runs, collaborative mode, multi-LLM synthesis, persistent teams, and ACP-targeted delegation for local or remote specialists.
@@ -55,7 +55,7 @@
 - **Chat mode** — Direct LLM chat with no tools, no step timeline, same-session follow-ups, and chat-only streaming for supported providers.
 - **Build Mode** — Go from idea to working prototype with a phased canvas workflow (Concept → Plan → Scaffold → Iterate) and named checkpoints.
 - **AI Playbook** — Auto-captures what worked from successful tasks and injects relevant patterns into future prompts. Repeated patterns auto-promote to governed, one-click-approvable skills via the Playbook-to-Skill pipeline.
-- **Evolving Intelligence** — Unified Memory Synthesizer merges all 6 memory subsystems into a single coherent context block. Adaptive Style Engine learns your communication preferences from message patterns and feedback. Evolution Metrics dashboard quantifies improvement over time (correction rate, knowledge growth, style alignment).
+- **Evolving Intelligence** — The layered memory runtime keeps curated hot memory prompt-visible by default, leaves archive recall off by default, and adds explicit `search_sessions` / `memory_topics_load` recall paths for recent runs and topical packs. Adaptive Style Engine learns your communication preferences from message patterns and feedback. Evolution Metrics dashboard quantifies improvement over time (correction rate, knowledge growth, style alignment).
 - **Operator Runtime Visibility** — Task completion now shows what Cowork learned, semantic batch labels and follow-up completions stay visible, unified recall spans tasks/messages/files, persistent shell sessions preserve operator state, and model routing/fallback is visible in the UI and Mission Control.
 - **Configurable fallback chains** — LLM and web-search providers can run in an explicit ordered fallback chain, including Exa for search, immediate failover on retryable provider errors, provider/model-level failover visibility in the UI, and a configurable cooldown before retrying the primary LLM route.
 - **Provider-aware prompt caching** — Prompt caching is on by default for supported routes. CoWork keeps stable system sections cacheable, keeps volatile turn context out of the cached prefix, uses Anthropic automatic caching when available, falls back to explicit Claude breakpoints on OpenRouter, and derives stable OpenAI-family cache keys for GPT routes such as Azure `gpt-5.4` / `gpt-5.4-mini`.
@@ -72,9 +72,11 @@
 Stable workflow entry points for the newest high-impact capabilities.
 
 - **Ideas panel** — curated launchpad of pre-written workflow prompts and capability-aware starting points, with deep links into common tasks.
+- **Research vaults (`llm-wiki`)** — first-class workspace-local knowledge bases inspired by Andrej Karpathy's LLM Wiki concept, with deterministic raw-source capture, Obsidian-friendly notes, filed-back outputs, vault search, and vault-health analysis. [Learn more](docs/llm-wiki.md)
 - **Document editing sessions** — inline PDF region editing, DOCX block replacement, version browsing, and document-aware file viewing for active editing sessions.
 - **Image generation** — configurable provider ordering across Gemini, OpenAI, Azure OpenAI, and OpenRouter.
 - **Video generation** — text-to-video and image-to-video routing with polling tools and inline preview.
+- **Programmatic technical video** — bundled `manim-video` skill for Manim CE explainers, equation walkthroughs, algorithm visualizations, and animated architecture/data stories. [Learn more](docs/skills/manim-video.md)
 
 See [Core Automation](docs/core-automation.md), [I Gave CoWork OS A Subconscious, And Now It Self-Improves 24/7 | Full Guide](docs/continual-learning-in-cowork.md), [Features](docs/features.md), [Heartbeat v3](docs/heartbeat-v3.md), [Providers](docs/providers.md), and [Plugin Packs](docs/plugin-packs.md) for current runtime details.
 
@@ -141,6 +143,25 @@ See the [Development Guide](docs/development.md) for prerequisites and details.
 Task-based execution with dynamic re-planning, five runtime modes (Chat, Execute, Plan, Analyze, Verified) plus orchestration toggles (Autonomous, Collaborative, Multi-LLM, Think With Me), a shared turn kernel, metadata-driven tool scheduling, graph-backed delegation, typed worker roles, optional workflow-pipeline execution with per-phase model routing, agent teams with persistence, agent comparison, git worktree isolation, AI playbook, and performance reviews. [Learn more](docs/features.md#agent-capabilities)
 
 Skills now follow an additive runtime model: CoWork can proactively shortlist or apply a relevant skill, but the original task remains canonical. Skills add context and scoped execution modifiers instead of replacing the task prompt. [Learn more](docs/skills-runtime-model.md)
+
+### Research Vaults (`llm-wiki`)
+
+CoWork OS includes `llm-wiki` as a bundled, first-class research-vault workflow inspired by Andrej Karpathy's LLM Wiki idea: keep a `/raw` corpus, build durable linked notes on top, and make the result easy for agents to traverse later.
+
+You can launch it from the GUI with a normal prompt such as `Build a persistent Obsidian-friendly research vault for GRPO papers`, from the welcome/onboarding starter cards, or with `/llm-wiki` when you want explicit slash syntax.
+
+`llm-wiki` creates and maintains a workspace-local markdown wiki with:
+
+- immutable `raw/` source captures
+- deterministic ingest helpers for articles, papers, repos, datasets, and images
+- durable Obsidian-friendly notes and maps
+- deterministic vault-first search across notes, raw captures, and filed slide decks
+- filed-back Marp slide decks and SVG charts under `outputs/`
+- `SCHEMA.md`, `index.md`, `log.md`, and `inbox.md`
+- a GUI vault browser on the welcome screen for core files, recent notes, recent queries, outputs, and raw captures
+- deterministic vault analysis for orphans, broken links, bridge pages, surprising cross-section links, and suggested follow-up questions
+
+It works in desktop and gateway channels, supports inline chaining, and writes inspectable run artifacts alongside the persistent vault. GUI-first prompts can start the flow even before you supply a topic, in which case CoWork asks one short scoping question first. [Learn more](docs/llm-wiki.md)
 
 Operator Runtime Visibility makes the runtime's learning and routing visible: task detail surfaces now show the learning progression, unified recall spans tasks/messages/files/workspace notes/memory/KG, shell sessions preserve operator state, and live routing/fallback events are surfaced in Mission Control and the task UI. [Learn more](docs/operator-runtime-visibility.md)
 
@@ -273,7 +294,7 @@ These are the workflows where approval gates, local data control, and measurable
 
 ### Extensibility
 
-- **137 built-in skills** across developer, productivity, communication, documents, game development, mobile development, financial analysis, infrastructure-as-code, and more
+- **138 built-in skills** across developer, productivity, communication, documents, game development, mobile development, financial analysis, infrastructure-as-code, and more
 - **Custom skills** in `~/Library/Application Support/cowork-os/skills/` (macOS) or `%APPDATA%\cowork-os\skills\` (Windows)
 - **18 bundled plugin packs** with 55+ role-specific skills and Digital Twin integration
 - **Plugin Store** — browse, install from Git/URL, scaffold custom packs, and review quarantine/report state for imported packs
@@ -286,13 +307,15 @@ Text-to-speech (ElevenLabs, OpenAI, Web Speech API), speech-to-text (Whisper), a
 
 ### Knowledge Graph
 
-Built-in structured entity and relationship memory backed by SQLite. The agent builds a knowledge graph of your workspace — people, projects, technologies, services, and their relationships — with 9 dedicated tools, FTS5 search, multi-hop graph traversal, auto-extraction from task results, and confidence scoring with decay. [Learn more](docs/knowledge-graph.md)
+Built-in structured entity and relationship memory backed by SQLite. The agent builds a knowledge graph of your workspace — people, projects, technologies, services, and their relationships — with 10 dedicated tools, FTS5 search, multi-hop graph traversal, temporal validity on edges (`valid_from` / `valid_to`), historical `as_of` queries, auto-extraction from task results, and confidence scoring with decay. [Learn more](docs/knowledge-graph.md)
 
 ### Memory & Context
 
-Persistent memory with privacy protection, FTS5 search, LLM compression, and a contract-driven workspace kit (`.cowork/`) for durable human-edited context. The workspace kit now separates workspace-wide files such as `AGENTS.md`, `USER.md`, `MEMORY.md`, `TOOLS.md`, `SOUL.md`, `IDENTITY.md`, `RULES.md`, `VIBES.md`, and `LORE.md` from project-scoped files such as `.cowork/projects/<projectId>/CONTEXT.md` and `.cowork/projects/<projectId>/ACCESS.md`. Special files get dedicated lifecycle handling: `BOOTSTRAP.md` is a one-time onboarding checklist tracked through `.cowork/workspace-state.json`, while `HEARTBEAT.md` is reserved for recurring Heartbeat v3 checklist work instead of general task context.
+Persistent memory with privacy protection, FTS5 search, LLM compression, and a contract-driven workspace kit (`.cowork/`) for durable human-edited context. The runtime now makes memory explicit as a four-layer wake-up model: `L0 Identity` and `L1 Essential Story` are prompt-visible by default, while `L2 Topic Packs` and `L3 Deep Recall` stay tool-driven through `memory_topics_load`, `search_sessions`, `search_memories`, and exact-span `search_quotes`. Runtime-native checkpoints capture both compact structured summaries and verbatim evidence packets before compaction, on meaningful task completion, and periodically during long runs.
 
-Every tracked file follows a shared parser/linter model with freshness windows, secret detection, missing-file status, and revision snapshots stored under `.cowork/**/.history/`. Workspace kit health is surfaced in the app and can be checked locally with `npm run kit:lint` for human-readable output or JSON export. **Import your ChatGPT history** to eliminate the cold-start problem — CoWork OS knows you from day one. All imported data is stored locally and encrypted on your machine. **Proactive session compaction** automatically generates comprehensive structured summaries when context reaches 90% capacity — preserving user messages, decisions, file changes, errors, and pending work so the agent continues seamlessly without losing critical context. [Learn more](docs/features.md#persistent-memory-system) | [Context Compaction](docs/context-compaction.md)
+The workspace kit separates workspace-wide files such as `AGENTS.md`, `USER.md`, `MEMORY.md`, `TOOLS.md`, `SOUL.md`, `IDENTITY.md`, `RULES.md`, `VIBES.md`, and `LORE.md` from project-scoped files such as `.cowork/projects/<projectId>/CONTEXT.md` and `.cowork/projects/<projectId>/ACCESS.md`. Special files get dedicated lifecycle handling: `BOOTSTRAP.md` is a one-time onboarding checklist tracked through `.cowork/workspace-state.json`, while `HEARTBEAT.md` is reserved for recurring Heartbeat v3 checklist work instead of general task context.
+
+Every tracked file follows a shared parser/linter model with freshness windows, secret detection, missing-file status, and revision snapshots stored under `.cowork/**/.history/`. Workspace kit health is surfaced in the app and can be checked locally with `npm run kit:lint` for human-readable output or JSON export. **Import your ChatGPT history** to eliminate the cold-start problem — CoWork OS knows you from day one. All imported data is stored locally and encrypted on your machine. **Proactive session compaction** automatically generates comprehensive structured summaries when context reaches 90% capacity, and checkpoint capture preserves exact supporting spans so recall quality survives compaction. [Learn more](docs/features.md#persistent-memory-system) | [Context Compaction](docs/context-compaction.md)
 
 <p align="center">
   <img src="screenshots/cowork-os-agents.png" alt="Agent Personas" width="700">
@@ -419,6 +442,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history of completed features.
 | [Development](docs/development.md) | Build from source, project structure |
 | [Architecture](docs/architecture.md) | Technical architecture deep-dive |
 | [Skills Runtime Model](docs/skills-runtime-model.md) | Canonical prompt invariant, additive skill application, routing shortlist model, and `use_skill` contract |
+| [LLM Wiki](docs/llm-wiki.md) | First-class research vault workflow, slash syntax, vault layout, analyzer outputs, and Obsidian-friendly knowledge-base behavior |
+| [manim-video Skill](docs/skills/manim-video.md) | Bundled Manim CE workflow for technical animation, project scaffolding, and draft-to-production render flow |
 | [Core Automation](docs/core-automation.md) | Runtime boundary for Memory + Heartbeat + Subconscious, automation profiles, and the core harness |
 | [Heartbeat v3](docs/heartbeat-v3.md) | Default two-lane heartbeat architecture, signals, Pulse, Dispatch, and automation-profile-backed operator semantics |
 | [Security Guide](docs/security-guide.md) | Security model and best practices |
