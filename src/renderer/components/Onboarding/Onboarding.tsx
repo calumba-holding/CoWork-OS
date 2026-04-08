@@ -3,11 +3,26 @@ import { useOnboardingFlow, SCRIPT } from "../../hooks/useOnboardingFlow";
 import { useVoiceInput } from "../../hooks/useVoiceInput";
 import { AwakeningOrb } from "./AwakeningOrb";
 import { TypewriterText } from "./TypewriterText";
-import type { LLMProviderType, PersonaId } from "../../../shared/types";
+import type { LLMProviderType } from "../../../shared/types";
 import { STARTER_MISSIONS } from "../../../shared/starter-missions";
+import {
+  buildOnboardingWorkspaceSummary,
+  getPriorityTitles,
+  getResolvedResponseStyleLabel,
+  getTimeDrainTitles,
+  ONBOARDING_ASSISTANT_TRAITS,
+  ONBOARDING_PRIORITIES,
+  ONBOARDING_RESPONSE_STYLES,
+  ONBOARDING_TIME_DRAINS,
+  type OnboardingAssistantTraitId,
+  type OnboardingPriorityId,
+  type OnboardingResponseStyleId,
+  type OnboardingTimeDrainId,
+} from "../../../shared/onboarding";
 
 interface OnboardingProps {
   onComplete: (dontShowAgain: boolean) => void;
+  workspaceId?: string | null;
 }
 
 interface OnboardingAmbientAudio {
@@ -183,15 +198,6 @@ const clearOnboardingUiDraft = (): void => {
 // Use shared starter missions — pick a subset for the onboarding final step
 const FINAL_TRY_SUGGESTIONS = STARTER_MISSIONS.slice(0, 8);
 
-type RecapEditableField = "name" | "persona" | "style" | "memory" | "voice";
-type RecapDataUpdates = {
-  assistantName: string;
-  persona: PersonaId;
-  workStyle: "planner" | "flexible" | null;
-  memoryEnabled: boolean;
-  voiceEnabled: boolean | null;
-};
-
 const buildConfidenceResponse = (
   prompt: string,
   data: {
@@ -212,7 +218,7 @@ const buildConfidenceResponse = (
   return `${name}: Great prompt: "${prompt}". ${styleLine} ${memoryLine}`;
 };
 
-export function Onboarding({ onComplete }: OnboardingProps) {
+export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
   const uiDraftRef = useRef<OnboardingUiDraft | null>(loadOnboardingUiDraft());
   const [inputValue, setInputValue] = useState(uiDraftRef.current?.inputValue ?? "");
   const [inputMode, setInputMode] = useState<"voice" | "keyboard">(
@@ -232,13 +238,20 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   const [themeMode, setThemeMode] = useState<"light" | "dark">(() =>
     document.documentElement.classList.contains("theme-light") ? "light" : "dark",
   );
-  const [recapEditingField, setRecapEditingField] = useState<RecapEditableField | null>(null);
-  const [recapNameDraft, setRecapNameDraft] = useState("");
+  const [profileNameDraft, setProfileNameDraft] = useState("");
+  const [profileContextDraft, setProfileContextDraft] = useState("");
+  const [timeDrainsOtherDraft, setTimeDrainsOtherDraft] = useState("");
+  const [prioritiesOtherDraft, setPrioritiesOtherDraft] = useState("");
+  const [workflowToolsDraft, setWorkflowToolsDraft] = useState("");
+  const [responseStyleCustomDraft, setResponseStyleCustomDraft] = useState("");
+  const [additionalGuidanceDraft, setAdditionalGuidanceDraft] = useState("");
   const ambientAudioRef = useRef<OnboardingAmbientAudio | null>(null);
 
-  const onboarding = useOnboardingFlow({ onComplete });
+  const onboarding = useOnboardingFlow({ onComplete, workspaceId });
   const isSensitiveInputState =
     onboarding.state === "llm_api_key" || onboarding.state === "llm_testing";
+  const isCompactRecapStep =
+    onboarding.state === "recap" || onboarding.state === "final_try";
 
   // Voice input integration
   const voiceInput = useVoiceInput({
@@ -307,12 +320,40 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   }, [isSensitiveInputState]);
 
   useEffect(() => {
-    if (onboarding.state !== "recap") {
-      setRecapEditingField(null);
+    if (onboarding.state === "ask_user_profile") {
+      setProfileNameDraft(onboarding.data.userName || "");
+      setProfileContextDraft(onboarding.data.userContext || "");
       return;
     }
-    setRecapNameDraft(onboarding.data.assistantName || "");
-  }, [onboarding.state, onboarding.data.assistantName]);
+    if (onboarding.state === "ask_time_drains") {
+      setTimeDrainsOtherDraft(onboarding.data.timeDrainsOther || "");
+      return;
+    }
+    if (onboarding.state === "ask_priorities") {
+      setPrioritiesOtherDraft(onboarding.data.prioritiesOther || "");
+      return;
+    }
+    if (onboarding.state === "ask_tools") {
+      setWorkflowToolsDraft(onboarding.data.workflowTools || "");
+      return;
+    }
+    if (onboarding.state === "ask_response_style") {
+      setResponseStyleCustomDraft(onboarding.data.responseStyleCustom || "");
+      return;
+    }
+    if (onboarding.state === "ask_additional_guidance") {
+      setAdditionalGuidanceDraft(onboarding.data.additionalGuidance || "");
+    }
+  }, [
+    onboarding.state,
+    onboarding.data.userName,
+    onboarding.data.userContext,
+    onboarding.data.timeDrainsOther,
+    onboarding.data.prioritiesOther,
+    onboarding.data.workflowTools,
+    onboarding.data.responseStyleCustom,
+    onboarding.data.additionalGuidance,
+  ]);
 
   useEffect(() => {
     if (!showControlHints) return;
@@ -718,36 +759,6 @@ export function Onboarding({ onComplete }: OnboardingProps) {
     onboarding.continueFromRecap();
   }, [onboarding]);
 
-  const startRecapEdit = useCallback(
-    (field: RecapEditableField) => {
-      setVoiceError(null);
-      setRecapEditingField(field);
-      if (field === "name") {
-        setRecapNameDraft(onboarding.data.assistantName || "");
-      }
-    },
-    [onboarding.data.assistantName],
-  );
-
-  const cancelRecapEdit = useCallback(() => {
-    setRecapEditingField(null);
-    setRecapNameDraft(onboarding.data.assistantName || "");
-  }, [onboarding.data.assistantName]);
-
-  const applyRecapUpdate = useCallback(
-    (updates: Partial<RecapDataUpdates>) => {
-      onboarding.updateData(updates);
-      setRecapEditingField(null);
-    },
-    [onboarding],
-  );
-
-  const saveRecapName = useCallback(() => {
-    const trimmedName = recapNameDraft.trim();
-    onboarding.updateData({ assistantName: trimmedName || "CoWork" });
-    setRecapEditingField(null);
-  }, [onboarding, recapNameDraft]);
-
   const handleConfidencePromptSubmit = useCallback(() => {
     const prompt = inputValue.trim();
     if (!prompt) return;
@@ -909,38 +920,284 @@ export function Onboarding({ onComplete }: OnboardingProps) {
     return "breathing";
   };
 
+  const toggleAssistantTrait = useCallback((traitId: OnboardingAssistantTraitId) => {
+    const selected = onboarding.data.assistantTraits.includes(traitId);
+    const next = selected
+      ? onboarding.data.assistantTraits.filter((item) => item !== traitId)
+      : [...onboarding.data.assistantTraits, traitId];
+    onboarding.updateData({
+      assistantTraits: next.length > 0 ? next : ["adaptive"],
+    });
+  }, [onboarding]);
+
+  const toggleTimeDrain = useCallback((timeDrainId: OnboardingTimeDrainId) => {
+    const selected = onboarding.data.timeDrains.includes(timeDrainId);
+    onboarding.updateData({
+      timeDrains: selected
+        ? onboarding.data.timeDrains.filter((item) => item !== timeDrainId)
+        : [...onboarding.data.timeDrains, timeDrainId],
+    });
+  }, [onboarding]);
+
+  const togglePriority = useCallback((priorityId: OnboardingPriorityId) => {
+    const selected = onboarding.data.priorities.includes(priorityId);
+    onboarding.updateData({
+      priorities: selected
+        ? onboarding.data.priorities.filter((item) => item !== priorityId)
+        : [...onboarding.data.priorities, priorityId],
+    });
+  }, [onboarding]);
+
+  const selectResponseStyle = useCallback((styleId: OnboardingResponseStyleId) => {
+    onboarding.updateData({ responseStyle: styleId });
+  }, [onboarding]);
+
+  const renderSelectionCards = <T extends string>(
+    options: Array<{ id: T; title: string; description: string }>,
+    selectedIds: T[],
+    onToggle: (id: T) => void,
+  ) => (
+    <div className="onboarding-selection-grid">
+      {options.map((option) => {
+        const selected = selectedIds.includes(option.id);
+        return (
+          <button
+            key={option.id}
+            className={`onboarding-selection-card ${selected ? "selected" : ""}`}
+            onClick={() => onToggle(option.id)}
+            type="button"
+          >
+            <div className="onboarding-selection-card-header">
+              <span className="onboarding-selection-card-title">{option.title}</span>
+              <span className="onboarding-selection-card-check">{selected ? "✓" : ""}</span>
+            </div>
+            <span className="onboarding-selection-card-desc">{option.description}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  const renderAssistantTraitStep = () => (
+    <div className="onboarding-step-panel">
+      {renderSelectionCards(
+        ONBOARDING_ASSISTANT_TRAITS,
+        onboarding.data.assistantTraits,
+        toggleAssistantTrait,
+      )}
+      <div className="onboarding-actions">
+        <button
+          className="onboarding-btn onboarding-btn-primary"
+          onClick={() => onboarding.submitAssistantTraits(onboarding.data.assistantTraits)}
+        >
+          Continue
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderUserProfileStep = () => (
+    <div className="onboarding-step-panel onboarding-form-panel">
+      <div className="onboarding-form-group">
+        <label className="onboarding-form-label">Your name</label>
+        <input
+          className="onboarding-input"
+          placeholder="What should CoWork call you?"
+          value={profileNameDraft}
+          onChange={(e) => setProfileNameDraft(e.target.value)}
+        />
+      </div>
+      <div className="onboarding-form-group">
+        <label className="onboarding-form-label">What fills most of your day?</label>
+        <textarea
+          className="onboarding-textarea"
+          placeholder="Describe your work, current focus, or what usually needs help."
+          value={profileContextDraft}
+          onChange={(e) => setProfileContextDraft(e.target.value)}
+          rows={5}
+        />
+      </div>
+      <div className="onboarding-actions">
+        <button
+          className="onboarding-btn onboarding-btn-primary"
+          onClick={() => onboarding.submitUserProfile(profileNameDraft, profileContextDraft)}
+          disabled={!profileContextDraft.trim()}
+        >
+          Continue
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderTimeDrainsStep = () => {
+    const showOther = onboarding.data.timeDrains.includes("other");
+    return (
+      <div className="onboarding-step-panel">
+        {renderSelectionCards(ONBOARDING_TIME_DRAINS, onboarding.data.timeDrains, toggleTimeDrain)}
+        {showOther && (
+          <div className="onboarding-form-group">
+            <label className="onboarding-form-label">Other time drain</label>
+            <input
+              className="onboarding-input"
+              placeholder="Describe the extra drag on your time"
+              value={timeDrainsOtherDraft}
+              onChange={(e) => setTimeDrainsOtherDraft(e.target.value)}
+            />
+          </div>
+        )}
+        <div className="onboarding-actions">
+          <button
+            className="onboarding-btn onboarding-btn-primary"
+            onClick={() => onboarding.submitTimeDrains(onboarding.data.timeDrains, timeDrainsOtherDraft)}
+            disabled={
+              onboarding.data.timeDrains.length === 0 ||
+              (showOther && !timeDrainsOtherDraft.trim())
+            }
+          >
+            Continue
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPrioritiesStep = () => {
+    const showOther = onboarding.data.priorities.includes("other");
+    return (
+      <div className="onboarding-step-panel">
+        {renderSelectionCards(ONBOARDING_PRIORITIES, onboarding.data.priorities, togglePriority)}
+        {showOther && (
+          <div className="onboarding-form-group">
+            <label className="onboarding-form-label">Other priority</label>
+            <input
+              className="onboarding-input"
+              placeholder="Describe another way CoWork should help first"
+              value={prioritiesOtherDraft}
+              onChange={(e) => setPrioritiesOtherDraft(e.target.value)}
+            />
+          </div>
+        )}
+        <div className="onboarding-actions">
+          <button
+            className="onboarding-btn onboarding-btn-primary"
+            onClick={() => onboarding.submitPriorities(onboarding.data.priorities, prioritiesOtherDraft)}
+            disabled={
+              onboarding.data.priorities.length === 0 ||
+              (showOther && !prioritiesOtherDraft.trim())
+            }
+          >
+            Continue
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderToolsStep = () => (
+    <div className="onboarding-step-panel onboarding-form-panel">
+      <div className="onboarding-form-group">
+        <label className="onboarding-form-label">Core apps and tools</label>
+        <textarea
+          className="onboarding-textarea"
+          placeholder="Gmail, Notion, Google Calendar, GitHub, YouTube Studio..."
+          value={workflowToolsDraft}
+          onChange={(e) => setWorkflowToolsDraft(e.target.value)}
+          rows={4}
+        />
+      </div>
+      <div className="onboarding-actions">
+        <button
+          className="onboarding-btn onboarding-btn-primary"
+          onClick={() => onboarding.submitWorkflowTools(workflowToolsDraft)}
+          disabled={!workflowToolsDraft.trim()}
+        >
+          Continue
+        </button>
+        <button
+          className="onboarding-btn onboarding-btn-secondary"
+          onClick={() => {
+            setWorkflowToolsDraft("");
+            onboarding.submitWorkflowTools("");
+          }}
+        >
+          Skip
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderResponseStyleStep = () => {
+    const selected = onboarding.data.responseStyle || "depends";
+    return (
+      <div className="onboarding-step-panel">
+        {renderSelectionCards(
+          ONBOARDING_RESPONSE_STYLES,
+          [selected],
+          (styleId) => selectResponseStyle(styleId),
+        )}
+        {selected === "custom" && (
+          <div className="onboarding-form-group">
+            <label className="onboarding-form-label">Custom response style</label>
+            <input
+              className="onboarding-input"
+              placeholder="Describe how you want responses to feel"
+              value={responseStyleCustomDraft}
+              onChange={(e) => setResponseStyleCustomDraft(e.target.value)}
+            />
+          </div>
+        )}
+        <div className="onboarding-actions">
+          <button
+            className="onboarding-btn onboarding-btn-primary"
+            onClick={() => onboarding.submitResponseStyle(selected, responseStyleCustomDraft)}
+            disabled={selected === "custom" && !responseStyleCustomDraft.trim()}
+          >
+            Continue
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderAdditionalGuidanceStep = () => (
+    <div className="onboarding-step-panel onboarding-form-panel">
+      <div className="onboarding-form-group">
+        <label className="onboarding-form-label">Anything else to always keep in mind?</label>
+        <textarea
+          className="onboarding-textarea"
+          placeholder="Share durable preferences, friction points, or hard rules. Leave blank to skip."
+          value={additionalGuidanceDraft}
+          onChange={(e) => setAdditionalGuidanceDraft(e.target.value)}
+          rows={4}
+        />
+      </div>
+      <div className="onboarding-actions">
+        <button
+          className="onboarding-btn onboarding-btn-primary"
+          onClick={() => onboarding.submitAdditionalGuidance(additionalGuidanceDraft)}
+        >
+          Continue
+        </button>
+      </div>
+    </div>
+  );
+
   // Render work style buttons
   const renderWorkStyleButtons = () => (
     <div className="onboarding-actions">
       <button
         className="onboarding-btn onboarding-btn-secondary"
+        type="button"
         onClick={() => onboarding.submitWorkStyle("planner")}
       >
         Structured planning
       </button>
       <button
         className="onboarding-btn onboarding-btn-secondary"
+        type="button"
         onClick={() => onboarding.submitWorkStyle("flexible")}
       >
         Adaptive execution
-      </button>
-    </div>
-  );
-
-  // Render persona selection buttons
-  const renderPersonaButtons = () => (
-    <div className="onboarding-actions">
-      <button
-        className="onboarding-btn onboarding-btn-primary"
-        onClick={() => onboarding.submitPersona("companion")}
-      >
-        Warm partner
-      </button>
-      <button
-        className="onboarding-btn onboarding-btn-secondary"
-        onClick={() => onboarding.submitPersona("none")}
-      >
-        Neutral operator
       </button>
     </div>
   );
@@ -949,12 +1206,14 @@ export function Onboarding({ onComplete }: OnboardingProps) {
     <div className="onboarding-actions">
       <button
         className="onboarding-btn onboarding-btn-primary"
+        type="button"
         onClick={() => onboarding.submitVoicePreference(true)}
       >
         Enable voice replies
       </button>
       <button
         className="onboarding-btn onboarding-btn-secondary"
+        type="button"
         onClick={() => onboarding.submitVoicePreference(false)}
       >
         Not now
@@ -1056,12 +1315,11 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   };
 
   const renderPersonalizedRecap = () => {
+    const workspaceSummary = buildOnboardingWorkspaceSummary(onboarding.data);
     const providerName = onboarding.data.selectedProvider
       ? PROVIDERS.find((provider) => provider.id === onboarding.data.selectedProvider)?.name ||
         onboarding.data.selectedProvider
       : "Not configured yet";
-    const personaLabel =
-      onboarding.data.persona === "companion" ? "Warm partner" : "Neutral operator";
     const workStyleLabel =
       onboarding.data.workStyle === "planner"
         ? "Structured planning"
@@ -1075,242 +1333,141 @@ export function Onboarding({ onComplete }: OnboardingProps) {
         : onboarding.data.voiceEnabled
           ? "Enabled"
           : "Disabled";
-    const isEditingName = recapEditingField === "name";
-    const isEditingPersona = recapEditingField === "persona";
-    const isEditingStyle = recapEditingField === "style";
-    const isEditingMemory = recapEditingField === "memory";
-    const isEditingVoice = recapEditingField === "voice";
 
     return (
       <div className="onboarding-recap">
         <p className="onboarding-recap-summary">
-          I&apos;ll call myself <strong>{onboarding.data.assistantName || "CoWork"}</strong>, use{" "}
-          <strong>{workStyleLabel.toLowerCase()}</strong>, and keep memory{" "}
-          <strong>{memoryLabel.toLowerCase()}</strong>.
+          I&apos;ll use this as your default working profile across CoWork.
         </p>
 
-        <div className="onboarding-recap-list">
+        <div className="onboarding-recap-list onboarding-recap-grid">
           <div className="onboarding-recap-item">
             <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Name</span>
-              {!isEditingName && (
-                <span className="onboarding-recap-item-value">
-                  {onboarding.data.assistantName || "CoWork"}
-                </span>
-              )}
-              {isEditingName && (
-                <div className="onboarding-recap-inline-edit">
-                  <input
-                    className="onboarding-input onboarding-recap-inline-input"
-                    placeholder="Assistant name"
-                    value={recapNameDraft}
-                    onChange={(event) => setRecapNameDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        saveRecapName();
-                      }
-                    }}
-                    autoFocus
-                  />
-                  <div className="onboarding-recap-inline-actions">
-                    <button className="onboarding-recap-inline-btn primary" onClick={saveRecapName}>
-                      Save
-                    </button>
-                    <button
-                      className="onboarding-recap-inline-btn secondary"
-                      onClick={cancelRecapEdit}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
+              <span className="onboarding-recap-item-label">Assistant setup</span>
+              <span className="onboarding-recap-item-value">
+                {onboarding.data.assistantName || "CoWork"}
+              </span>
+              <span className="onboarding-recap-item-note">{workspaceSummary.assistantStyle}</span>
+              <span className="onboarding-recap-item-note">Model: {providerName}</span>
             </div>
-            {!isEditingName && (
-              <button className="onboarding-recap-edit-btn" onClick={() => startRecapEdit("name")}>
-                Edit
+            <div className="onboarding-recap-edit-actions">
+              <button className="onboarding-recap-edit-btn" onClick={() => onboarding.editRecapSection("name")}>
+                Name
               </button>
-            )}
-          </div>
-
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Persona</span>
-              {!isEditingPersona && (
-                <span className="onboarding-recap-item-value">{personaLabel}</span>
-              )}
-              {isEditingPersona && (
-                <div className="onboarding-recap-choice-group">
-                  <button
-                    className={`onboarding-recap-choice-btn ${
-                      onboarding.data.persona === "companion" ? "active" : ""
-                    }`}
-                    onClick={() => applyRecapUpdate({ persona: "companion" })}
-                  >
-                    Warm partner
-                  </button>
-                  <button
-                    className={`onboarding-recap-choice-btn ${
-                      onboarding.data.persona === "none" ? "active" : ""
-                    }`}
-                    onClick={() => applyRecapUpdate({ persona: "none" })}
-                  >
-                    Neutral operator
-                  </button>
-                </div>
-              )}
-            </div>
-            {!isEditingPersona ? (
               <button
                 className="onboarding-recap-edit-btn"
-                onClick={() => startRecapEdit("persona")}
+                onClick={() => onboarding.editRecapSection("assistant_traits")}
               >
-                Edit
+                Traits
               </button>
-            ) : (
-              <button className="onboarding-recap-edit-btn" onClick={cancelRecapEdit}>
-                Cancel
-              </button>
-            )}
-          </div>
-
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Work style</span>
-              {!isEditingStyle && (
-                <span className="onboarding-recap-item-value">{workStyleLabel}</span>
-              )}
-              {isEditingStyle && (
-                <div className="onboarding-recap-choice-group">
-                  <button
-                    className={`onboarding-recap-choice-btn ${
-                      onboarding.data.workStyle === "planner" ? "active" : ""
-                    }`}
-                    onClick={() => applyRecapUpdate({ workStyle: "planner" })}
-                  >
-                    Structured planning
-                  </button>
-                  <button
-                    className={`onboarding-recap-choice-btn ${
-                      onboarding.data.workStyle === "flexible" ? "active" : ""
-                    }`}
-                    onClick={() => applyRecapUpdate({ workStyle: "flexible" })}
-                  >
-                    Adaptive execution
-                  </button>
-                </div>
-              )}
-            </div>
-            {!isEditingStyle ? (
-              <button className="onboarding-recap-edit-btn" onClick={() => startRecapEdit("style")}>
-                Edit
-              </button>
-            ) : (
-              <button className="onboarding-recap-edit-btn" onClick={cancelRecapEdit}>
-                Cancel
-              </button>
-            )}
-          </div>
-
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Memory</span>
-              {!isEditingMemory && (
-                <>
-                  <span className="onboarding-recap-item-value">{memoryLabel}</span>
-                  <span className="onboarding-recap-item-note">
-                    {onboarding.data.memoryEnabled
-                      ? "Stores useful context between conversations."
-                      : "No memory storage until enabled in Settings > Memory."}
-                  </span>
-                </>
-              )}
-              {isEditingMemory && (
-                <div className="onboarding-recap-choice-group">
-                  <button
-                    className={`onboarding-recap-choice-btn ${
-                      onboarding.data.memoryEnabled ? "active" : ""
-                    }`}
-                    onClick={() => applyRecapUpdate({ memoryEnabled: true })}
-                  >
-                    Memory on
-                  </button>
-                  <button
-                    className={`onboarding-recap-choice-btn ${
-                      !onboarding.data.memoryEnabled ? "active" : ""
-                    }`}
-                    onClick={() => applyRecapUpdate({ memoryEnabled: false })}
-                  >
-                    Memory off
-                  </button>
-                </div>
-              )}
-            </div>
-            {!isEditingMemory ? (
               <button
                 className="onboarding-recap-edit-btn"
-                onClick={() => startRecapEdit("memory")}
+                onClick={() => onboarding.editRecapSection("model")}
               >
-                Edit
+                Model
               </button>
-            ) : (
-              <button className="onboarding-recap-edit-btn" onClick={cancelRecapEdit}>
-                Cancel
-              </button>
-            )}
-          </div>
-
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Voice</span>
-              {!isEditingVoice && <span className="onboarding-recap-item-value">{voiceLabel}</span>}
-              {isEditingVoice && (
-                <div className="onboarding-recap-choice-group">
-                  <button
-                    className={`onboarding-recap-choice-btn ${
-                      onboarding.data.voiceEnabled === true ? "active" : ""
-                    }`}
-                    onClick={() => applyRecapUpdate({ voiceEnabled: true })}
-                  >
-                    Enabled
-                  </button>
-                  <button
-                    className={`onboarding-recap-choice-btn ${
-                      onboarding.data.voiceEnabled === false ? "active" : ""
-                    }`}
-                    onClick={() => applyRecapUpdate({ voiceEnabled: false })}
-                  >
-                    Disabled
-                  </button>
-                </div>
-              )}
             </div>
-            {!isEditingVoice ? (
-              <button className="onboarding-recap-edit-btn" onClick={() => startRecapEdit("voice")}>
-                Edit
-              </button>
-            ) : (
-              <button className="onboarding-recap-edit-btn" onClick={cancelRecapEdit}>
-                Cancel
-              </button>
-            )}
           </div>
 
           <div className="onboarding-recap-item">
             <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Model provider</span>
-              <span className="onboarding-recap-item-value">{providerName}</span>
+              <span className="onboarding-recap-item-label">Work context</span>
+              <span className="onboarding-recap-item-value">
+                {onboarding.data.userName || "User"}
+              </span>
               <span className="onboarding-recap-item-note">
-                Changes to provider reopen model setup.
+                {onboarding.data.userContext || "No work context captured yet."}
+              </span>
+              <span className="onboarding-recap-item-note">
+                Tools: {onboarding.data.workflowTools || "Not set yet"}
               </span>
             </div>
-            <button
-              className="onboarding-recap-edit-btn"
-              onClick={() => onboarding.editRecapSection("model")}
-            >
-              Edit
-            </button>
+            <div className="onboarding-recap-edit-actions">
+              <button
+                className="onboarding-recap-edit-btn"
+                onClick={() => onboarding.editRecapSection("user_profile")}
+              >
+                Profile
+              </button>
+              <button
+                className="onboarding-recap-edit-btn"
+                onClick={() => onboarding.editRecapSection("tools")}
+              >
+                Tools
+              </button>
+            </div>
+          </div>
+
+          <div className="onboarding-recap-item">
+            <div className="onboarding-recap-item-content">
+              <span className="onboarding-recap-item-label">Focus map</span>
+              <span className="onboarding-recap-item-note">
+                Drains: {getTimeDrainTitles(onboarding.data).join(", ") || "Not set yet"}
+              </span>
+              <span className="onboarding-recap-item-note">
+                Priorities: {getPriorityTitles(onboarding.data).join(", ") || "Not set yet"}
+              </span>
+            </div>
+            <div className="onboarding-recap-edit-actions">
+              <button
+                className="onboarding-recap-edit-btn"
+                onClick={() => onboarding.editRecapSection("time_drains")}
+              >
+                Drains
+              </button>
+              <button
+                className="onboarding-recap-edit-btn"
+                onClick={() => onboarding.editRecapSection("priorities")}
+              >
+                Priorities
+              </button>
+            </div>
+          </div>
+
+          <div className="onboarding-recap-item">
+            <div className="onboarding-recap-item-content">
+              <span className="onboarding-recap-item-label">Response profile</span>
+              <span className="onboarding-recap-item-value">
+                {getResolvedResponseStyleLabel(onboarding.data)}
+              </span>
+              <span className="onboarding-recap-item-note">
+                {onboarding.data.additionalGuidance || "No additional always-on guidance yet."}
+              </span>
+            </div>
+            <div className="onboarding-recap-edit-actions">
+              <button
+                className="onboarding-recap-edit-btn"
+                onClick={() => onboarding.editRecapSection("response_style")}
+              >
+                Style
+              </button>
+              <button
+                className="onboarding-recap-edit-btn"
+                onClick={() => onboarding.editRecapSection("guidance")}
+              >
+                Guidance
+              </button>
+            </div>
+          </div>
+
+          <div className="onboarding-recap-item">
+            <div className="onboarding-recap-item-content">
+              <span className="onboarding-recap-item-label">Operating mode</span>
+              <span className="onboarding-recap-item-note">Work style: {workStyleLabel}</span>
+              <span className="onboarding-recap-item-note">Memory: {memoryLabel}</span>
+              <span className="onboarding-recap-item-note">Voice: {voiceLabel}</span>
+            </div>
+            <div className="onboarding-recap-edit-actions">
+              <button className="onboarding-recap-edit-btn" onClick={() => onboarding.editRecapSection("style")}>
+                Work style
+              </button>
+              <button className="onboarding-recap-edit-btn" onClick={() => onboarding.editRecapSection("memory")}>
+                Memory
+              </button>
+              <button className="onboarding-recap-edit-btn" onClick={() => onboarding.editRecapSection("voice")}>
+                Voice
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1707,7 +1864,9 @@ export function Onboarding({ onComplete }: OnboardingProps) {
 
   return (
     <div
-      className={`cinematic-onboarding ${onboarding.state === "transitioning" ? "transitioning" : ""}`}
+      className={`cinematic-onboarding onboarding-state-${onboarding.state} ${
+        onboarding.state === "transitioning" ? "transitioning" : ""
+      }`}
     >
       {/* Ambient background */}
       <div className="onboarding-ambient" />
@@ -1733,6 +1892,16 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       )}
 
       <div className="onboarding-top-right-controls">
+        <button
+          className="onboarding-skip-btn"
+          onClick={onboarding.exitOnboarding}
+          aria-label="Skip onboarding"
+          title="Skip onboarding"
+          type="button"
+        >
+          Skip onboarding
+        </button>
+
         <div className="onboarding-control-btn-wrap">
           <button
             className="onboarding-theme-btn"
@@ -1819,7 +1988,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       </div>
 
       {/* Main content */}
-      <div className="onboarding-content">
+      <div className={`onboarding-content ${isCompactRecapStep ? "onboarding-content-compact" : ""}`}>
         {/* Orb */}
         <AwakeningOrb
           state={getOrbState()}
@@ -1834,7 +2003,13 @@ export function Onboarding({ onComplete }: OnboardingProps) {
             onComplete={onboarding.onTextComplete}
             showCursor={
               onboarding.state !== "ask_name" &&
-              onboarding.state !== "ask_persona" &&
+              onboarding.state !== "ask_assistant_traits" &&
+              onboarding.state !== "ask_user_profile" &&
+              onboarding.state !== "ask_time_drains" &&
+              onboarding.state !== "ask_priorities" &&
+              onboarding.state !== "ask_tools" &&
+              onboarding.state !== "ask_response_style" &&
+              onboarding.state !== "ask_additional_guidance" &&
               onboarding.state !== "ask_voice" &&
               onboarding.state !== "ask_work_style" &&
               onboarding.state !== "ask_memory_trust" &&
@@ -1853,10 +2028,19 @@ export function Onboarding({ onComplete }: OnboardingProps) {
         {/* Name input */}
         {onboarding.showInput && onboarding.state === "ask_name" && renderNameInput()}
 
-        {/* Persona selection */}
-        {onboarding.showPersonaOptions &&
-          onboarding.state === "ask_persona" &&
-          renderPersonaButtons()}
+        {onboarding.state === "ask_assistant_traits" && renderAssistantTraitStep()}
+
+        {onboarding.state === "ask_user_profile" && renderUserProfileStep()}
+
+        {onboarding.state === "ask_time_drains" && renderTimeDrainsStep()}
+
+        {onboarding.state === "ask_priorities" && renderPrioritiesStep()}
+
+        {onboarding.state === "ask_tools" && renderToolsStep()}
+
+        {onboarding.state === "ask_response_style" && renderResponseStyleStep()}
+
+        {onboarding.state === "ask_additional_guidance" && renderAdditionalGuidanceStep()}
 
         {/* Voice suggestion */}
         {onboarding.showVoiceOptions && onboarding.state === "ask_voice" && renderVoiceOptions()}
