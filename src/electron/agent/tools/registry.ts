@@ -167,7 +167,7 @@ function guessExtFromMime(mimeType?: string): string {
 }
 
 const MCP_PAYMENT_TOOL_NAME = "x402_fetch";
-const NETWORK_READ_TOOL_NAMES = new Set(["web_search", "web_fetch", "http_request"]);
+const NETWORK_READ_TOOL_NAMES = new Set(["web_search", "web_fetch"]);
 const MCP_PAYMENT_AMOUNT_PATHS = [
   ["amount"],
   ["maxAmount"],
@@ -1371,11 +1371,35 @@ export class ToolRegistry {
     }
   }
 
-  private getApprovalTypeForTool(toolName: string): ApprovalType | null {
+  private isReadOnlyHttpRequestInput(input: Any): boolean {
+    const method =
+      typeof input?.method === "string" && input.method.trim().length > 0
+        ? input.method.trim().toUpperCase()
+        : "GET";
+    const hasBody = typeof input?.body === "string" && input.body.trim().length > 0;
+    const headers =
+      input?.headers && typeof input.headers === "object" && !Array.isArray(input.headers)
+        ? Object.keys(input.headers as Record<string, unknown>)
+        : [];
+    const loweredHeaders = headers.map((header) => header.toLowerCase());
+    const customHeaders = loweredHeaders.filter(
+      (header) => !["accept", "accept-language", "user-agent"].includes(header),
+    );
+    return (method === "GET" || method === "HEAD") && !hasBody && customHeaders.length === 0;
+  }
+
+  private getApprovalTypeForTool(toolName: string, input?: Any): ApprovalType | null {
     const canonicalToolName = canonicalizeToolNameUtil(toolName);
     if (canonicalToolName === "Skill") return null;
     if (canonicalToolName === "run_command") return "run_command";
     if (canonicalToolName === "delete_file") return "delete_file";
+    if (canonicalToolName === "web_fetch") return "network_access";
+    if (canonicalToolName === "http_request") {
+      return this.isReadOnlyHttpRequestInput(input) ? "network_access" : "data_export";
+    }
+    if (canonicalToolName === "analyze_image" || canonicalToolName === "read_pdf_visual") {
+      return "data_export";
+    }
     if (canonicalToolName.startsWith("mcp_")) return "external_service";
     if (canonicalToolName.endsWith("_action") || canonicalToolName === "voice_call")
       return "external_service";
@@ -1427,7 +1451,7 @@ export class ToolRegistry {
   private buildExecutionMiddlewares(): ToolExecutionMiddleware[] {
     const policyMiddleware: ToolExecutionMiddleware = async (context, next) => {
       const runtime = this.getRuntimeMetadata(context.request.name);
-      const approvalType = this.getApprovalTypeForTool(context.request.name);
+      const approvalType = this.getApprovalTypeForTool(context.request.name, context.request.input);
       const permissionEvaluation = (this.daemon as Any)?.evaluateToolPermission;
       const serverName = this.getMcpServerName(context.request.name);
       const pipeline = await evaluateToolPolicyPipeline({
@@ -1692,7 +1716,12 @@ export class ToolRegistry {
     register("git_merge_to_base", async () => this.gitTools.gitMergeToBase());
     register("system_info", async () => this.systemTools.getSystemInfo());
     register("search_memories", async ({ request }) => this.systemTools.searchMemories(request.input));
+    register("search_quotes", async ({ request }) => this.systemTools.searchQuotes(request.input), readParallelSchedulerSpec);
+    register("search_sessions", async ({ request }) => this.systemTools.searchSessions(request.input), readParallelSchedulerSpec);
+    register("memory_topics_load", async ({ request }) => this.systemTools.loadMemoryTopics(request.input), readParallelSchedulerSpec);
     register("memory_save", async ({ request }) => this.memoryTools.save(request.input));
+    register("memory_curate", async ({ request }) => this.memoryTools.curate(request.input), exclusiveSchedulerSpec);
+    register("memory_curated_read", async ({ request }) => this.memoryTools.readCurated(request.input), readParallelSchedulerSpec);
     register("scratchpad_write", async ({ request }) => this.scratchpadTools.write(request.input));
     register("scratchpad_read", async ({ request }) => this.scratchpadTools.read(request.input));
     register("read_clipboard", async () => this.systemTools.readClipboard());
@@ -2751,11 +2780,11 @@ Image Generation:
 Vision (Image Understanding):
 - analyze_image: Analyze an image file from the workspace (screenshots/photos)
   - Extract text, describe items, answer questions, summarize what is shown
-  - Uses a vision-capable provider (OpenAI/Anthropic/Gemini); the tool will prompt setup guidance if missing.
+  - Uses a vision-capable provider (Azure OpenAI/OpenAI/Anthropic/Bedrock/Gemini); the tool will prompt setup guidance if missing.
 - read_pdf_visual: Visually analyze a PDF document's layout, design, and content
   - Converts PDF pages to images and analyzes them in one step (no need for pdftoppm + analyze_image separately)
-  - Use when you need to understand visual layout, design, colors, or formatting — not just text content
-  - For text-only extraction, use read_file instead`;
+  - Use only when you need visual layout, design, colors, formatting, scan/OCR interpretation, or page appearance
+  - For normal text PDFs, use read_file or parse_document first; do not use read_pdf_visual for text-only extraction`;
 
     // System tools are always available
     descriptions += `
@@ -2773,7 +2802,12 @@ System Tools:
 - get_app_paths: Get system paths (home, downloads, etc.)
 - run_applescript: Execute exact AppleScript on macOS (explicit AppleScript requests or low-level fallback only)
 - search_memories: Search workspace memories, .cowork/ knowledge files, and imported conversations for past context
+- search_quotes: Search exact quoted wording across transcripts, task messages, imported memories, and workspace notes
+- search_sessions: Search recent task/session transcripts and checkpoints for prior run context
+- memory_topics_load: Load topical memory packs from \`.cowork/memory/topics\`
 - memory_save: Save an observation, decision, insight, or error to workspace memory for future recall
+- memory_curate: Add, replace, or remove curated hot-memory facts that should stay prompt-visible
+- memory_curated_read: Inspect the current curated hot-memory entries
 ${hasAnyVisibleTools(
   "computer_screenshot",
   "computer_click",
@@ -3174,7 +3208,12 @@ ${skillDescriptions}`;
     // System tools
     if (name === "system_info") return await this.systemTools.getSystemInfo();
     if (name === "search_memories") return await this.systemTools.searchMemories(input);
+    if (name === "search_quotes") return await this.systemTools.searchQuotes(input);
+    if (name === "search_sessions") return await this.systemTools.searchSessions(input);
+    if (name === "memory_topics_load") return await this.systemTools.loadMemoryTopics(input);
     if (name === "memory_save") return await this.memoryTools.save(input);
+    if (name === "memory_curate") return await this.memoryTools.curate(input);
+    if (name === "memory_curated_read") return await this.memoryTools.readCurated(input);
     if (name === "scratchpad_write") return this.scratchpadTools.write(input);
     if (name === "scratchpad_read") return this.scratchpadTools.read(input);
     if (name === "read_clipboard") return await this.systemTools.readClipboard();
@@ -3927,19 +3966,25 @@ ${skillDescriptions}`;
       return { success: true, parameters: {} };
     }
 
-    if (skill.id === "simplify" || skill.id === "batch") {
+    if (skill.id === "simplify" || skill.id === "batch" || skill.id === "llm-wiki") {
       const parsed = parseLeadingSkillSlashCommand(`/${skill.id}${trimmedArgs ? ` ${trimmedArgs}` : ""}`);
       if (!parsed.matched || parsed.error || !parsed.parsed) {
+        const usageExample =
+          skill.id === "batch"
+            ? "/batch <objective> --parallel 4"
+            : skill.id === "llm-wiki"
+              ? "/llm-wiki <objective> --mode init --path research/wiki --obsidian auto"
+              : "/simplify <objective> --scope current";
         return {
           success: false,
           error:
             parsed.error ||
-            `Invalid arguments for skill '${skill.id}'. Use slash-style arguments such as "${skill.id === "batch" ? "/batch <objective> --parallel 4" : "/simplify <objective> --scope current"}".`,
+            `Invalid arguments for skill '${skill.id}'. Use slash-style arguments such as "${usageExample}".`,
         };
       }
 
       const parameters: Record<string, Any> = {};
-      if (parsed.parsed.objective) {
+      if (skill.id === "llm-wiki" || parsed.parsed.objective) {
         parameters.objective = parsed.parsed.objective;
       }
       if (parsed.parsed.flags.domain) {
@@ -3953,6 +3998,15 @@ ${skillDescriptions}`;
       }
       if (parsed.parsed.flags.external) {
         parameters.external = parsed.parsed.flags.external;
+      }
+      if (parsed.parsed.flags.mode) {
+        parameters.mode = parsed.parsed.flags.mode;
+      }
+      if (parsed.parsed.flags.path) {
+        parameters.path = parsed.parsed.flags.path;
+      }
+      if (parsed.parsed.flags.obsidian) {
+        parameters.obsidian = parsed.parsed.flags.obsidian;
       }
       return { success: true, parameters };
     }
@@ -8499,7 +8553,7 @@ ${skillDescriptions}`;
     format?: "text" | "structured";
     max_chars?: number;
   }) {
-    const parser = new DocumentParserTools(this.workspace);
+    const parser = new DocumentParserTools(this.workspace, this.daemon, this.taskId);
     try {
       return await parser.parseDocument(input);
     } catch (err) {
