@@ -94,6 +94,17 @@ export class SubconsciousArtifactStore {
     return path.join(this.getTargetRoot(target), "runs", runId);
   }
 
+  private async canWriteTargetArtifacts(target: SubconsciousTargetRef | null): Promise<boolean> {
+    if (!target) return true;
+    const workspacePath = target.codeWorkspacePath || this.resolveWorkspacePath(target.workspaceId);
+    if (!workspacePath) return true;
+    try {
+      return (await fs.stat(workspacePath)).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
   async writeBrainState(
     summary: SubconsciousBrainSummary,
     targets: SubconsciousTargetSummary[],
@@ -122,6 +133,9 @@ export class SubconsciousArtifactStore {
     evidence: SubconsciousEvidence[],
     backlog: SubconsciousBacklogItem[],
   ): Promise<void> {
+    if (!(await this.canWriteTargetArtifacts(target.target))) {
+      return;
+    }
     const targetRoot = this.getTargetRoot(target.target);
     await fs.mkdir(targetRoot, { recursive: true });
     await fs.writeFile(
@@ -154,6 +168,9 @@ export class SubconsciousArtifactStore {
     dispatch?: SubconsciousDispatchRecord | null;
   }): Promise<string> {
     const runRoot = this.getRunRoot(params.target, params.run.id);
+    if (!(await this.canWriteTargetArtifacts(params.target))) {
+      return runRoot;
+    }
     await fs.mkdir(runRoot, { recursive: true });
     await fs.writeFile(
       path.join(runRoot, "evidence.json"),
@@ -226,6 +243,9 @@ export class SubconsciousArtifactStore {
   }
 
   async writeMemoryIndex(target: SubconsciousTargetRef | null, items: SubconsciousMemoryItem[]): Promise<void> {
+    if (!(await this.canWriteTargetArtifacts(target))) {
+      return;
+    }
     const root = target ? this.getTargetRoot(target) : this.getBrainRoot();
     await fs.mkdir(root, { recursive: true });
     await fs.writeFile(path.join(root, "memory-index.json"), JSON.stringify(items, null, 2), "utf-8");
@@ -242,6 +262,9 @@ export class SubconsciousArtifactStore {
   }
 
   async writeDreamArtifact(target: SubconsciousTargetRef | null, artifact: SubconsciousDreamArtifact): Promise<void> {
+    if (!(await this.canWriteTargetArtifacts(target))) {
+      return;
+    }
     const root = target ? path.join(this.getTargetRoot(target), "dreams") : path.join(this.getBrainRoot(), "dreams");
     await fs.mkdir(root, { recursive: true });
     await fs.writeFile(path.join(root, `${artifact.createdAt}-${sanitizeKey(artifact.id)}.json`), JSON.stringify(artifact, null, 2), "utf-8");
