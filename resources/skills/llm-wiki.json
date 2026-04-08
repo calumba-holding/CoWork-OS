@@ -1,0 +1,107 @@
+{
+  "id": "llm-wiki",
+  "name": "LLM Wiki",
+  "description": "Build and maintain a workspace-local, Obsidian-friendly research vault using Karpathy's LLM Wiki pattern. Creates a persistent markdown knowledge base with raw-source capture, linked notes, vault search, filed-back outputs, and maintenance logs.",
+  "icon": "🧠",
+  "category": "Research",
+  "prompt": "# LLM Wiki\n\nBuild or maintain a durable, workspace-local research vault as an Obsidian-friendly markdown wiki.\n\nInputs:\n- Objective: {{objective}}\n- Mode: {{mode}}\n- Vault path: {{path}}\n- Obsidian mode: {{obsidian}}\n\nDefaults:\n- If `{{objective}}` is empty and the user has not named the topic yet, ask one short scoping question before creating or rewriting durable pages.\n- If `{{path}}` is empty, use `research/wiki` relative to the workspace.\n- Treat the vault as durable knowledge, not a disposable artifact folder.\n- Still write run artifacts under `{artifactDir}`.\n- If `{{mode}}` is `auto`, infer the best mode from the objective and current vault state.\n- Use `{baseDir}/scripts/wiki-graph-report.mjs` for deterministic graph health, bridge pages, cross-section links, suggested questions, backlink, orphan, and index checks.\n- Use `{baseDir}/scripts/wiki-import.mjs` for deterministic raw-source capture.\n- Use `{baseDir}/scripts/wiki-search.mjs` for deterministic vault-first lookup before ad hoc file crawling.\n- Use `{baseDir}/scripts/wiki-render.mjs` for filed-back Marp slide decks and SVG charts under `outputs/`.\n\nVault layout:\n- Root files: `SCHEMA.md`, `index.md`, `log.md`, `inbox.md`\n- Content dirs: `maps/`, `concepts/`, `entities/`, `projects/`, `comparisons/`, `queries/`\n- Raw sources: `raw/articles/`, `raw/papers/`, `raw/transcripts/`, `raw/repos/`, `raw/datasets/`, `raw/assets/`\n- Filed outputs: `outputs/slides/`, `outputs/charts/`\n\nModes:\n- `init`: create the vault structure and seed files.\n- `ingest`: add or update knowledge from relevant sources.\n- `query`: answer from the vault first, then save durable syntheses back.\n- `lint`: audit structure, backlinks, staleness, index coverage, and contradictions.\n- `refresh`: re-check important pages against fresher evidence and tighten links.\n- `auto`: infer the mode; prefer `init` if the vault does not exist.\n\nRules:\n1. Resolve the target path first; relative paths are workspace-relative.\n2. If the vault exists, orient before editing: read `SCHEMA.md`, `index.md`, recent `log.md`, and run `node {baseDir}/scripts/wiki-graph-report.mjs --vault \"<vault>\" --format markdown` when the vault is non-trivial.\n3. Never modify files under `raw/` after capture.\n4. Every durable page must have YAML frontmatter with `title`, `created`, `updated`, `type`, `tags`, `status`, and `sources`.\n5. `SCHEMA.md` owns the tag taxonomy. Add new tags there before using them.\n6. Use `[[wikilinks]]` for internal links. Durable pages should usually link to at least 2 distinct pages, and nearby pages should link back when useful.\n7. Create new pages only when a concept, entity, or comparison is central or appears in multiple sources. Avoid low-signal pages. Split pages past roughly 200 lines.\n8. Keep `index.md` current, alphabetized, and updated with page count/date.\n9. Keep `log.md` append-only. Use `inbox.md` for unresolved questions, contradictions, and follow-up ingest tasks.\n10. File durable query syntheses under `queries/` or `comparisons/` instead of leaving them only in chat.\n11. File durable visual outputs under `outputs/slides/` or `outputs/charts/` instead of leaving them only as transient assistant text.\n12. Confirm before rewriting more than 10 existing wiki pages in one ingest.\n13. If `{{obsidian}}` is `auto` or `on`, optimize for Obsidian conventions: wikilinks, concise maps of content, and `![[image.png]]` references. Do not create `.obsidian/` settings unless asked.\n14. Use analyzer output actively: bridge pages should usually get map/backlink attention, surprising cross-section links should be explained or indexed, and suggested questions should be triaged into `inbox.md`, `queries/`, or follow-up ingest work.\n15. Prefer deterministic helper runtimes whenever possible:\n   - import sources with `wiki-import.mjs`\n   - search the vault with `wiki-search.mjs`\n   - render Marp decks or charts with `wiki-render.mjs`\n16. Preserve provenance. Raw captures, durable notes, and generated outputs should all point back to supporting sources.\n\nWorkflow:\n1. Inspect the vault if present.\n2. If the objective is still missing, ask for the topic before doing durable ingest work unless the request is clearly only about setup or maintenance.\n3. For `init`, create the root files and directory tree, including raw and output directories.\n4. For `ingest` or `refresh`, capture raw sources first, check existing pages before creating new ones, update durable notes, and preserve contradictions explicitly.\n5. For focused single-source ingest, summarize key takeaways in chat before large durable rewrites when that helps the user steer emphasis.\n6. For `query`, search the vault first, answer from the vault before re-researching, and file durable syntheses or visuals back when warranted.\n7. For `lint`, report concrete issues: orphans, broken links, ambiguous links, stale pages, frontmatter gaps, weak outbound linking, contradictions, bridge pages, surprising cross-section links, pages missing from `index.md`, and missing source capture or filed-back outputs where clearly needed.\n8. After substantial ingest, refresh, query, or lint runs, generate graph reports.\n\nDeterministic commands:\n```bash\nnode {baseDir}/scripts/wiki-import.mjs --vault \"<vault>\" --source \"<source>\" --kind article --title \"<title>\"\nnode {baseDir}/scripts/wiki-search.mjs --vault \"<vault>\" --query \"<question or terms>\" --scope all --format markdown\nnode {baseDir}/scripts/wiki-render.mjs --vault \"<vault>\" --kind marp --title \"<title>\" --body-file \"<markdown-file>\"\nnode {baseDir}/scripts/wiki-render.mjs --vault \"<vault>\" --kind chart --title \"<title>\" --spec-file \"<chart-spec.json>\"\nnode {baseDir}/scripts/wiki-graph-report.mjs --vault \"<vault>\" --format markdown > {artifactDir}/wiki-graph-report.md\nnode {baseDir}/scripts/wiki-graph-report.mjs --vault \"<vault>\" --format json > {artifactDir}/wiki-graph-report.json\n```\n\nCommon vault prompts:\n- Ingest one source: `Process this source into the research vault, summarize key takeaways with me, update the relevant notes, and log it.`\n- Batch ingest: `Process all unprocessed raw sources sequentially, keep the vault curated, and log each ingest.`\n- Explore: `Find the most interesting unexplored connections in the vault and file good follow-up questions back into inbox.md or queries/.`\n- Brief: `Write a reusable executive briefing from the vault and save it back into outputs/ or queries/ when worthwhile.`\n\nAlways write these artifacts when the vault exists:\n- `{artifactDir}/wiki-manifest.md`\n- `{artifactDir}/wiki-summary.md`\n- `{artifactDir}/wiki-graph-report.md`\n- `{artifactDir}/wiki-graph-report.json`\n\nGround your final summary in exact analyzer counts: wiki pages, raw sources, total cross-references, unique link targets, top inbound-link pages, bridge pages, surprising cross-section links, suggested questions, orphan count, broken-link count, ambiguous-link count, weak-outbound count, missing frontmatter or index coverage, and notable filed outputs. Keep the vault curated, traceable, and easy to scan.",
+  "parameters": [
+    {
+      "name": "objective",
+      "type": "string",
+      "description": "The topic, question, or research objective for the wiki run",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "mode",
+      "type": "string",
+      "description": "How to operate on the wiki: auto, init, ingest, query, lint, or refresh",
+      "required": false,
+      "default": "auto",
+      "options": [
+        "auto",
+        "init",
+        "ingest",
+        "query",
+        "lint",
+        "refresh"
+      ]
+    },
+    {
+      "name": "path",
+      "type": "string",
+      "description": "Workspace-relative or absolute path for the wiki vault",
+      "required": false,
+      "default": "research/wiki"
+    },
+    {
+      "name": "obsidian",
+      "type": "string",
+      "description": "Whether to optimize for Obsidian-style vault usage",
+      "required": false,
+      "default": "auto",
+      "options": [
+        "auto",
+        "on",
+        "off"
+      ]
+    }
+  ],
+  "enabled": true,
+  "invocation": {
+    "userInvocable": true
+  },
+  "metadata": {
+    "version": "1.1.0",
+    "author": "CoWork OS",
+    "tags": [
+      "llm-wiki",
+      "knowledge-base",
+      "obsidian",
+      "research-vault",
+      "markdown",
+      "wiki",
+      "knowledge-management"
+    ],
+    "routing": {
+      "useWhen": "Use when the user wants a persistent research vault, markdown knowledge base, Obsidian-style wiki, or a maintained set of linked notes rather than a one-off report.",
+      "dontUseWhen": "Do not use for a single disposable summary, a normal one-off research answer, or a report that does not need persistent cross-linked notes.",
+      "outputs": "A workspace-local wiki vault plus a run manifest and summary under artifacts.",
+      "successCriteria": "The vault exists at the requested path, raw sources are preserved, linked notes are updated, durable answers and visuals are filed back into the vault, and the run produces a clear manifest of changes.",
+      "expectedArtifacts": [
+        "wiki-manifest.md",
+        "wiki-summary.md",
+        "wiki-graph-report.md",
+        "wiki-graph-report.json"
+      ],
+      "keywords": [
+        "llm wiki",
+        "llm-wiki",
+        "research vault",
+        "obsidian vault",
+        "knowledge base",
+        "knowledgebase",
+        "build a wiki",
+        "maintain my notes"
+      ],
+      "examples": {
+        "positive": [
+          "Use the llm-wiki skill for this request.",
+          "/llm-wiki research CoWork OS competitors",
+          "Build me an Obsidian-friendly research vault for this topic.",
+          "Create a persistent markdown knowledge base instead of a one-off report."
+        ],
+        "negative": [
+          "Just answer this one question and do not save anything durable.",
+          "This is a one-off summary with no need for a persistent vault.",
+          "Do not use llm-wiki for unrelated coding work.",
+          "This request is outside persistent research-vault scope."
+        ]
+      }
+    },
+    "authoring": {
+      "complexity": "medium"
+    }
+  }
+}
