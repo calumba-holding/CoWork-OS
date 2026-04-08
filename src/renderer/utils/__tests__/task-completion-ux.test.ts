@@ -8,6 +8,7 @@ import {
   getAllOutputPathsFromSummary,
   recordCompletionToastShown,
   removeTaskId,
+  shouldShowPersistentNeedsUserActionBanner,
   shouldClearUnseenOutputBadges,
   shouldShowCompletionToast,
   shouldTrackUnseenCompletion,
@@ -218,5 +219,29 @@ describe("task completion UX helpers", () => {
 
     expect(shouldClearUnseenOutputBadges(true, false)).toBe(true);
     expect(shouldClearUnseenOutputBadges(true, true)).toBe(false);
+  });
+
+  it("keeps the persistent warning for verification-backed needs-user-action completions", () => {
+    expect(
+      shouldShowPersistentNeedsUserActionBanner({
+        terminalStatus: "needs_user_action",
+        pendingChecklist: ["Run the final verification flow"],
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldShowPersistentNeedsUserActionBanner({
+        terminalStatus: "needs_user_action",
+        verificationMessage: "Pending user action: final verification is still missing.",
+      }),
+    ).toBe(true);
+  });
+
+  it("suppresses the persistent verification warning for non-verification approval denials", () => {
+    expect(
+      shouldShowPersistentNeedsUserActionBanner({
+        terminalStatus: "needs_user_action",
+      }),
+    ).toBe(false);
   });
 });
