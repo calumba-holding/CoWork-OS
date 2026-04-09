@@ -174,7 +174,7 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
   const stale = isTaskStale(task);
   const terminal = isTaskTerminal(task);
   const nextMissionColumn = getTaskNextMissionColumn(task);
-  const nextMissionLabel = BOARD_COLUMNS.find((column) => column.id === nextMissionColumn)?.label || "DONE";
+  const nextMissionLabel = BOARD_COLUMNS.find((column) => column.id === nextMissionColumn)?.label || "Done";
   const ownerStatus = assignedAgent ? getAgentStatus(assignedAgent.id) : "offline";
 
   return (
