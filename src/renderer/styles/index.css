@@ -1178,7 +1178,7 @@ body {
   align-items: center;
   gap: 4px;
   overflow: visible;
-  padding-top: 4px;
+  padding-top: 10px;
   margin-left: auto;
 }
 
@@ -37494,3 +37494,4 @@ html.platform-darwin.opaque-vibrancy .remote-file-picker {
   font-family: var(--font-ui);
   animation: sc-fade-in 0.6s ease-out;
 }
+
