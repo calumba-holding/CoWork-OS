@@ -19,6 +19,34 @@ describe("New Methods constants", () => {
     expect(Methods.TASK_SEND_MESSAGE).toBe("task.sendMessage");
   });
 
+  it("has managed agent methods", () => {
+    expect(Methods.MANAGED_AGENT_LIST).toBe("managedAgent.list");
+    expect(Methods.MANAGED_AGENT_GET).toBe("managedAgent.get");
+    expect(Methods.MANAGED_AGENT_CREATE).toBe("managedAgent.create");
+    expect(Methods.MANAGED_AGENT_UPDATE).toBe("managedAgent.update");
+    expect(Methods.MANAGED_AGENT_ARCHIVE).toBe("managedAgent.archive");
+    expect(Methods.MANAGED_AGENT_VERSION_LIST).toBe("managedAgent.version.list");
+    expect(Methods.MANAGED_AGENT_VERSION_GET).toBe("managedAgent.version.get");
+  });
+
+  it("has managed environment methods", () => {
+    expect(Methods.MANAGED_ENVIRONMENT_LIST).toBe("managedEnvironment.list");
+    expect(Methods.MANAGED_ENVIRONMENT_GET).toBe("managedEnvironment.get");
+    expect(Methods.MANAGED_ENVIRONMENT_CREATE).toBe("managedEnvironment.create");
+    expect(Methods.MANAGED_ENVIRONMENT_UPDATE).toBe("managedEnvironment.update");
+    expect(Methods.MANAGED_ENVIRONMENT_ARCHIVE).toBe("managedEnvironment.archive");
+  });
+
+  it("has managed session methods", () => {
+    expect(Methods.MANAGED_SESSION_LIST).toBe("managedSession.list");
+    expect(Methods.MANAGED_SESSION_GET).toBe("managedSession.get");
+    expect(Methods.MANAGED_SESSION_CREATE).toBe("managedSession.create");
+    expect(Methods.MANAGED_SESSION_CANCEL).toBe("managedSession.cancel");
+    expect(Methods.MANAGED_SESSION_RESUME).toBe("managedSession.resume");
+    expect(Methods.MANAGED_SESSION_SEND_EVENT).toBe("managedSession.sendEvent");
+    expect(Methods.MANAGED_SESSION_EVENTS_LIST).toBe("managedSession.events.list");
+  });
+
   it("has workspace methods", () => {
     expect(Methods.WORKSPACE_LIST).toBe("workspace.list");
     expect(Methods.WORKSPACE_GET).toBe("workspace.get");
@@ -62,6 +90,14 @@ describe("New Events constants", () => {
     expect(Events.TASK_COMPLETED).toBe("task.completed");
     expect(Events.TASK_FAILED).toBe("task.failed");
     expect(Events.TASK_EVENT).toBe("task.event");
+  });
+
+  it("has managed session events", () => {
+    expect(Events.MANAGED_SESSION_CREATED).toBe("managedSession.created");
+    expect(Events.MANAGED_SESSION_UPDATED).toBe("managedSession.updated");
+    expect(Events.MANAGED_SESSION_EVENT).toBe("managedSession.event");
+    expect(Events.MANAGED_SESSION_COMPLETED).toBe("managedSession.completed");
+    expect(Events.MANAGED_SESSION_FAILED).toBe("managedSession.failed");
   });
 
   it("has node events", () => {
