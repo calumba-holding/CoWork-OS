@@ -53,6 +53,16 @@ For LLM providers, retryable failures such as `429` rate limits immediately adva
 - `0` retries the primary on the next route refresh
 - higher values keep the working fallback route active longer before retrying the primary
 
+### Optional: Configure Memory Hub And Supermemory
+
+Before you start relying on long-term context, open **Settings > Memory Hub** and confirm how memory should behave for this profile.
+
+- **Workspace Kit** initializes the local `.cowork/` context files used for durable prompt injection and project guidance.
+- **Memory settings** control local capture, privacy mode, retention, and preview of the `L0/L1` memory payload.
+- **Supermemory** is optional. If you want an external memory provider, enable it here, paste your API key, keep the default `cowork:{workspaceId}` container template unless you need something else, save, and click **Test Connection**.
+
+Supermemory does not replace CoWork's local memory system. It adds an external profile/search layer, explicit `supermemory_*` tools, optional prompt-time profile injection, and optional mirroring of non-private local memory captures. See [Supermemory Integration](supermemory.md).
+
 ## Troubleshooting
 
 - If **Test Connection** fails with 401/403, verify the API key or token and the account permissions behind it.
