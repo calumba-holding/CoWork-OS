@@ -294,11 +294,13 @@ export class IntentRouter {
       ),
     );
     const cloudProviderMentioned =
-      /\b(box|dropbox|one[\s-]?drive|google drive|sharepoint|notion)\b/.test(lower);
+      /\b(box|dropbox|one[\s-]?drive|google drive|sharepoint|notion|i[\s-]?cloud(?:\s+drive)?)\b/.test(
+        lower,
+      );
     const cloudFileObjectMentioned =
       /\b(files?|folders?|documents?|docs?|pages?|items?|storage|content)\b/.test(lower);
     const cloudQueryIntent =
-      /\b(list|show|find|search|fetch|read|get|open|what|which|where|have)\b/.test(lower);
+      /\b(list|show|find|search|fetch|read|get|open|what|which|where|have|see)\b/.test(lower);
     add(
       "execution",
       3,
@@ -310,6 +312,14 @@ export class IntentRouter {
       2,
       "cloud-storage-query",
       cloudProviderMentioned && cloudQueryIntent,
+    );
+    add(
+      "execution",
+      3,
+      "live-cloud-sync-status",
+      /\bi[\s-]?cloud\b/.test(lower) &&
+        /\b(upload(?:ed|ing)?|sync(?:ing|ed)?|downloading|status|activity)\b/.test(lower) &&
+        /\b(my|this)\s+mac\b|\bon my mac\b|\bfrom my mac\b|\bright now\b|\bnow\b/.test(lower),
     );
     // Image creation: draw, create image, generate picture, etc.
     add(
