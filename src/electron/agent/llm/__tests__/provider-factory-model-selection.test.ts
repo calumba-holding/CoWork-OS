@@ -327,6 +327,66 @@ describe("LLMProviderFactory provider failover chain", () => {
     expect(chain.map((entry) => entry.modelKey)).toEqual(["gpt-4o-mini", "sonnet-4-5"]);
   });
 
+  it("keeps provider-specific failover chains isolated by primary provider", () => {
+    const settings: LLMSettings = {
+      providerType: "openai",
+      modelKey: "gpt-4o-mini",
+      openai: {
+        apiKey: "openai-key",
+        model: "gpt-4o-mini",
+        fallbackProviders: [{ providerType: "anthropic", modelKey: "sonnet-4-5" }],
+        failoverPrimaryRetryCooldownSeconds: 15,
+      },
+      anthropic: {
+        apiKey: "anthropic-key",
+      },
+      azure: {
+        apiKey: "azure-key",
+        endpoint: "https://azure.example.com",
+        deployment: "gpt-4o",
+        fallbackProviders: [{ providerType: "openrouter", modelKey: "openai/gpt-4o" }],
+        failoverPrimaryRetryCooldownSeconds: 120,
+      },
+      openrouter: {
+        apiKey: "openrouter-key",
+        model: "openai/gpt-4o",
+      },
+    };
+    vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue(settings);
+
+    const openaiPrimary = LLMProviderFactory.resolveTaskModelSelection({
+      providerType: "openai",
+    });
+    const openaiChain =
+      LLMProviderFactory.resolveProviderFailoverChain(openaiPrimary);
+    const openaiFailover = LLMProviderFactory.getProviderFailoverSettings(
+      settings,
+      "openai",
+    );
+
+    expect(openaiChain.map((entry) => entry.providerType)).toEqual([
+      "openai",
+      "anthropic",
+    ]);
+    expect(openaiFailover.failoverPrimaryRetryCooldownSeconds).toBe(15);
+
+    const azurePrimary = LLMProviderFactory.resolveTaskModelSelection({
+      providerType: "azure",
+    });
+    const azureChain =
+      LLMProviderFactory.resolveProviderFailoverChain(azurePrimary);
+    const azureFailover = LLMProviderFactory.getProviderFailoverSettings(
+      settings,
+      "azure",
+    );
+
+    expect(azureChain.map((entry) => entry.providerType)).toEqual([
+      "azure",
+      "openrouter",
+    ]);
+    expect(azureFailover.failoverPrimaryRetryCooldownSeconds).toBe(120);
+  });
+
   it("disables automatic failover when a task explicitly overrides provider or model", () => {
     const settings: LLMSettings = {
       providerType: "openai",
