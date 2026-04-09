@@ -427,6 +427,93 @@ export class DatabaseManager {
         FOREIGN KEY (task_id) REFERENCES tasks(id)
       );
 
+      CREATE TABLE IF NOT EXISTS managed_agents (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL,
+        current_version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS managed_agent_versions (
+        agent_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        model_json TEXT,
+        system_prompt TEXT NOT NULL,
+        execution_mode TEXT NOT NULL,
+        runtime_defaults_json TEXT,
+        skills_json TEXT,
+        mcp_servers_json TEXT,
+        team_template_json TEXT,
+        metadata_json TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, version),
+        FOREIGN KEY (agent_id) REFERENCES managed_agents(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS managed_environments (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS managed_sessions (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        agent_version INTEGER NOT NULL,
+        environment_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        backing_task_id TEXT,
+        backing_team_run_id TEXT,
+        resumed_from_session_id TEXT,
+        latest_summary TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        started_at INTEGER,
+        completed_at INTEGER,
+        FOREIGN KEY (agent_id) REFERENCES managed_agents(id),
+        FOREIGN KEY (environment_id) REFERENCES managed_environments(id),
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+        FOREIGN KEY (backing_task_id) REFERENCES tasks(id),
+        FOREIGN KEY (backing_team_run_id) REFERENCES agent_team_runs(id),
+        FOREIGN KEY (resumed_from_session_id) REFERENCES managed_sessions(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS managed_session_events (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        source_task_id TEXT,
+        source_task_event_id TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_task_id) REFERENCES tasks(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_managed_agents_status ON managed_agents(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_managed_agent_versions_agent ON managed_agent_versions(agent_id, version DESC);
+      CREATE INDEX IF NOT EXISTS idx_managed_environments_status ON managed_environments(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_managed_sessions_environment ON managed_sessions(environment_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_managed_sessions_workspace ON managed_sessions(workspace_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_managed_sessions_task ON managed_sessions(backing_task_id);
+      CREATE INDEX IF NOT EXISTS idx_managed_sessions_team_run ON managed_sessions(backing_team_run_id);
+      CREATE INDEX IF NOT EXISTS idx_managed_session_events_session_seq ON managed_session_events(session_id, seq ASC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_session_events_source_task_event
+        ON managed_session_events(session_id, source_task_event_id)
+        WHERE source_task_event_id IS NOT NULL;
+
       CREATE TABLE IF NOT EXISTS artifacts (
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL,
@@ -1549,6 +1636,114 @@ export class DatabaseManager {
       this.db.exec("CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq)");
     } catch {
       // Index already exists, ignore
+    }
+    try {
+      this.db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_task_events_task_seq_timestamp ON task_events(task_id, seq, timestamp)",
+      );
+    } catch {
+      // Index already exists, ignore
+    }
+
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS managed_agents (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          status TEXT NOT NULL,
+          current_version INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS managed_agent_versions (
+          agent_id TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          model_json TEXT,
+          system_prompt TEXT NOT NULL,
+          execution_mode TEXT NOT NULL,
+          runtime_defaults_json TEXT,
+          skills_json TEXT,
+          mcp_servers_json TEXT,
+          team_template_json TEXT,
+          metadata_json TEXT,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (agent_id, version),
+          FOREIGN KEY (agent_id) REFERENCES managed_agents(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS managed_environments (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          revision INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL,
+          config_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS managed_sessions (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          agent_version INTEGER NOT NULL,
+          environment_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          backing_task_id TEXT,
+          backing_team_run_id TEXT,
+          resumed_from_session_id TEXT,
+          latest_summary TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          started_at INTEGER,
+          completed_at INTEGER,
+          FOREIGN KEY (agent_id) REFERENCES managed_agents(id),
+          FOREIGN KEY (environment_id) REFERENCES managed_environments(id),
+          FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+          FOREIGN KEY (backing_task_id) REFERENCES tasks(id),
+          FOREIGN KEY (backing_team_run_id) REFERENCES agent_team_runs(id),
+          FOREIGN KEY (resumed_from_session_id) REFERENCES managed_sessions(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS managed_session_events (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          timestamp INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          source_task_id TEXT,
+          source_task_event_id TEXT,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY (source_task_id) REFERENCES tasks(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_managed_agents_status
+          ON managed_agents(status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_managed_agent_versions_agent
+          ON managed_agent_versions(agent_id, version DESC);
+        CREATE INDEX IF NOT EXISTS idx_managed_environments_status
+          ON managed_environments(status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_managed_sessions_environment
+          ON managed_sessions(environment_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_managed_sessions_workspace
+          ON managed_sessions(workspace_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_managed_sessions_task
+          ON managed_sessions(backing_task_id);
+        CREATE INDEX IF NOT EXISTS idx_managed_sessions_team_run
+          ON managed_sessions(backing_team_run_id);
+        CREATE INDEX IF NOT EXISTS idx_managed_session_events_session_seq
+          ON managed_session_events(session_id, seq ASC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_session_events_source_task_event
+          ON managed_session_events(session_id, source_task_event_id)
+          WHERE source_task_event_id IS NOT NULL;
+      `);
+    } catch (error) {
+      schemaLogger.error("[DatabaseManager] Failed managed agents migration:", error);
     }
 
     // These indexes depend on the timeline-v2 legacy_type column, so create them
@@ -2853,6 +3048,13 @@ export class DatabaseManager {
     }
     try {
       this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)");
+    } catch {
+      // Index already exists
+    }
+    try {
+      this.db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_session_updated_at ON tasks(session_id, updated_at DESC)",
+      );
     } catch {
       // Index already exists
     }
