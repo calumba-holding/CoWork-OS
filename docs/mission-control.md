@@ -207,6 +207,19 @@ Access from the **Teams** button in the header. Full management UI for coordinat
 
 See [Features — Agent Teams](features.md#agent-teams) for more details.
 
+## Managed Agents
+
+Managed Agents V1 does not have a dedicated Mission Control creation flow yet.
+
+Current behavior:
+
+- managed sessions are created through the Control Plane
+- each managed session creates a backing task
+- team-mode managed sessions also create a backing team run
+- Mission Control remains the main place to observe those backing tasks and team runs once they exist
+
+Use this together with [Managed Agents](managed-agents.md) when manually testing the feature from the app today.
+
 ---
 
 ## Digital Twin Personas
