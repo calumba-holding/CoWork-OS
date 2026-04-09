@@ -58,13 +58,14 @@ function stripTrailingBoldFromGlobCodeBlocks(text: string): string {
  * instead of confusing the bold delimiter parser.
  */
 function wrapGlobPatterns(text: string): string {
+  const globPattern = /\*\*\/[A-Za-z0-9_./*?[\]{}-]+/g;
   const parts = text.split("`");
   // With odd number of backticks the last segment is inside an unclosed backtick —
   // cap the loop so we don't process it as outside-code text.
   const safeLen = parts.length % 2 === 0 ? parts.length - 1 : parts.length;
   for (let i = 0; i < safeLen; i += 2) {
     // Only process non-code segments (odd split indices are inside backticks)
-    parts[i] = parts[i].replace(/\*\*\/\*[\w*?\[\]{}.\-]+/g, (m) => "`" + m + "`");
+    parts[i] = parts[i].replace(globPattern, (m) => "`" + m + "`");
   }
   return parts.join("`");
 }
