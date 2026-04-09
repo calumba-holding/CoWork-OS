@@ -80,6 +80,8 @@ const READ_PARALLEL_TOOLS = new Set([
   "search_sessions",
   "memory_topics_load",
   "memory_curated_read",
+  "supermemory_profile",
+  "supermemory_search",
   "scratchpad_read",
 ]);
 
@@ -128,6 +130,8 @@ const IDEMPOTENT_TOOLS = new Set([
   "search_sessions",
   "memory_topics_load",
   "memory_curated_read",
+  "supermemory_profile",
+  "supermemory_search",
   "scratchpad_read",
 ]);
 
