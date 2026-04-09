@@ -161,6 +161,13 @@ describe("normalizeMarkdownForCollab", () => {
     expect(output).toContain("`**/*agent*`");
   });
 
+  it("wraps bare double-star path globs in backticks", () => {
+    const input = "Search: **/SKILL.md and **/scripts/setup.sh";
+    const output = normalizeMarkdownForCollab(input);
+    expect(output).toContain("`**/SKILL.md`");
+    expect(output).toContain("`**/scripts/setup.sh`");
+  });
+
   it("fixes unclosed bold at end of line", () => {
     const input = "**Electron desktop app";
     const output = normalizeMarkdownForCollab(input);
