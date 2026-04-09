@@ -30,8 +30,10 @@ import {
 } from "./local-embedding";
 import { MarkdownMemoryIndexService } from "./MarkdownMemoryIndexService";
 import { MemoryTierService } from "./MemoryTierService";
+import { SupermemoryService } from "./SupermemoryService";
 import type { CoreMemoryScopeKind } from "../../shared/types";
 import { MemoryFeaturesManager } from "../settings/memory-features-manager";
+import { createLogger } from "../utils/logger";
 
 // Privacy patterns to exclude - matches common sensitive data patterns
 const SENSITIVE_PATTERNS = [
@@ -81,6 +83,7 @@ const MAX_TEXT_IMPORT_ENTRY_CHARS = 12000;
 const PROMPT_RECALL_IGNORE_MARKER = "[cowork:prompt_recall=ignore]";
 const HEARTBEAT_BATCH_WINDOW_MS = 5 * 60 * 1000;
 const LOCAL_SUMMARY_MAX_CHARS = 220;
+const logger = createLogger("MemoryService");
 
 type MemoryCaptureOrigin =
   | "task"
@@ -180,7 +183,7 @@ export class MemoryService {
     // Start periodic cleanup
     this.cleanupIntervalHandle = setInterval(() => this.runCleanup(), CLEANUP_INTERVAL_MS);
 
-    console.log("[MemoryService] Initialized");
+    logger.info("[MemoryService] Initialized");
   }
 
   /**
@@ -343,6 +346,21 @@ export class MemoryService {
 
     // Emit event
     memoryEvents.emit("memoryChanged", { type: "created", workspaceId });
+
+    if (!finalIsPrivate) {
+      void SupermemoryService.mirrorMemory({
+        workspace: {
+          id: workspaceId,
+          name: workspaceId,
+        },
+        taskId,
+        memoryType: type,
+        content: truncatedContent,
+        createdAt: memory.createdAt,
+      }).catch((error) => {
+        logger.warn("[MemoryService] Failed to mirror memory to Supermemory:", error);
+      });
+    }
 
     // Enforce per-workspace storage cap (best-effort).
     this.enforceStorageLimit(workspaceId, settings.maxStorageMb);
@@ -1600,7 +1618,7 @@ export class MemoryService {
         this.scheduleCompressionDrain();
       }
     } catch (error) {
-      console.error("[MemoryService] Compression queue error:", error);
+      logger.error("[MemoryService] Compression queue error:", error);
     } finally {
       this.compressionInProgress = false;
     }
@@ -1656,7 +1674,7 @@ export class MemoryService {
     }
 
     this.recordCompressionDiagnostic(group.workspaceId, group.origin, "localCompressed");
-    console.log(
+    logger.info(
       `[MemoryService] Compression batch workspace=${group.workspaceId} origin=${group.origin} batchKey=${group.batchKey} items=${memories.length} mode=local`,
     );
   }
@@ -1758,7 +1776,7 @@ export class MemoryService {
     if (usedLlm) {
       this.recordCompressionDiagnostic(group.workspaceId, group.origin, "llmCalls");
     }
-    console.log(
+    logger.info(
       `[MemoryService] Compression batch workspace=${group.workspaceId} origin=${group.origin} batchKey=${group.batchKey} items=${memories.length} mode=${usedLlm ? "llm" : "deterministic"}`,
     );
   }
@@ -1842,7 +1860,7 @@ export class MemoryService {
         },
         error,
       );
-      console.warn("[MemoryService] Batch compression failed:", group.batchKey, error);
+      logger.warn("[MemoryService] Batch compression failed:", group.batchKey, error);
     }
 
     return { summaryText: this.buildBatchDigest(group, memories), usedLlm: false };
@@ -1919,7 +1937,7 @@ export class MemoryService {
     if (attempts > MAX_COMPRESSION_RETRIES) {
       this.compressionRetryCounts.delete(group.batchKey);
       this.recordCompressionDiagnostic(group.workspaceId, group.origin, "dropped");
-      console.warn(
+      logger.warn(
         `[MemoryService] Compression retry limit reached for batch ${group.batchKey}; giving up.`,
       );
       return;
@@ -1955,7 +1973,7 @@ export class MemoryService {
 
         const deleted = this.memoryRepo.deleteOlderThan(workspaceId, cutoff);
         if (deleted > 0) {
-          console.log(
+          logger.info(
             `[MemoryService] Cleaned up ${deleted} old memories for workspace ${workspaceId}`,
           );
         }
@@ -1968,7 +1986,7 @@ export class MemoryService {
         MemoryTierService.runPromotionPass(this.db);
       }
     } catch (error) {
-      console.error("[MemoryService] Cleanup failed:", error);
+      logger.error("[MemoryService] Cleanup failed:", error);
     }
   }
 
@@ -2191,6 +2209,6 @@ export class MemoryService {
     this.compressionBudgetByWorkspace.clear();
     this.compressionDiagnosticsByWorkspace.clear();
     this.initialized = false;
-    console.log("[MemoryService] Shutdown complete");
+    logger.info("[MemoryService] Shutdown complete");
   }
 }
