@@ -119,6 +119,20 @@ describe("AgentDaemon automated task model selection", () => {
     expect(result.task.agentConfig?.llmProfileHint).toBe("cheap");
   });
 
+  it("does not inject a default maxTurns for ordinary routed tasks", () => {
+    const daemonLike = createDaemonLike();
+
+    const result = daemonLike.deriveTaskStrategy({
+      title: "Portugal tax question",
+      prompt: "Check why this legal research task failed and find the root cause.",
+      agentConfig: {},
+    });
+
+    expect(result.strategy.maxTurns).toBeUndefined();
+    expect(result.agentConfig.maxTurns).toBeUndefined();
+    expect(result.agentConfig.turnBudgetPolicy).toBeUndefined();
+  });
+
   it("uses automatedTaskModelKey when set, bypassing cheap profile", () => {
     const daemonLike = createDaemonLike();
     vi.mocked(LLMProviderFactory.loadSettings).mockReturnValue({

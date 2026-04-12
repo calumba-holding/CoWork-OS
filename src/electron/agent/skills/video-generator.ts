@@ -800,13 +800,11 @@ function getConfiguredVideoProviders(
   if (settings.openai?.apiKey?.trim()) providers.push("openai");
   const azureVideoApiKey = settings.videoGeneration?.azure?.videoApiKey?.trim() || settings.azure?.apiKey?.trim();
   const azureVideoEndpoint = settings.videoGeneration?.azure?.videoEndpoint?.trim() || settings.azure?.endpoint?.trim();
-  console.log(`[VideoGenerator] Azure video check: apiKey=${!!azureVideoApiKey}, endpoint=${azureVideoEndpoint ?? "unset"}`);
   if (azureVideoApiKey && azureVideoEndpoint) providers.push("azure");
   if (settings.gemini?.apiKey?.trim()) providers.push("gemini");
   if (settings.videoGeneration?.vertex?.projectId?.trim() && settings.videoGeneration?.vertex?.accessToken?.trim())
     providers.push("vertex");
   if (settings.videoGeneration?.kling?.apiKey?.trim()) providers.push("kling");
-  console.log(`[VideoGenerator] Configured providers: [${providers.join(", ")}]`);
   return providers;
 }
 

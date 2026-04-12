@@ -239,3 +239,20 @@ describe("evaluateToolAvailability read_pdf_visual", () => {
     expect(hasPdfVisualIntent("Read this PDF and summarize the text.")).toBe(false);
   });
 });
+
+describe("evaluateToolAvailability create_document", () => {
+  const baseCtx = {
+    taskText: 'create a pdf with text "hello world"',
+    taskDomain: "general" as const,
+    taskIntent: "execution" as const,
+    requiredTools: undefined as Iterable<string> | undefined,
+    recentlyUsedTools: undefined as Iterable<string> | undefined,
+  };
+
+  it("allows create_document for explicit PDF artifact requests", () => {
+    const r = evaluateToolAvailability("create_document", baseCtx);
+    expect(r.decision).toBe("allow");
+    expect(r.metadata.lane).toBe("artifact");
+    expect(r.metadata.overlapGroup).toBe("artifact_generation");
+  });
+});

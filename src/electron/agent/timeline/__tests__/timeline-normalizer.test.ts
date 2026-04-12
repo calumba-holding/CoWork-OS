@@ -315,6 +315,19 @@ describe("normalizeTaskEvents — summary generation", () => {
     ]);
     expect(result[0].summary).toMatch(/Shell command may modify files/);
   });
+
+  it("prefers timeline group labels over verbose completion messages with success counts", () => {
+    resetSeq();
+    const result = normalizeTaskEvents([
+      makeEvent("timeline_group_finished", {
+        stage: "BUILD",
+        groupLabel: "Inspect Workspace",
+        message: "Inspect Workspace: 3 succeeded, 0 failed",
+      }),
+    ]);
+
+    expect(result[0].summary).toBe("Inspect Workspace");
+  });
 });
 
 // ---------------------------------------------------------------------------

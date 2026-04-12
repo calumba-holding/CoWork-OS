@@ -173,4 +173,31 @@ describe("task output summary utilities", () => {
 
     expect(summary?.primaryOutputPath).toBe("artifacts/preserved.md");
   });
+
+  it("filters directory paths out of completion payload summaries", () => {
+    const completionWithDirectories = makeEvent(
+      "task_completed",
+      {
+        outputSummary: {
+          created: ["notes", "raw", "LLM Wiki", "LLM Wiki/overview.md"],
+          outputCount: 4,
+          folders: [".", "LLM Wiki"],
+        },
+      },
+      100,
+    );
+
+    const summary = resolveTaskOutputSummaryFromCompletionEvent(completionWithDirectories, [
+      makeEvent("file_created", { path: "notes", type: "directory" }, 10),
+      makeEvent("file_created", { path: "raw", type: "directory" }, 20),
+      makeEvent("file_created", { path: "LLM Wiki", type: "directory" }, 30),
+      completionWithDirectories,
+    ]);
+
+    expect(summary).not.toBeNull();
+    expect(summary?.created).toEqual(["LLM Wiki/overview.md"]);
+    expect(summary?.primaryOutputPath).toBe("LLM Wiki/overview.md");
+    expect(summary?.outputCount).toBe(1);
+    expect(summary?.folders).toEqual(["LLM Wiki"]);
+  });
 });

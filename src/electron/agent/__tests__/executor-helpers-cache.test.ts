@@ -185,6 +185,37 @@ describe("FileOperationTracker cache invalidation", () => {
     expect(second.blocked).toBe(true);
     expect(second.reason || "").toContain("tool batch");
   });
+
+  it("releases a failed batch file reservation so the same path can be retried", () => {
+    const fakeThis: Any = Object.create(TaskExecutor.prototype);
+    fakeThis.fileOperationTracker = new FileOperationTracker();
+    fakeThis.logTag = "[Executor:test]";
+
+    const batchCreatedPaths = new Set<string>();
+    const first = (TaskExecutor as Any).prototype.checkFileOperation.call(
+      fakeThis,
+      "write_file",
+      { path: "artifacts/seed.txt", content: "one" },
+      batchCreatedPaths,
+    );
+
+    (TaskExecutor as Any).prototype.releaseBatchCreatedPathReservation.call(
+      fakeThis,
+      batchCreatedPaths,
+      "write_file",
+      { path: "artifacts/seed.txt", content: "one" },
+    );
+
+    const retry = (TaskExecutor as Any).prototype.checkFileOperation.call(
+      fakeThis,
+      "write_file",
+      { path: "artifacts/seed.txt", content: "two" },
+      batchCreatedPaths,
+    );
+
+    expect(first.blocked).toBe(false);
+    expect(retry.blocked).toBe(false);
+  });
 });
 
 describe("ToolFailureTracker browser HTTP status handling", () => {

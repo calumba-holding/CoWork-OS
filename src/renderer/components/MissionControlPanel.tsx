@@ -1979,9 +1979,11 @@ export function MissionControlPanel({
                     </label>
                   </div>
 
-                  <div className="mc-task-detail-section">
-                    <h4>{agentContext.getUiCopy("mcTaskBriefTitle")}</h4>
-                    <p className="mc-task-detail-brief">{selectedTask.prompt}</p>
+                  <div className="mc-task-detail-section mc-task-detail-section-brief">
+                    <h4 className="mc-task-detail-brief-title">{agentContext.getUiCopy("mcTaskBriefTitle")}</h4>
+                    <div className="mc-task-detail-brief-scroll">
+                      <p className="mc-task-detail-brief">{selectedTask.prompt}</p>
+                    </div>
                   </div>
 
                   <div className="mc-task-detail-section">
@@ -3252,6 +3254,17 @@ const styles = `
     gap: 8px;
   }
 
+  .mc-task-detail-section-brief {
+    min-height: 520px;
+    padding: 14px 16px;
+    border: 1px solid var(--color-border-light);
+    border-radius: 20px;
+    background: var(--color-bg-elevated);
+    overflow: hidden;
+    position: relative;
+    isolation: isolate;
+  }
+
   .mc-task-detail-section h4 {
     margin: 0;
     font-size: 12px;
@@ -3260,12 +3273,37 @@ const styles = `
     text-transform: uppercase;
   }
 
+  .mc-task-detail-brief-title {
+    display: block;
+    padding: 0;
+    margin-bottom: 2px;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    position: relative;
+    z-index: 1;
+  }
+
   .mc-task-detail-brief {
     margin: 0;
     font-size: 12px;
     color: var(--color-text-primary);
     line-height: 1.4;
     white-space: pre-wrap;
+  }
+
+  .mc-task-detail-brief-scroll {
+    height: clamp(420px, 58vh, 720px);
+    min-height: 420px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 4px 0 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    position: relative;
+    z-index: 1;
   }
 
   .mc-comment-box {

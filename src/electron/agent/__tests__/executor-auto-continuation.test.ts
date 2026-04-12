@@ -289,6 +289,42 @@ describe("TaskExecutor continuation budgets", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not enforce a global window when no explicit cap is configured", () => {
+    vi.spyOn(GuardrailManager, "isIterationLimitExceeded").mockReturnValue({
+      exceeded: false,
+      iterations: 0,
+      limit: 50,
+    });
+    vi.spyOn(GuardrailManager, "isTokenBudgetExceeded").mockReturnValue({
+      exceeded: false,
+      used: 0,
+      limit: 100000,
+    });
+    vi.spyOn(GuardrailManager, "isCostBudgetExceeded").mockReturnValue({
+      exceeded: false,
+      cost: 0,
+      limit: 1,
+    });
+
+    const executor = makeExecutor({
+      globalTurnCount: 150,
+      maxGlobalTurns: null,
+      lifetimeTurnCount: 150,
+      maxLifetimeTurns: 3000,
+      turnBudgetPolicy: "adaptive_unbounded",
+      turnlessExecutionV4Enabled: true,
+      turnWindowSoftExhaustedNotified: false,
+    });
+
+    expect(() => executor.checkBudgets()).not.toThrow();
+    expect(executor.emitEvent).not.toHaveBeenCalledWith(
+      "turn_window_soft_exhausted",
+      expect.anything(),
+    );
+
+    vi.restoreAllMocks();
+  });
+
   it("still enforces hard window policy when explicitly configured", () => {
     vi.spyOn(GuardrailManager, "isIterationLimitExceeded").mockReturnValue({
       exceeded: false,

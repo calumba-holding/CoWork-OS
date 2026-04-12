@@ -7,7 +7,7 @@ const RETRY_FETCH_COUNT_MAX = 10;
 const X_MENTION_TIMEOUT_ERROR_RE = /timeout|timed out|ETIMEDOUT/i;
 const X_MENTION_UNSUPPORTED_JSON_ERROR_RE = /requires JSON support|unknown option.*--json/i;
 const X_MENTION_AUTH_ERROR_RE =
-  /missing auth_token|missing .*ct0|cookie|profile|not logged in|login required|permission denied|access denied/i;
+  /missing auth_token|missing .*ct0|not logged in|login required|permission denied|access denied|authentication failed|auth(?:entication)? (?:failed|required|expired|invalid)|cookie (?:missing|expired|invalid|not found)|profile (?:missing|not found|unavailable)/i;
 const X_MENTION_CLI_ERROR_RE =
   /Command failed: bird|spawn (EBADF|EACCES|ENOENT)|bird CLI not found/i;
 

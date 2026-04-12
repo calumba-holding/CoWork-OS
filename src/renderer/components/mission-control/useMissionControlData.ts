@@ -260,6 +260,9 @@ export function resolveMissionColumnForTask(task: Pick<Task, "status" | "boardCo
   const col = task.boardColumn;
   if (col === "done") return "done";
   if (col === "review") return "review";
+  if ((task.status === "planning" || task.status === "executing") && col !== "done" && col !== "review") {
+    return "in_progress";
+  }
   if (col === "in_progress") return "in_progress";
   if (col === "todo") return "assigned";
   if (col === "backlog") return task.assignedAgentRoleId ? "assigned" : "inbox";

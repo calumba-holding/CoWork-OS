@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import mermaid from "mermaid";
 
 const mockMcpState = {
   version: 1,
@@ -380,5 +381,43 @@ describe("ToolRegistry tool catalog versioning", () => {
         },
       ]),
     ).toThrow(/duplicate tool names detected/i);
+  });
+
+  it("accepts create_diagram when Mermaid validation is unavailable in the current runtime", async () => {
+    const daemon = createDaemon();
+    const registry = new ToolRegistry(createWorkspace(), daemon, "diagram-task");
+    const parseSpy = vi
+      .spyOn(mermaid, "parse")
+      .mockRejectedValue(new Error("DOMPurify.addHook is not a function"));
+
+    const result = await registry.executeTool("create_diagram", {
+      title: "Timeline",
+      diagram: "graph TD\nA[Start] --> B[Today]",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.warning).toContain("pre-validation is unavailable");
+    expect(daemon.logEvent).toHaveBeenCalledWith(
+      "diagram-task",
+      "diagram_created",
+      expect.objectContaining({ title: "Timeline" }),
+    );
+
+    parseSpy.mockRestore();
+  });
+
+  it("still rejects invalid Mermaid syntax when parser validation runs normally", async () => {
+    const registry = new ToolRegistry(createWorkspace(), createDaemon(), "diagram-task-2");
+    const parseSpy = vi.spyOn(mermaid, "parse").mockRejectedValue(new Error("Parse error on line 1"));
+
+    const result = await registry.executeTool("create_diagram", {
+      title: "Broken",
+      diagram: "not mermaid",
+    });
+
+    expect(result.success).toBe(false);
+    expect(String(result.error || "")).toContain("invalid Mermaid syntax: Parse error on line 1");
+
+    parseSpy.mockRestore();
   });
 });

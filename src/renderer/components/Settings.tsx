@@ -2,6 +2,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useMemo,
   useRef,
   type ReactNode,
   type SetStateAction,
@@ -493,13 +494,36 @@ function SearchableSelect({
 
 // Sidebar navigation items configuration
 const I = { size: 18, strokeWidth: 1.5 } as const;
-const sidebarItems: Array<{
+type SidebarItem = {
   tab: SettingsTab;
   label: string;
   icon: ReactNode;
   macOnly?: boolean;
   group: string;
-}> = [
+};
+
+type SidebarSearchTarget = {
+  tab?: SettingsTab;
+  secondaryChannel?: SecondaryChannel;
+  aiModelsSubTab?: "llm" | "video" | "search";
+  automationsSubTab?:
+    | "queue"
+    | "subconscious"
+    | "scheduled"
+    | "hooks"
+    | "triggers"
+    | "council";
+  skillsSubTab?: "custom" | "store";
+  integrationsSubTab?: "git" | "connectors" | "identity" | "infrastructure";
+  accessSubTab?: "controlplane" | "webaccess";
+};
+
+type SidebarSearchEntry = {
+  terms: string[];
+  target?: SidebarSearchTarget;
+};
+
+const sidebarItems: SidebarItem[] = [
   {
     tab: "appearance",
     label: "Appearance",
@@ -682,6 +706,211 @@ const secondaryChannelItems: Array<{
   { key: "bluebubbles", label: "BlueBubbles", icon: <Smile {...S} /> },
 ];
 
+const secondaryChannelSearchTerms: Partial<Record<SecondaryChannel, string[]>> =
+  {
+    teams: ["microsoft teams", "teams"],
+    x: ["twitter", "x twitter", "tweets", "social"],
+    discord: ["discord"],
+    imessage: ["imessage", "ios messages", "apple messages"],
+    signal: ["signal", "secure messaging"],
+    line: ["line", "line messenger"],
+    email: ["email", "mail"],
+    googlechat: ["google chat", "gchat"],
+    feishu: ["feishu", "lark"],
+    wecom: ["wecom", "wechat work", "enterprise wechat"],
+    mattermost: ["mattermost"],
+    matrix: ["matrix"],
+    twitch: ["twitch", "stream chat"],
+    bluebubbles: ["bluebubbles", "blue bubbles"],
+  };
+
+const sidebarSearchEntries: Partial<Record<SettingsTab, SidebarSearchEntry[]>> =
+  {
+    appearance: [
+      {
+        terms: [
+          "theme",
+          "light mode",
+          "dark mode",
+          "accent color",
+          "transparency effects",
+          "ui density",
+          "developer logging",
+          "onboarding",
+        ],
+      },
+    ],
+    personality: [
+      { terms: ["personality", "assistant behavior", "system prompt"] },
+    ],
+    companies: [
+      { terms: ["companies", "company", "mission control", "organization"] },
+    ],
+    system: [
+      {
+        terms: [
+          "profiles",
+          "security",
+          "permissions",
+          "guardrails",
+          "admin policies",
+          "tray",
+          "menu bar",
+          "system settings",
+        ],
+      },
+    ],
+    voice: [{ terms: ["voice", "voice mode", "speech", "microphone", "audio"] }],
+    digitaltwins: [
+      { terms: ["agent personas", "personas", "digital twins", "agents"] },
+    ],
+    aimodels: [
+      {
+        terms: [
+          "ai model",
+          "llm",
+          "language model",
+          "model provider",
+          "provider routing",
+          "fallback provider",
+          "anthropic",
+          "claude",
+          "openai",
+          "gpt",
+          "azure",
+          "gemini",
+          "openrouter",
+          "ollama",
+          "groq",
+          "xai",
+          "grok",
+          "kimi",
+          "bedrock",
+          "pi",
+        ],
+        target: { tab: "aimodels", aiModelsSubTab: "llm" },
+      },
+      {
+        terms: [
+          "video",
+          "video model",
+          "sora",
+          "kling",
+          "vertex video",
+          "video generation",
+        ],
+        target: { tab: "aimodels", aiModelsSubTab: "video" },
+      },
+      {
+        terms: [
+          "web search",
+          "search provider",
+          "search engine",
+          "tavily",
+          "exa",
+          "duckduckgo",
+          "google search",
+        ],
+        target: { tab: "aimodels", aiModelsSubTab: "search" },
+      },
+    ],
+    morechannels: secondaryChannelItems.map((item) => ({
+      terms: [item.label, ...(secondaryChannelSearchTerms[item.key] ?? [])],
+      target: { tab: "morechannels", secondaryChannel: item.key },
+    })),
+    memory: [{ terms: ["memory", "memories", "memory hub", "knowledge"] }],
+    automations: [
+      {
+        terms: ["queue", "task queue", "queued tasks"],
+        target: { tab: "automations", automationsSubTab: "queue" },
+      },
+      {
+        terms: ["council", "r&d council", "research council"],
+        target: { tab: "automations", automationsSubTab: "council" },
+      },
+      {
+        terms: ["subconscious", "reflection", "background reflection"],
+        target: { tab: "automations", automationsSubTab: "subconscious" },
+      },
+      {
+        terms: ["scheduled", "scheduled tasks", "cron", "recurring tasks"],
+        target: { tab: "automations", automationsSubTab: "scheduled" },
+      },
+      {
+        terms: ["hooks", "webhooks", "hook"],
+        target: { tab: "automations", automationsSubTab: "hooks" },
+      },
+      {
+        terms: ["triggers", "event triggers", "events"],
+        target: { tab: "automations", automationsSubTab: "triggers" },
+      },
+    ],
+    integrations: [
+      {
+        terms: ["git", "worktree", "repository"],
+        target: { tab: "integrations", integrationsSubTab: "git" },
+      },
+      {
+        terms: ["connectors", "integrations", "apps"],
+        target: { tab: "integrations", integrationsSubTab: "connectors" },
+      },
+      {
+        terms: ["identity", "contacts", "crm", "contact identity"],
+        target: { tab: "integrations", integrationsSubTab: "identity" },
+      },
+      {
+        terms: ["infrastructure", "infra", "servers", "deployment"],
+        target: { tab: "integrations", integrationsSubTab: "infrastructure" },
+      },
+    ],
+    health: [{ terms: ["health", "healthkit", "fitness", "wellness"] }],
+    customize: [
+      { terms: ["plugin packs", "plugins", "packs", "registry", "customize"] },
+    ],
+    skills: [
+      {
+        terms: ["custom skills", "skills", "local skills"],
+        target: { tab: "skills", skillsSubTab: "custom" },
+      },
+      {
+        terms: ["skill store", "skill hub", "marketplace", "skillhub"],
+        target: { tab: "skills", skillsSubTab: "store" },
+      },
+    ],
+    mcp: [
+      {
+        terms: [
+          "mcp",
+          "mcp servers",
+          "model context protocol",
+          "server registry",
+        ],
+      },
+    ],
+    tools: [
+      { terms: ["built-in tools", "tools", "computer use", "builtin tools"] },
+    ],
+    briefing: [
+      { terms: ["daily briefing", "briefing", "morning summary", "digest"] },
+    ],
+    access: [
+      {
+        terms: ["remote access", "control plane", "controlplane"],
+        target: { tab: "access", accessSubTab: "controlplane" },
+      },
+      {
+        terms: ["web access", "browser access", "webaccess"],
+        target: { tab: "access", accessSubTab: "webaccess" },
+      },
+    ],
+    nodes: [{ terms: ["mobile companions", "nodes", "mobile"] }],
+    extensions: [{ terms: ["extensions", "browser extension", "extension"] }],
+    insights: [{ terms: ["usage insights", "analytics", "metrics"] }],
+    suggestions: [{ terms: ["suggestions", "recommendations"] }],
+    traces: [{ terms: ["trace debugger", "traces", "sessions", "debugger"] }],
+    updates: [{ terms: ["updates", "update", "release notes"] }],
+  };
+
 const LLM_PROVIDER_ICONS: Record<string, ReactNode> = {
   anthropic: <Layers {...S} />,
   openai: <CircleDot {...S} />,
@@ -850,8 +1079,69 @@ export function Settings({
       return "linux";
     })();
   const isMacPlatform = platform === "darwin";
-  const getSidebarItemLabel = (item: (typeof sidebarItems)[number]): string =>
-    item.label;
+  const getSidebarItemLabel = (item: SidebarItem): string => item.label;
+  const normalizeSearchQuery = (value: string): string =>
+    value.trim().toLowerCase();
+  const matchesSearchQuery = (haystack: string, query: string): boolean => {
+    const normalizedQuery = normalizeSearchQuery(query);
+    if (!normalizedQuery) return true;
+    const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+    return tokens.every((token) => haystack.includes(token));
+  };
+
+  const filteredSidebarItems = useMemo(() => {
+    return sidebarItems
+      .filter((item) => !item.macOnly || isMacPlatform)
+      .map((item) => {
+        const entries: SidebarSearchEntry[] = [
+          {
+            terms: [getSidebarItemLabel(item), item.group],
+            target: { tab: item.tab },
+          },
+          ...(sidebarSearchEntries[item.tab] ?? []),
+        ];
+        const searchBlob = entries
+          .flatMap((entry) => entry.terms)
+          .join(" ")
+          .toLowerCase();
+        const matchedEntry = entries.find((entry) =>
+          entry.terms.some((term) =>
+            matchesSearchQuery(term.toLowerCase(), sidebarSearch),
+          ),
+        );
+        return {
+          item,
+          matchedTarget: matchedEntry?.target,
+          matches: matchesSearchQuery(searchBlob, sidebarSearch),
+        };
+      })
+      .filter((entry) => entry.matches);
+  }, [isMacPlatform, sidebarSearch]);
+
+  const handleSidebarItemSelect = useCallback(
+    (item: SidebarItem, target?: SidebarSearchTarget) => {
+      setActiveTab(target?.tab ?? item.tab);
+      if (target?.secondaryChannel) {
+        setActiveSecondaryChannel(target.secondaryChannel);
+      }
+      if (target?.aiModelsSubTab) {
+        setActiveAIModelsSubTab(target.aiModelsSubTab);
+      }
+      if (target?.automationsSubTab) {
+        setActiveAutomationsSubTab(target.automationsSubTab);
+      }
+      if (target?.skillsSubTab) {
+        setActiveSkillsSubTab(target.skillsSubTab);
+      }
+      if (target?.integrationsSubTab) {
+        setActiveIntegrationsSubTab(target.integrationsSubTab);
+      }
+      if (target?.accessSubTab) {
+        setActiveAccessSubTab(target.accessSubTab);
+      }
+    },
+    [],
+  );
   // Form state for credentials (not persisted directly)
   const [anthropicApiKey, setAnthropicApiKey] = useState("");
   const [anthropicSubscriptionToken, setAnthropicSubscriptionToken] =
@@ -6245,22 +6535,9 @@ export function Settings({
           </div>
           <div className="settings-nav-items">
             {
-              sidebarItems
-                .filter((item) => {
-                  // Filter by macOnly if applicable
-                  if (item.macOnly && !isMacPlatform) {
-                    return false;
-                  }
-                  // Filter by search query
-                  if (sidebarSearch) {
-                    return getSidebarItemLabel(item)
-                      .toLowerCase()
-                      .includes(sidebarSearch.toLowerCase());
-                  }
-                  return true;
-                })
+              filteredSidebarItems
                 .reduce<{ seenGroups: Set<string>; elements: ReactNode[] }>(
-                  (acc, item) => {
+                  (acc, { item, matchedTarget }) => {
                     if (!sidebarSearch && !acc.seenGroups.has(item.group)) {
                       acc.elements.push(
                         <div
@@ -6277,7 +6554,9 @@ export function Settings({
                         key={item.tab}
                         className={`settings-nav-item ${activeTab === item.tab || (item.tab === "morechannels" && (activeTab === "teams" || activeTab === "x")) ? "active" : ""}`}
                         data-tab={item.tab}
-                        onClick={() => setActiveTab(item.tab)}
+                        onClick={() =>
+                          handleSidebarItemSelect(item, matchedTarget)
+                        }
                       >
                         {item.icon}
                         {getSidebarItemLabel(item)}
@@ -6288,13 +6567,7 @@ export function Settings({
                   { seenGroups: new Set<string>(), elements: [] },
                 ).elements
             }
-            {sidebarSearch &&
-              sidebarItems.filter((item) => {
-                if (item.macOnly && !isMacPlatform) return false;
-                return getSidebarItemLabel(item)
-                  .toLowerCase()
-                  .includes(sidebarSearch.toLowerCase());
-              }).length === 0 && (
+            {sidebarSearch && filteredSidebarItems.length === 0 && (
                 <div className="settings-nav-no-results">
                   No matching settings
                 </div>

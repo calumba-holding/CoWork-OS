@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect, useMemo, useCallback, Fragment } from "react";
-import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server, Workflow, HeartPulse, Lightbulb, Inbox, Users } from "lucide-react";
+import { useState, useRef, useEffect, useMemo, useCallback, Fragment, useDeferredValue } from "react";
+import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Search, Server, Workflow, HeartPulse, Lightbulb, Inbox, Users } from "lucide-react";
 import { resolveTwinIcon } from "../utils/twin-icons";
 import { stripAllEmojis } from "../utils/emoji-replacer";
 import { Task, Workspace, UiDensity, InfraStatus } from "../../shared/types";
@@ -135,6 +135,14 @@ export function compareTasksByPinAndRecency(a: Task, b: Task): number {
   return b.createdAt - a.createdAt;
 }
 
+function areStringSetsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
+}
+
 export function shouldShowRootTaskInSidebar(
   task: Task,
   uiDensity: UiDensity,
@@ -192,11 +200,49 @@ export function countHiddenFailedSessions(tasks: Task[], uiDensity: UiDensity): 
 }
 
 // Tree node structure for hierarchical display
-interface TaskTreeNode {
+export interface TaskTreeNode {
   task: Task;
   children: TaskTreeNode[];
   synthetic?: boolean;
   displayTitle?: string;
+}
+
+export function normalizeSidebarSessionSearch(value: string): string {
+  return stripAllEmojis(value).toLocaleLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function getTaskTreeNodeSearchText(node: TaskTreeNode): string {
+  return normalizeSidebarSessionSearch(
+    [node.displayTitle, node.task.title, node.task.prompt, node.task.id]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .join(" "),
+  );
+}
+
+function filterTaskTreeBySearchInternal(
+  nodes: TaskTreeNode[],
+  normalizedQuery: string,
+): TaskTreeNode[] {
+  return nodes.flatMap((node) => {
+    const matchesSelf = getTaskTreeNodeSearchText(node).includes(normalizedQuery);
+    if (matchesSelf) {
+      return [node];
+    }
+
+    const filteredChildren = filterTaskTreeBySearchInternal(node.children, normalizedQuery);
+
+    if (filteredChildren.length === 0) {
+      return [];
+    }
+
+    return [{ ...node, children: filteredChildren }];
+  });
+}
+
+export function filterTaskTreeBySearch(nodes: TaskTreeNode[], query: string): TaskTreeNode[] {
+  const normalizedQuery = normalizeSidebarSessionSearch(query);
+  if (!normalizedQuery) return nodes;
+  return filterTaskTreeBySearchInternal(nodes, normalizedQuery);
 }
 
 export interface SidebarVisibleRow {
@@ -273,6 +319,7 @@ export function Sidebar({
   const [activeModeFilters, setActiveModeFilters] = useState<Set<SessionMode>>(new Set());
   const [showFilterBar] = useState(false);
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  const [sessionSearch, setSessionSearch] = useState("");
   // Automated sessions folder is collapsed by default to keep the sidebar clean
   const [automatedFolderCollapsed, setAutomatedFolderCollapsed] = useState(true);
   const [mailboxDigest, setMailboxDigest] = useState<MailboxDigestSnapshot | null>(null);
@@ -286,6 +333,12 @@ export function Sidebar({
     () => new Set(completionAttentionTaskIds),
     [completionAttentionTaskIds],
   );
+  const deferredSessionSearch = useDeferredValue(sessionSearch);
+  const normalizedSessionSearch = useMemo(
+    () => normalizeSidebarSessionSearch(deferredSessionSearch),
+    [deferredSessionSearch],
+  );
+  const hasSessionSearch = normalizedSessionSearch.length > 0;
 
   useEffect(() => {
     window.electronAPI
@@ -505,23 +558,57 @@ export function Sidebar({
     }
     return modes;
   }, [modeCounts]);
+  const availableModeSet = useMemo(() => new Set(availableModes), [availableModes]);
 
   // Remove stale filters when workspace/task data changes and previously
   // selected modes are no longer available.
   useEffect(() => {
-    const availableModeSet = new Set(availableModes);
+    if (activeModeFilters.size === 0) return;
+
+    let hasStaleFilter = false;
+    for (const mode of activeModeFilters) {
+      if (!availableModeSet.has(mode)) {
+        hasStaleFilter = true;
+        break;
+      }
+    }
+    if (!hasStaleFilter) return;
+
     setActiveModeFilters((prev) => {
-      const next = new Set(Array.from(prev).filter((mode) => availableModeSet.has(mode)));
-      return next.size === prev.size ? prev : next;
+      let changed = false;
+      const next = new Set<SessionMode>();
+      for (const mode of prev) {
+        if (availableModeSet.has(mode)) {
+          next.add(mode);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
     });
-  }, [availableModes]);
+  }, [activeModeFilters, availableModeSet]);
 
   // Apply mode filter to user sessions only; automated sessions are always
   // shown in their own folder regardless of the active mode filter.
-  const filteredTaskTree = useMemo(() => {
+  const modeFilteredTaskTree = useMemo(() => {
     if (activeModeFilters.size === 0) return userTaskTree;
     return userTaskTree.filter((node) => activeModeFilters.has(getSessionMode(node.task)));
   }, [userTaskTree, activeModeFilters]);
+
+  const filteredTaskTree = useMemo(
+    () => filterTaskTreeBySearch(modeFilteredTaskTree, normalizedSessionSearch),
+    [modeFilteredTaskTree, normalizedSessionSearch],
+  );
+
+  const filteredAutomatedTaskTree = useMemo(
+    () => filterTaskTreeBySearch(automatedTaskTree, normalizedSessionSearch),
+    [automatedTaskTree, normalizedSessionSearch],
+  );
+
+  const effectiveCollapsedTasks = useMemo(
+    () => (hasSessionSearch ? new Set<string>() : collapsedTasks),
+    [collapsedTasks, hasSessionSearch],
+  );
 
   const toggleModeFilter = useCallback((mode: SessionMode) => {
     setActiveModeFilters((prev) => {
@@ -569,8 +656,8 @@ export function Sidebar({
   }, [getDateGroup, filteredTaskTree, uiDensity]);
 
   const virtualizedTaskRows = useMemo(
-    () => flattenVisibleTaskRows(filteredTaskTree, collapsedTasks),
-    [filteredTaskTree, collapsedTasks],
+    () => flattenVisibleTaskRows(filteredTaskTree, effectiveCollapsedTasks),
+    [effectiveCollapsedTasks, filteredTaskTree],
   );
 
   const useVirtualizedTaskRows =
@@ -609,14 +696,16 @@ export function Sidebar({
       if (!hasInitializedCollapse.current) {
         expandAncestorsForPinned(parentsWithChildren);
         if (parentsWithChildren.size > 0) {
-          setCollapsedTasks(parentsWithChildren);
+          setCollapsedTasks((prev) =>
+            areStringSetsEqual(prev, parentsWithChildren) ? prev : parentsWithChildren,
+          );
         }
         hasInitializedCollapse.current = true;
       } else {
         setCollapsedTasks((prev) => {
           const next = new Set(prev);
           expandAncestorsForPinned(next);
-          return next;
+          return areStringSetsEqual(prev, next) ? prev : next;
         });
       }
     }
@@ -1012,7 +1101,7 @@ export function Sidebar({
   ): React.ReactNode => {
     const { task, children } = node;
     const hasChildren = children.length > 0;
-    const isCollapsed = collapsedTasks.has(task.id);
+    const isCollapsed = !hasSessionSearch && collapsedTasks.has(task.id);
     const isSubAgent = !!task.parentTaskId;
 
     // Tree connector prefix based on depth
@@ -1139,7 +1228,7 @@ export function Sidebar({
                 {isAwaitingSessionStatus(task.status) && (
                   <span className="cli-task-awaiting-badge">Awaiting response</span>
                 )}
-                {hasChildren && (
+                {hasChildren && !hasSessionSearch && (
                   <button
                     className="cli-collapse-btn cli-collapse-btn-inline"
                     onClick={(e) => toggleCollapse(e, task.id)}
@@ -1268,7 +1357,7 @@ export function Sidebar({
     isLast: boolean = true,
   ): React.ReactNode => {
     const { task, children } = node;
-    const isCollapsed = collapsedTasks.has(task.id);
+    const isCollapsed = !hasSessionSearch && collapsedTasks.has(task.id);
     const hasChildren = children.length > 0;
 
     return (
@@ -1548,6 +1637,19 @@ export function Sidebar({
                   </div>
                 )}
 
+                {!sessionsCollapsed && (
+                  <label className="sidebar-sessions-search">
+                    <Search size={14} />
+                    <input
+                      type="search"
+                      aria-label="Search sessions"
+                      placeholder="Search session titles, prompts, or ids"
+                      value={sessionSearch}
+                      onChange={(event) => setSessionSearch(event.target.value)}
+                    />
+                  </label>
+                )}
+
                 {showFilterBar && (
                   <div className="session-filters-bar cli-session-filters">
                     <div className="session-filters-scroll">
@@ -1592,42 +1694,58 @@ export function Sidebar({
             {!sessionsCollapsed && (
               <>
             {/* Automated sessions folder — collapsed by default, shown at top */}
-            {automatedTaskTree.length > 0 && (
+            {filteredAutomatedTaskTree.length > 0 && (
               <div className="automated-sessions-folder">
                 <button
                   type="button"
                   className="automated-folder-header"
                   onClick={() => setAutomatedFolderCollapsed((v) => !v)}
-                  aria-expanded={!automatedFolderCollapsed}
-                  title={automatedFolderCollapsed ? "Show automated sessions" : "Hide automated sessions"}
+                  aria-expanded={hasSessionSearch || !automatedFolderCollapsed}
+                  title={
+                    hasSessionSearch
+                      ? "Automated session matches"
+                      : automatedFolderCollapsed
+                        ? "Show automated sessions"
+                        : "Hide automated sessions"
+                  }
                 >
                   <span className="automated-folder-label">
                     <span className="terminal-only">AUTOMATED</span>
                     <span className="modern-only">Automated</span>
                     <span className="automated-folder-chevron" aria-hidden="true">
-                      {automatedFolderCollapsed ? "▸" : "▾"}
+                      {hasSessionSearch || !automatedFolderCollapsed ? "▾" : "▸"}
                     </span>
                   </span>
-                  <span className="automated-folder-count">{automatedTaskTree.length}</span>
-                  {automatedTaskTree.some((n) => isActiveSessionStatus(n.task.status)) && (
+                  <span className="automated-folder-count">{filteredAutomatedTaskTree.length}</span>
+                  {filteredAutomatedTaskTree.some((n) => isActiveSessionStatus(n.task.status)) && (
                     <span
                       className="cli-session-indicator cli-session-indicator-active automated-folder-active"
                       aria-label="Has active session"
                     />
                   )}
                 </button>
-                {!automatedFolderCollapsed && (
+                {(hasSessionSearch || !automatedFolderCollapsed) && (
                   <div className="automated-folder-body">
-                    {automatedTaskTree.map((node, index) =>
-                      renderTaskNode(node, index, 0, index === automatedTaskTree.length - 1),
+                    {filteredAutomatedTaskTree.map((node, index) =>
+                      renderTaskNode(node, index, 0, index === filteredAutomatedTaskTree.length - 1),
                     )}
                   </div>
                 )}
               </div>
             )}
 
-            {filteredTaskTree.length === 0 && automatedTaskTree.length === 0 ? (
-              activeModeFilters.size > 0 ? null : (
+            {filteredTaskTree.length === 0 && filteredAutomatedTaskTree.length === 0 ? (
+              hasSessionSearch ? (
+                <div
+                  className={`sidebar-empty cli-empty ${uiDensity === "focused" ? "sidebar-empty-focused" : ""}`}
+                >
+                  <div className="sidebar-empty-message sidebar-search-empty-message">
+                    <Search size={32} style={{ opacity: 0.3 }} />
+                    <p>No matching sessions</p>
+                    <span>Try a different title, prompt, or session id</span>
+                  </div>
+                </div>
+              ) : activeModeFilters.size > 0 ? null : (
                 <div
                   className={`sidebar-empty cli-empty ${uiDensity === "focused" ? "sidebar-empty-focused" : ""}`}
                 >

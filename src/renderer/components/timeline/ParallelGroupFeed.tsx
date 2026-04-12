@@ -53,6 +53,11 @@ function laneTone(status: TimelineEventStatus): "neutral" | "active" | "success"
 
 function buildParallelGroupTitle(group: ParallelGroupProjection, isActive: boolean): string {
   const count = group.lanes.length;
+  const singleLaneTitle =
+    count === 1 && typeof group.lanes[0]?.title === "string" ? group.lanes[0].title.trim() : "";
+  if (singleLaneTitle) {
+    return singleLaneTitle;
+  }
   const label = typeof group.label === "string" ? group.label.trim() : "";
   if (
     label &&
@@ -96,23 +101,48 @@ export function ParallelGroupFeed({
   showConnectorBelow = false,
   defaultExpanded = false,
 }: ParallelGroupFeedProps) {
+  const singleLane = group.lanes.length === 1 ? group.lanes[0] : null;
   const isActive =
     group.status === "in_progress" || group.lanes.some((lane) => lane.status === "in_progress");
-  const [expanded, setExpanded] = useState(isActive || defaultExpanded);
+  const hasExpandableDetails = group.lanes.length > 1;
+  const [expanded, setExpanded] = useState(hasExpandableDetails && (isActive || defaultExpanded));
 
   useEffect(() => {
+    if (!hasExpandableDetails) {
+      setExpanded(false);
+      return;
+    }
     if (isActive || defaultExpanded) {
       setExpanded(true);
     }
-  }, [defaultExpanded, isActive]);
+  }, [defaultExpanded, hasExpandableDetails, isActive]);
 
   const indicator = useMemo(() => buildIndicatorForStatus(group.status), [group.status]);
   const groupTitle = useMemo(() => buildParallelGroupTitle(group, isActive), [group, isActive]);
 
+  if (singleLane) {
+    return (
+      <div className="timeline-event parallel-group-feed-single">
+        <div className="parallel-group-feed-lane parallel-group-feed-single-lane">
+          <span
+            className={`parallel-group-feed-lane-dot tone-${laneTone(singleLane.status)}`}
+            aria-hidden="true"
+          />
+          <div className="parallel-group-feed-lane-title" title={groupTitle}>
+            {groupTitle}
+          </div>
+          <div className="parallel-group-feed-lane-time">
+            {formatTime(singleLane.startedAt || group.startedAt) || timeLabel}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const title = (
     <span>
       {groupTitle}
-      {!(groupTitle.match(/\b\d+\b/) && group.lanes.length > 0) && (
+      {hasExpandableDetails && !(groupTitle.match(/\b\d+\b/) && group.lanes.length > 0) && (
         <span className="event-title-meta"> ({group.lanes.length})</span>
       )}
     </span>
@@ -121,15 +151,16 @@ export function ParallelGroupFeed({
   return (
     <StepFeed
       title={title}
+      titleTooltip={groupTitle}
       timeLabel={timeLabel}
       indicator={indicator}
       showConnectorAbove={showConnectorAbove}
       showConnectorBelow={showConnectorBelow}
-      expandable={group.lanes.length > 0}
+      expandable={hasExpandableDetails}
       expanded={expanded}
-      onToggle={group.lanes.length > 0 ? () => setExpanded((prev) => !prev) : undefined}
+      onToggle={hasExpandableDetails ? () => setExpanded((prev) => !prev) : undefined}
       details={
-        expanded ? (
+        hasExpandableDetails && expanded ? (
           <div className="parallel-group-feed-details">
             {group.lanes.map((lane) => (
               <div key={lane.laneKey} className="parallel-group-feed-lane">
@@ -137,7 +168,9 @@ export function ParallelGroupFeed({
                   className={`parallel-group-feed-lane-dot tone-${laneTone(lane.status)}`}
                   aria-hidden="true"
                 />
-                <div className="parallel-group-feed-lane-title">{lane.title}</div>
+                <div className="parallel-group-feed-lane-title" title={lane.title}>
+                  {lane.title}
+                </div>
                 <div className="parallel-group-feed-lane-time">{formatTime(lane.startedAt)}</div>
               </div>
             ))}

@@ -1,25 +1,78 @@
 import { useState, useEffect, useRef } from "react";
 import { CustomSkill, SkillParameter } from "../../shared/types";
 
+export type SkillParameterFormValue = string | number | boolean;
+export type SkillParameterFormValues = Record<string, SkillParameterFormValue>;
+
 interface SkillParameterModalProps {
   skill: CustomSkill;
-  onSubmit: (expandedPrompt: string) => void;
+  onSubmit: (values: SkillParameterFormValues) => void;
+  onAskInChat?: (values: SkillParameterFormValues) => void;
   onCancel: () => void;
 }
 
-export function SkillParameterModal({ skill, onSubmit, onCancel }: SkillParameterModalProps) {
-  const [values, setValues] = useState<Record<string, string | number | boolean>>({});
-  const firstInputRef = useRef<HTMLInputElement | HTMLSelectElement>(null);
-  const ARTIFACT_DIR_FALLBACK = "artifacts";
+const ARTIFACT_DIR_FALLBACK = "artifacts";
 
-  const normalizeTemplateDefault = (value: unknown): unknown => {
-    if (typeof value !== "string") return value;
-    return value.replace(/\{artifactDir\}/g, ARTIFACT_DIR_FALLBACK);
-  };
+function normalizeTemplateDefault(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  return value.replace(/\{artifactDir\}/g, ARTIFACT_DIR_FALLBACK);
+}
+
+export function collectSkillParameterValues(
+  skill: CustomSkill,
+  values: SkillParameterFormValues,
+  touched: Record<string, boolean> = {},
+): SkillParameterFormValues {
+  const collected: SkillParameterFormValues = {};
+  for (const param of skill.parameters || []) {
+    const value = values[param.name];
+    const hasDefault = param.default !== undefined;
+    const wasTouched = touched[param.name] === true;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        collected[param.name] = trimmed;
+      } else if (hasDefault) {
+        collected[param.name] = normalizeTemplateDefault(param.default) as SkillParameterFormValue;
+      }
+      continue;
+    }
+    if (value !== undefined && (wasTouched || hasDefault)) {
+      collected[param.name] = hasDefault
+        ? (normalizeTemplateDefault(value) as SkillParameterFormValue)
+        : value;
+    }
+  }
+  return collected;
+}
+
+export function expandSkillPrompt(skill: CustomSkill, values: SkillParameterFormValues): string {
+  let prompt = skill.prompt;
+  skill.parameters?.forEach((param) => {
+    const value = values[param.name] ?? normalizeTemplateDefault(param.default) ?? "";
+    const placeholder = new RegExp(`\\{\\{${param.name}\\}\\}`, "g");
+    const normalizedValue =
+      typeof value === "string" ? value.replace(/\{artifactDir\}/g, ARTIFACT_DIR_FALLBACK) : value;
+    prompt = prompt.replace(placeholder, String(normalizedValue));
+  });
+  prompt = prompt.replace(/\{\{[^}]+\}\}/g, "");
+  prompt = prompt.replace(/\{artifactDir\}/g, ARTIFACT_DIR_FALLBACK);
+  return prompt.trim();
+}
+
+export function SkillParameterModal({
+  skill,
+  onSubmit,
+  onAskInChat,
+  onCancel,
+}: SkillParameterModalProps) {
+  const [values, setValues] = useState<SkillParameterFormValues>({});
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const firstInputRef = useRef<HTMLInputElement | HTMLSelectElement>(null);
 
   // Initialize with default values
   useEffect(() => {
-    const initialValues: Record<string, string | number | boolean> = {};
+    const initialValues: SkillParameterFormValues = {};
     skill.parameters?.forEach((param) => {
       if (param.default !== undefined) {
         initialValues[param.name] = normalizeTemplateDefault(param.default) as
@@ -35,6 +88,7 @@ export function SkillParameterModal({ skill, onSubmit, onCancel }: SkillParamete
       }
     });
     setValues(initialValues);
+    setTouched({});
   }, [skill]);
 
   // Focus first input on mount
@@ -56,38 +110,30 @@ export function SkillParameterModal({ skill, onSubmit, onCancel }: SkillParamete
   }, [onCancel]);
 
   const handleChange = (name: string, value: string | number | boolean) => {
+    setTouched((prev) => ({ ...prev, [name]: true }));
     setValues((prev) => ({ ...prev, [name]: value }));
-  };
-
-  const expandPrompt = (): string => {
-    let prompt = skill.prompt;
-    skill.parameters?.forEach((param) => {
-      const value = values[param.name] ?? param.default ?? "";
-      const placeholder = new RegExp(`\\{\\{${param.name}\\}\\}`, "g");
-      const normalizedValue =
-        typeof value === "string" ? value.replace(/\{artifactDir\}/g, ARTIFACT_DIR_FALLBACK) : value;
-      prompt = prompt.replace(placeholder, String(normalizedValue));
-    });
-    // Remove any remaining unreplaced placeholders
-    prompt = prompt.replace(/\{\{[^}]+\}\}/g, "");
-    // Ensure direct modal runs don't leak literal template tokens.
-    prompt = prompt.replace(/\{artifactDir\}/g, ARTIFACT_DIR_FALLBACK);
-    return prompt.trim();
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const expandedPrompt = expandPrompt();
-    onSubmit(expandedPrompt);
+    onSubmit(collectSkillParameterValues(skill, values, touched));
+  };
+
+  const handleAskInChat = () => {
+    if (!onAskInChat) return;
+    onAskInChat(collectSkillParameterValues(skill, values, touched));
   };
 
   const isValid = () => {
     return (
       skill.parameters?.every((param) => {
-        if (param.required) {
+        if (param.required && param.default === undefined) {
           const value = values[param.name];
           if (value === undefined) return false;
           if (typeof value === "string" && value.trim() === "") return false;
+          if ((param.type === "number" || param.type === "boolean") && touched[param.name] !== true) {
+            return false;
+          }
         }
         return true;
       }) ?? true
@@ -192,6 +238,15 @@ export function SkillParameterModal({ skill, onSubmit, onCancel }: SkillParamete
             <button type="button" className="button-secondary" onClick={onCancel}>
               Cancel
             </button>
+            {onAskInChat && (
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={handleAskInChat}
+              >
+                Ask In Chat
+              </button>
+            )}
             <button type="submit" className="button-primary" disabled={!isValid()}>
               Run Skill
             </button>

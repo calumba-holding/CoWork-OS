@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Claude-style turn budgets**: main interactive tasks no longer receive implicit strategy-derived `maxTurns` windows. `maxTurns` and `windowTurnCap` are now explicit-only caps, while uncapped tasks rely on lifetime limits, emergency fuses, and existing recovery safeguards.
+- **Runtime telemetry and docs**: turn-budget events and documentation now distinguish explicit capped runs from default-unbounded main-task execution.
+
 ## [0.5.34] - 2026-04-08
 
 ### Added

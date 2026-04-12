@@ -7,12 +7,15 @@ import type { Task } from "../../shared/types";
 import {
   compareTasksByPinAndRecency,
   countHiddenFailedSessions,
+  filterTaskTreeBySearch,
   flattenVisibleTaskRows,
   isActiveSessionStatus,
   isAutomatedSession,
   isAwaitingSessionStatus,
+  normalizeSidebarSessionSearch,
   shouldShowTaskInSidebarSessions,
   shouldShowRootTaskInSidebar,
+  type TaskTreeNode,
 } from "../components/Sidebar";
 
 const createTask = (overrides: Partial<Task>): Task => {
@@ -178,6 +181,74 @@ describe("flattenVisibleTaskRows", () => {
     const rows = flattenVisibleTaskRows(tree, new Set(["root-1"]));
 
     expect(rows.map((row) => row.node.task.id)).toEqual(["root-1"]);
+  });
+});
+
+describe("normalizeSidebarSessionSearch", () => {
+  it("normalizes case and repeated whitespace", () => {
+    expect(normalizeSidebarSessionSearch("  Draft   Launch Plan  ")).toBe("draft launch plan");
+  });
+});
+
+describe("filterTaskTreeBySearch", () => {
+  it("matches a root session by title, prompt, or id", () => {
+    const tree: TaskTreeNode[] = [
+      {
+        task: createTask({
+          id: "launch-root",
+          title: "Launch prep",
+          prompt: "Prepare the release notes and checklist",
+        }),
+        children: [],
+      },
+      {
+        task: createTask({
+          id: "billing-root",
+          title: "Billing cleanup",
+          prompt: "Fix Stripe invoice retry behavior",
+        }),
+        children: [],
+      },
+    ];
+
+    expect(filterTaskTreeBySearch(tree, "release notes").map((node) => node.task.id)).toEqual([
+      "launch-root",
+    ]);
+    expect(filterTaskTreeBySearch(tree, "billing-root").map((node) => node.task.id)).toEqual([
+      "billing-root",
+    ]);
+  });
+
+  it("keeps the ancestor path when only a descendant matches", () => {
+    const tree: TaskTreeNode[] = [
+      {
+        task: createTask({ id: "root", title: "Parent session" }),
+        children: [
+          {
+            task: createTask({
+              id: "child-match",
+              title: "Investigate deploy failure",
+              parentTaskId: "root",
+            }),
+            children: [],
+          },
+          {
+            task: createTask({
+              id: "child-drop",
+              title: "Rename temp files",
+              parentTaskId: "root",
+            }),
+            children: [],
+          },
+        ],
+      },
+    ];
+
+    const result = filterTaskTreeBySearch(tree, "deploy failure");
+
+    expect(result).toHaveLength(1);
+    expect(result[0].task.id).toBe("root");
+    expect(result[0].children.map((node) => node.task.id)).toEqual(["child-match"]);
   });
 });
 

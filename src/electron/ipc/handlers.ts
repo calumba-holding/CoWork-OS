@@ -182,7 +182,7 @@ import {
   ProviderBaseUrlSchema,
 } from "../utils/validation";
 import { GuardrailManager } from "../guardrails/guardrail-manager";
-import { AppearanceManager } from "../settings/appearance-manager";
+import { AppearanceManager, getDevLogCaptureEnabled } from "../settings/appearance-manager";
 import { MemoryFeaturesManager } from "../settings/memory-features-manager";
 import { PersonalityManager } from "../settings/personality-manager";
 import { NotionSettingsManager } from "../settings/notion-manager";
@@ -783,6 +783,14 @@ rateLimiter.configure(
 rateLimiter.configure(
   IPC_CHANNELS.SUGGESTIONS_LIST_FOR_WORKSPACES,
   RATE_LIMIT_CONFIGS.frequent,
+);
+rateLimiter.configure(
+  IPC_CHANNELS.SUGGESTIONS_REFRESH,
+  RATE_LIMIT_CONFIGS.standard,
+);
+rateLimiter.configure(
+  IPC_CHANNELS.SUGGESTIONS_REFRESH_FOR_WORKSPACES,
+  RATE_LIMIT_CONFIGS.standard,
 );
 rateLimiter.configure(
   IPC_CHANNELS.LLM_SAVE_SETTINGS,
@@ -5883,6 +5891,7 @@ export async function setupIpcHandlers(
   ipcMain.handle(IPC_CHANNELS.APPEARANCE_GET_RUNTIME_INFO, async () => {
     return {
       prefersReducedTransparency: nativeTheme.prefersReducedTransparency,
+      devLogCaptureEnabled: getDevLogCaptureEnabled(),
     };
   });
 
@@ -7280,6 +7289,46 @@ export async function setupIpcHandlers(
         workspaceId,
         suggestions: allSuggestions.filter((suggestion) => suggestion.workspaceId === workspaceId),
       }));
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.SUGGESTIONS_REFRESH,
+    async (_, workspaceId: string) => {
+      checkRateLimit(IPC_CHANNELS.SUGGESTIONS_REFRESH);
+      const validatedWorkspaceId = validateInput(
+        WorkspaceIdSchema,
+        workspaceId,
+        "workspace ID",
+      );
+      const { ProactiveSuggestionsService } =
+        await import("../agent/ProactiveSuggestionsService");
+      await ProactiveSuggestionsService.generateAll(validatedWorkspaceId);
+      return { success: true };
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.SUGGESTIONS_REFRESH_FOR_WORKSPACES,
+    async (_, workspaceIds: unknown) => {
+      checkRateLimit(IPC_CHANNELS.SUGGESTIONS_REFRESH_FOR_WORKSPACES);
+      const normalizedWorkspaceIds = validateInput(
+        z.array(WorkspaceIdSchema),
+        workspaceIds,
+        "workspace IDs",
+      );
+      const uniqueWorkspaceIds = [...new Set(normalizedWorkspaceIds)];
+      if (uniqueWorkspaceIds.length === 0) {
+        return { success: true };
+      }
+      const { ProactiveSuggestionsService } =
+        await import("../agent/ProactiveSuggestionsService");
+      await Promise.all(
+        uniqueWorkspaceIds.map((workspaceId) =>
+          ProactiveSuggestionsService.generateAll(workspaceId),
+        ),
+      );
+      return { success: true };
     },
   );
 

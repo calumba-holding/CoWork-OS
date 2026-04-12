@@ -11,7 +11,7 @@ export interface DerivedTaskStrategy {
   conversationMode: ConversationMode;
   executionMode: ExecutionMode;
   taskDomain: TaskDomain;
-  maxTurns: number;
+  maxTurns?: number;
   qualityPasses: 1 | 2 | 3;
   answerFirst: boolean;
   boundedResearch: boolean;
@@ -135,7 +135,6 @@ export class TaskStrategyService {
     > = {
       chat: {
         conversationMode: "chat",
-        maxTurns: 16,
         qualityPasses: 1,
         answerFirst: false,
         boundedResearch: true,
@@ -144,7 +143,6 @@ export class TaskStrategyService {
       },
       advice: {
         conversationMode: "hybrid",
-        maxTurns: 30,
         qualityPasses: 2,
         answerFirst: true,
         boundedResearch: true,
@@ -153,7 +151,6 @@ export class TaskStrategyService {
       },
       planning: {
         conversationMode: "hybrid",
-        maxTurns: 36,
         qualityPasses: 2,
         answerFirst: true,
         boundedResearch: true,
@@ -162,7 +159,6 @@ export class TaskStrategyService {
       },
       execution: {
         conversationMode: "task",
-        maxTurns: 100,
         qualityPasses: 2,
         answerFirst: false,
         boundedResearch: true,
@@ -171,7 +167,6 @@ export class TaskStrategyService {
       },
       mixed: {
         conversationMode: "hybrid",
-        maxTurns: 42,
         qualityPasses: 2,
         answerFirst: true,
         boundedResearch: true,
@@ -180,7 +175,6 @@ export class TaskStrategyService {
       },
       thinking: {
         conversationMode: "think",
-        maxTurns: 20,
         qualityPasses: 1,
         answerFirst: true,
         boundedResearch: true,
@@ -189,7 +183,6 @@ export class TaskStrategyService {
       },
       workflow: {
         conversationMode: "task",
-        maxTurns: 80,
         qualityPasses: 2,
         answerFirst: false,
         boundedResearch: false,
@@ -198,7 +191,6 @@ export class TaskStrategyService {
       },
       deep_work: {
         conversationMode: "task",
-        maxTurns: 250,
         qualityPasses: 2,
         answerFirst: false,
         boundedResearch: false,
@@ -207,7 +199,6 @@ export class TaskStrategyService {
       },
       redirect: {
         conversationMode: "task",
-        maxTurns: 64,
         qualityPasses: 1,
         answerFirst: false,
         boundedResearch: false,
@@ -227,15 +218,6 @@ export class TaskStrategyService {
 
     const base = defaults[route.intent];
     const taskText = `${taskContext?.title || ""}\n${taskContext?.prompt || ""}`.toLowerCase();
-    const executionVerbCount = (
-      taskText.match(
-        /\b(create|build|edit|write|fix|deploy|run|install|execute|configure|implement|update|modify|delete|remove|test|verify|research|analyze|summarize|generate|draft|prepare|export)\b/g,
-      ) || []
-    ).length;
-    const workflowLike =
-      /\b(then|after that|after this|next|and then|finally|once done|once that's done|step \d)\b/.test(
-        taskText,
-      ) && executionVerbCount >= 3;
     const artifactCreationSignal =
       /\b(create|build|make|implement|scaffold|generate|start building|start build)\b/.test(taskText) &&
       /\b(website|web page|webapp|frontend|landing page|app|application|project|repo|repository|codebase|distro|distribution|iso|image|artifact|file|files|workspace|requirements\.md|config)\b/.test(
@@ -316,30 +298,6 @@ export class TaskStrategyService {
         previousWindowLowProgress)
         ? "strong"
         : baseLlmProfileHint;
-    const mixedExecutionSignal =
-      route.intent === "mixed" &&
-      (route.signals.includes("path-or-command") ||
-        route.signals.includes("needs-tool-inspection") ||
-        route.signals.includes("shell-troubleshooting") ||
-        route.signals.includes("terminal-transcript") ||
-        executionVerbCount >= 3);
-    const mixedMaxTurns =
-      route.intent !== "mixed"
-        ? base.maxTurns
-        : workflowLike && route.complexity === "high"
-          ? 80
-          : mixedExecutionSignal
-            ? 60
-            : base.maxTurns;
-    const strategyMaxTurns = buildVerifyRenderArtifactRequested || buildRenderArtifactRequested
-      ? Math.max(mixedMaxTurns, 80)
-      : mixedMaxTurns;
-    const configuredMaxTurns =
-      typeof existing?.maxTurns === "number" ? existing.maxTurns : strategyMaxTurns;
-    const maxTurns = buildVerifyRenderArtifactRequested || buildRenderArtifactRequested
-      ? Math.max(configuredMaxTurns, 80)
-      : configuredMaxTurns;
-
     return {
       // Preserve explicit user-set modes (chat/task/think) but let intent-derived
       // strategy override the default "hybrid" so the daemon's IntentRouter decision
@@ -350,7 +308,6 @@ export class TaskStrategyService {
           : base.conversationMode,
       executionMode,
       taskDomain,
-      maxTurns,
       qualityPasses: existing?.qualityPasses ?? base.qualityPasses,
       answerFirst: base.answerFirst,
       boundedResearch: base.boundedResearch,
@@ -392,10 +349,10 @@ export class TaskStrategyService {
     if (!next.taskDomain || next.taskDomain === "auto") {
       next.taskDomain = strategy.taskDomain;
     }
-    if (typeof next.maxTurns !== "number") {
+    if (typeof strategy.maxTurns === "number" && typeof next.maxTurns !== "number") {
       next.maxTurns = strategy.maxTurns;
     }
-    if (!next.turnBudgetPolicy) {
+    if (!next.turnBudgetPolicy && typeof next.maxTurns === "number") {
       next.turnBudgetPolicy =
         strategy.executionMode === "execute" ||
         strategy.executionMode === "verified" ||

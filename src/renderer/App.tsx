@@ -1,5 +1,15 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { useReplayMode } from "./hooks/useReplayMode";
+import {
+  memo,
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useMemo,
+  useCallback,
+  useDeferredValue,
+  startTransition,
+} from "react";
+import { useReplayMode, type ReplayControls } from "./hooks/useReplayMode";
 import { Sidebar } from "./components/Sidebar";
 import { MainContent } from "./components/MainContent";
 import { RightPanel } from "./components/RightPanel";
@@ -71,6 +81,24 @@ import { isSpawnSubagentsPrompt } from "../shared/spawn-intent-detection";
 import { isSynthesisChildTask } from "../shared/synthesis-agent-detection";
 import { isAutomatedTaskLike } from "../shared/automated-task-detection";
 import { resolveTaskStatusUpdateFromEvent } from "../shared/task-status";
+import {
+  noteRendererTaskEventQueued,
+  noteRendererTaskEventReceived,
+  noteRendererTaskEventsAppendDispatched,
+  noteRendererTaskEventsAppended,
+  measureRendererPerf,
+  recordRendererRender,
+} from "./utils/renderer-perf";
+import {
+  deriveSharedTaskEventUiState,
+  type SharedTaskEventUiState,
+} from "./utils/task-event-derived";
+import {
+  hydrateSelectedTaskEvents,
+  mergeTaskEventsByIdentity,
+  shouldIncludeTaskEventInSelectedSession,
+  shouldRefreshCanonicalEventsForTerminalUpdate,
+} from "./utils/task-event-stream";
 
 // Helper to get effective theme based on system preference
 function getEffectiveTheme(themeMode: ThemeMode): "light" | "dark" {
@@ -78,6 +106,59 @@ function getEffectiveTheme(themeMode: ThemeMode): "light" | "dark" {
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
   return themeMode;
+}
+
+function mergeTaskPreservingIdentity(current: Task, updates: Partial<Task>): Task {
+  let changed = false;
+  const next = { ...current } as Task;
+
+  for (const key of Object.keys(updates) as Array<keyof Task>) {
+    const value = updates[key];
+    if (Object.is(current[key], value)) continue;
+    changed = true;
+    (next as Record<keyof Task, Task[keyof Task]>)[key] = value as Task[keyof Task];
+  }
+
+  return changed ? next : current;
+}
+
+function upsertTaskPreservingIdentity(
+  tasks: Task[],
+  incoming: Task,
+  options?: { prependIfMissing?: boolean },
+): Task[] {
+  const prependIfMissing = options?.prependIfMissing ?? false;
+  let found = false;
+  let changed = false;
+
+  const next = tasks.map((task) => {
+    if (task.id !== incoming.id) return task;
+    found = true;
+    const merged = mergeTaskPreservingIdentity(task, incoming);
+    if (merged !== task) changed = true;
+    return merged;
+  });
+
+  if (found) {
+    return changed ? next : tasks;
+  }
+
+  return prependIfMissing ? [incoming, ...tasks] : [...tasks, incoming];
+}
+
+function updateTaskPreservingIdentity(
+  tasks: Task[],
+  taskId: string,
+  updater: (task: Task) => Task,
+): Task[] {
+  let changed = false;
+  const next = tasks.map((task) => {
+    if (task.id !== taskId) return task;
+    const updated = updater(task);
+    if (updated !== task) changed = true;
+    return updated;
+  });
+  return changed ? next : tasks;
 }
 
 type AppView =
@@ -96,6 +177,189 @@ type RemoteTaskView = {
   task: Task;
   events: TaskEvent[];
 };
+
+type SelectedTaskWorkspaceViewProps = {
+  task: Task | undefined;
+  selectedTaskId: string | null;
+  workspace: Workspace | null;
+  replayControls: ReplayControls;
+  sharedTaskEventUi: SharedTaskEventUiState | null;
+  remoteTaskView: RemoteTaskView | null;
+  childTasks: Task[];
+  childEvents: TaskEvent[];
+  activeInputRequest: InputRequest | null;
+  selectedModel: string;
+  availableModels: LLMModelInfo[];
+  availableProviders: LLMProviderInfo[];
+  uiDensity: UiDensity;
+  rendererPerfLoggingEnabled: boolean;
+  effectiveRightCollapsed: boolean;
+  rightPanelInput: {
+    task: Task | undefined;
+    workspace: Workspace | null;
+    events: TaskEvent[];
+    sharedTaskEventUi: SharedTaskEventUiState | null;
+    hasActiveChildren: boolean;
+    runningTasks: Task[];
+    queuedTasks: Task[];
+    queueStatus: QueueStatus | null;
+    highlightOutputPath: string | null;
+  };
+  onSelectChildTask: (taskId: string) => void;
+  onSelectTask: (taskId: string | null) => void;
+  onSendMessage: (
+    message: string,
+    images?: ImageAttachment[],
+    quotedAssistantMessage?: QuotedAssistantMessage,
+  ) => Promise<void>;
+  onStartOnboarding: () => void;
+  onCreateTask: (
+    title: string,
+    prompt: string,
+    options?: Any,
+    images?: ImageAttachment[],
+    workspace?: Workspace,
+  ) => Promise<void>;
+  onChangeWorkspace: () => void;
+  onSelectWorkspace: (workspace: Workspace) => void;
+  onOpenSettings: (tab?: string) => void;
+  onStopTask: () => Promise<void>;
+  onWrapUpTask: () => Promise<void>;
+  onSubmitInputRequest: (
+    requestId: string,
+    answers: Record<string, { optionLabel?: string; otherText?: string }>,
+  ) => void;
+  onDismissInputRequest: (requestId: string) => void;
+  onOpenBrowserView?: (url?: string) => void;
+  onViewTaskOutputs: (taskId: string, primaryOutputPath?: string) => void;
+  onCancelTaskById: (taskId: string) => Promise<void>;
+  onHighlightConsumed: () => void;
+  onModelChange: (modelKey: string) => void;
+};
+
+function getAppTaskSignature(task: Task | undefined): string {
+  if (!task) return "none";
+  return [task.id, task.status, task.terminalStatus ?? "", task.updatedAt, task.completedAt ?? ""].join(":");
+}
+
+function getInputRequestSignature(inputRequest: InputRequest | null): string {
+  if (!inputRequest) return "none";
+  return [inputRequest.id, inputRequest.taskId, inputRequest.status, inputRequest.requestedAt].join(":");
+}
+
+const SelectedTaskWorkspaceView = memo(function SelectedTaskWorkspaceView({
+  task,
+  selectedTaskId,
+  workspace,
+  replayControls,
+  sharedTaskEventUi,
+  remoteTaskView,
+  childTasks,
+  childEvents,
+  activeInputRequest,
+  selectedModel,
+  availableModels,
+  availableProviders,
+  uiDensity,
+  rendererPerfLoggingEnabled,
+  effectiveRightCollapsed,
+  rightPanelInput,
+  onSelectChildTask,
+  onSelectTask,
+  onSendMessage,
+  onStartOnboarding,
+  onCreateTask,
+  onChangeWorkspace,
+  onSelectWorkspace,
+  onOpenSettings,
+  onStopTask,
+  onWrapUpTask,
+  onSubmitInputRequest,
+  onDismissInputRequest,
+  onOpenBrowserView,
+  onViewTaskOutputs,
+  onCancelTaskById,
+  onHighlightConsumed,
+  onModelChange,
+}: SelectedTaskWorkspaceViewProps) {
+  return (
+    <>
+      <MainContent
+        task={task}
+        selectedTaskId={selectedTaskId}
+        workspace={workspace}
+        events={replayControls.replayEvents}
+        sharedTaskEventUi={replayControls.isReplayMode ? null : sharedTaskEventUi}
+        replayControls={replayControls}
+        childTasks={remoteTaskView ? [] : childTasks}
+        childEvents={remoteTaskView ? [] : childEvents}
+        onSelectChildTask={onSelectChildTask}
+        onSelectTask={onSelectTask}
+        onSendMessage={onSendMessage}
+        onStartOnboarding={onStartOnboarding}
+        onCreateTask={onCreateTask}
+        onChangeWorkspace={onChangeWorkspace}
+        onSelectWorkspace={onSelectWorkspace}
+        onOpenSettings={onOpenSettings as Any}
+        onStopTask={onStopTask}
+        onWrapUpTask={onWrapUpTask}
+        inputRequest={activeInputRequest}
+        onSubmitInputRequest={onSubmitInputRequest}
+        onDismissInputRequest={onDismissInputRequest}
+        onOpenBrowserView={onOpenBrowserView}
+        onViewTaskOutputs={onViewTaskOutputs}
+        selectedModel={selectedModel}
+        availableModels={availableModels}
+        onModelChange={onModelChange}
+        availableProviders={availableProviders}
+        uiDensity={uiDensity}
+        rendererPerfLoggingEnabled={rendererPerfLoggingEnabled}
+        remoteSession={
+          remoteTaskView
+            ? { deviceId: remoteTaskView.deviceId, deviceName: remoteTaskView.deviceName }
+            : null
+        }
+      />
+      {!effectiveRightCollapsed && !remoteTaskView && (
+        <RightPanel
+          task={rightPanelInput.task}
+          workspace={rightPanelInput.workspace}
+          events={rightPanelInput.events}
+          sharedTaskEventUi={rightPanelInput.sharedTaskEventUi}
+          hasActiveChildren={rightPanelInput.hasActiveChildren}
+          runningTasks={rightPanelInput.runningTasks}
+          queuedTasks={rightPanelInput.queuedTasks}
+          queueStatus={rightPanelInput.queueStatus}
+          onSelectTask={onSelectTask}
+          onCancelTask={onCancelTaskById}
+          rendererPerfLoggingEnabled={rendererPerfLoggingEnabled}
+          highlightOutputPath={rightPanelInput.highlightOutputPath}
+          onHighlightConsumed={onHighlightConsumed}
+        />
+      )}
+    </>
+  );
+}, (prev, next) =>
+  getAppTaskSignature(prev.task) === getAppTaskSignature(next.task) &&
+  prev.selectedTaskId === next.selectedTaskId &&
+  prev.workspace?.path === next.workspace?.path &&
+  prev.replayControls === next.replayControls &&
+  prev.sharedTaskEventUi === next.sharedTaskEventUi &&
+  prev.remoteTaskView?.deviceId === next.remoteTaskView?.deviceId &&
+  prev.remoteTaskView?.task.id === next.remoteTaskView?.task.id &&
+  prev.remoteTaskView?.events === next.remoteTaskView?.events &&
+  prev.childTasks === next.childTasks &&
+  prev.childEvents === next.childEvents &&
+  getInputRequestSignature(prev.activeInputRequest) === getInputRequestSignature(next.activeInputRequest) &&
+  prev.selectedModel === next.selectedModel &&
+  prev.availableModels === next.availableModels &&
+  prev.availableProviders === next.availableProviders &&
+  prev.uiDensity === next.uiDensity &&
+  prev.rendererPerfLoggingEnabled === next.rendererPerfLoggingEnabled &&
+  prev.effectiveRightCollapsed === next.effectiveRightCollapsed &&
+  prev.rightPanelInput === next.rightPanelInput
+);
+
 const MAX_RENDERER_TASK_EVENTS = 600;
 const APPROVAL_TOAST_PREFIX = "approval-request-";
 const RENDERER_NOISE_EVENT_TYPES = new Set([
@@ -107,10 +371,13 @@ const RENDERER_NOISE_EVENT_TYPES = new Set([
   "executing",
 ]);
 const RENDERER_DROPPED_EVENT_TYPES = new Set(["log", "task_analysis"]);
-const RENDERER_THROTTLED_EVENT_TYPES = new Set(["progress_update", "executing", "llm_streaming"]);
-const RENDERER_NOISE_THROTTLE_MS = 250;
+const RENDERER_THROTTLED_EVENT_TYPES = new Set(["llm_streaming"]);
+const RENDERER_REPLACEABLE_EVENT_TYPES = new Set(["progress_update", "executing", "llm_streaming"]);
+const RENDERER_NOISE_THROTTLE_MS = 120;
 /** Tool-heavy events batched to avoid UI freeze/re-render storms (OpenClaw-style fix) */
 const EVENT_TYPES_BATCHABLE = new Set(["tool_call", "tool_result"]);
+/** Tool results should flush pending batched events immediately instead of waiting in burst queues */
+const EVENT_TYPES_FLUSH_IMMEDIATELY = new Set(["tool_result"]);
 /** Milestone events flush the batch and append immediately */
 const EVENT_TYPES_MILESTONE = new Set([
   "assistant_message",
@@ -127,9 +394,15 @@ const EVENT_TYPES_MILESTONE = new Set([
   "step_completed",
   "step_failed",
 ]);
-const EVENT_BATCH_FLUSH_INTERVAL_MS = 400;
+const EVENT_BATCH_FLUSH_INTERVAL_MS = 80;
+const EVENT_BATCH_BURST_WINDOW_MS = 160;
 const STALE_TASK_RECONCILE_INTERVAL_MS = 4_000;
 const STALE_TASK_RECONCILE_IDLE_WINDOW_MS = 12_000;
+
+type PendingToolEventEntry = {
+  event: TaskEvent;
+  queuedAtMs: number;
+};
 
 function isRendererNoiseEvent(event: TaskEvent): boolean {
   return RENDERER_NOISE_EVENT_TYPES.has(getEffectiveTaskEventType(event));
@@ -175,16 +448,67 @@ function capTaskEvents(events: TaskEvent[]): TaskEvent[] {
   return indexed.filter(({ index }) => keepIndexes.has(index)).map(({ event }) => event);
 }
 
-function mergeUniqueTaskEvents(existing: TaskEvent[], incoming: TaskEvent[]): TaskEvent[] {
-  if (incoming.length === 0) return existing;
-  const merged = [...existing];
-  const seen = new Set(existing.map((event) => event.id));
-  for (const event of incoming) {
-    if (seen.has(event.id)) continue;
-    seen.add(event.id);
-    merged.push(event);
+function getTransientEventReplacementKey(event: TaskEvent): string | null {
+  if (!RENDERER_REPLACEABLE_EVENT_TYPES.has(event.type)) return null;
+  const payload =
+    event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? (event.payload as Record<string, unknown>)
+      : {};
+  const payloadStep =
+    payload.step && typeof payload.step === "object" && !Array.isArray(payload.step)
+      ? (payload.step as Record<string, unknown>)
+      : null;
+  const stepId =
+    typeof event.stepId === "string"
+      ? event.stepId
+      : typeof payload.stepId === "string"
+        ? payload.stepId
+        : typeof payloadStep?.id === "string"
+          ? payloadStep.id
+          : "";
+  const groupId =
+    typeof event.groupId === "string"
+      ? event.groupId
+      : typeof payload.groupId === "string"
+        ? payload.groupId
+        : "";
+  const stage =
+    typeof payload.stage === "string"
+      ? payload.stage
+      : typeof payload.label === "string"
+        ? payload.label
+        : "";
+  return [event.taskId, event.type, stepId, groupId, stage].join(":");
+}
+
+function appendRendererTaskEvents(
+  previousEvents: TaskEvent[],
+  incomingEvents: TaskEvent[],
+): TaskEvent[] {
+  if (incomingEvents.length === 0) return previousEvents;
+  let nextEvents = previousEvents;
+  for (const incomingEvent of incomingEvents) {
+    const replacementKey = getTransientEventReplacementKey(incomingEvent);
+    if (replacementKey) {
+      let replaced = false;
+      for (let i = nextEvents.length - 1; i >= 0; i -= 1) {
+        if (getTransientEventReplacementKey(nextEvents[i]) === replacementKey) {
+          const updated = [...nextEvents];
+          updated[i] = incomingEvent;
+          nextEvents = updated;
+          replaced = true;
+          break;
+        }
+      }
+      if (replaced) continue;
+    }
+    nextEvents = capTaskEvents([...nextEvents, incomingEvent]);
   }
-  return merged;
+  return nextEvents;
+}
+
+function mergeUniqueTaskEvents(existing: TaskEvent[], incoming: TaskEvent[]): TaskEvent[] {
+  return mergeTaskEventsByIdentity(existing, incoming);
 }
 
 function getApprovalToastId(approvalId: string): string {
@@ -343,6 +667,18 @@ export function App() {
     if (!selectedTaskId) return [];
     return tasks.filter((t) => t.parentTaskId === selectedTaskId && t.agentType === "sub");
   }, [tasks, selectedTaskId]);
+  const selectedTask = useMemo(
+    () => remoteTaskView?.task || (selectedTaskId ? tasks.find((task) => task.id === selectedTaskId) : undefined),
+    [remoteTaskView, tasks, selectedTaskId],
+  );
+  const completedTaskIdsSignature = useMemo(
+    () =>
+      tasks
+        .filter((task) => task.status === "completed")
+        .map((task) => task.id)
+        .join("|"),
+    [tasks],
+  );
 
   const childTaskIdsRef = useRef<Set<string>>(new Set());
   // Buffer for child events that arrive before childTaskIdsRef is populated (race condition fix)
@@ -420,8 +756,10 @@ export function App() {
   const noiseEventThrottleRef = useRef<Map<string, number>>(new Map());
   const taskLastEventTimestampRef = useRef<Map<string, number>>(new Map());
   const staleTaskReconcileInFlightRef = useRef(false);
-  const pendingToolEventsRef = useRef<TaskEvent[]>([]);
+  const pendingToolEventsRef = useRef<PendingToolEventEntry[]>([]);
   const pendingToolEventsFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastBatchableAppendAtRef = useRef(0);
+  const terminalEventRefreshInFlightRef = useRef<Set<string>>(new Set());
   /** Tracks output paths we've already shown completion toast for (suppresses repeat toasts on follow-ups) */
   const completionToastNotifiedPathsRef = useRef<Map<string, Set<string>>>(new Map());
 
@@ -432,44 +770,42 @@ export function App() {
   // Timestamp of when onboarding was completed
   const [onboardingCompletedAt, setOnboardingCompletedAt] = useState<string | undefined>(undefined);
   const hasElectronAPI = typeof window !== "undefined" && !!window.electronAPI;
+  const rendererPerfLoggingEnabled = false;
+
+  recordRendererRender("App", `view:${currentView}`, rendererPerfLoggingEnabled);
 
   const reconcileTaskFromCanonical = useCallback(
     async (taskId: string, options?: { refreshEventsWhenTerminal?: boolean }) => {
       if (!window.electronAPI?.getTask) return null;
+      try {
+        const canonicalTask = (await window.electronAPI.getTask(taskId)) as Task | null;
+        if (!canonicalTask) return null;
 
-      const canonicalTask = (await window.electronAPI.getTask(taskId)) as Task | null;
-      if (!canonicalTask) return null;
+        setTasks((prev) => upsertTaskPreservingIdentity(prev, canonicalTask, { prependIfMissing: true }));
 
-      setTasks((prev) => {
-        let found = false;
-        const next = prev.map((t) => {
-          if (t.id !== taskId) return t;
-          found = true;
-          return { ...t, ...canonicalTask };
-        });
-        return found ? next : [canonicalTask, ...next];
-      });
-
-      if (
-        options?.refreshEventsWhenTerminal &&
-        !isTaskPossiblyRunning(canonicalTask.status) &&
-        window.electronAPI?.getTaskEvents
-      ) {
-        const refreshedEvents = await window.electronAPI.getTaskEvents(taskId);
-        pendingToolEventsRef.current = [];
-        if (pendingToolEventsFlushTimerRef.current) {
-          clearTimeout(pendingToolEventsFlushTimerRef.current);
-          pendingToolEventsFlushTimerRef.current = null;
+        if (
+          options?.refreshEventsWhenTerminal &&
+          !isTaskPossiblyRunning(canonicalTask.status) &&
+          window.electronAPI?.getTaskEvents
+        ) {
+          const refreshedEvents = await window.electronAPI.getTaskEvents(taskId);
+          pendingToolEventsRef.current = [];
+          if (pendingToolEventsFlushTimerRef.current) {
+            clearTimeout(pendingToolEventsFlushTimerRef.current);
+            pendingToolEventsFlushTimerRef.current = null;
+          }
+          setEvents(capTaskEvents(refreshedEvents));
+          const latestTimestamp = getLatestEventTimestamp(refreshedEvents);
+          taskLastEventTimestampRef.current.set(
+            taskId,
+            latestTimestamp > 0 ? latestTimestamp : Date.now(),
+          );
         }
-        setEvents(capTaskEvents(refreshedEvents));
-        const latestTimestamp = getLatestEventTimestamp(refreshedEvents);
-        taskLastEventTimestampRef.current.set(
-          taskId,
-          latestTimestamp > 0 ? latestTimestamp : Date.now(),
-        );
-      }
 
-      return canonicalTask;
+        return canonicalTask;
+      } finally {
+        terminalEventRefreshInFlightRef.current.delete(taskId);
+      }
     },
     [],
   );
@@ -822,27 +1158,26 @@ export function App() {
     if (currentWorkspace) {
       loadTasks();
     }
-  }, [currentWorkspace]);
+  }, [currentWorkspace?.id]);
 
   // Sync current workspace to the selected task's workspace
   useEffect(() => {
     if (!window.electronAPI?.selectWorkspace || !window.electronAPI?.getTempWorkspace) return;
     if (!selectedTaskId) return;
     if (remoteTaskView) return;
-    const task = tasks.find((t) => t.id === selectedTaskId);
-    if (!task) return;
-    if (currentWorkspace?.id === task.workspaceId) return;
+    if (!selectedTask) return;
+    if (currentWorkspace?.id === selectedTask.workspaceId) return;
 
     let cancelled = false;
 
     const loadTaskWorkspace = async () => {
       try {
-        let resolved: Workspace | null = await window.electronAPI.selectWorkspace(task.workspaceId);
-        if (!resolved && isTempWorkspaceId(task.workspaceId)) {
+        let resolved: Workspace | null = await window.electronAPI.selectWorkspace(selectedTask.workspaceId);
+        if (!resolved && isTempWorkspaceId(selectedTask.workspaceId)) {
           resolved = await window.electronAPI.getTempWorkspace();
         }
         if (!cancelled && resolved) {
-          setCurrentWorkspace(resolved);
+          setCurrentWorkspace((prev) => (prev?.id === resolved.id ? prev : resolved));
         }
       } catch (error) {
         console.error("Failed to load task workspace:", error);
@@ -853,7 +1188,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedTaskId, tasks, currentWorkspace?.id, remoteTaskView]);
+  }, [selectedTaskId, selectedTask, currentWorkspace?.id, remoteTaskView]);
 
   // Track recency when the active workspace changes
   useEffect(() => {
@@ -938,14 +1273,14 @@ export function App() {
     }
   };
 
-  const syncPendingInputRequests = () => {
+  const syncPendingInputRequests = useCallback(() => {
     const pending = Array.from(pendingInputRequestsRef.current.values())
       .filter((request) => request.status === "pending")
       .sort((a, b) => b.requestedAt - a.requestedAt);
     setPendingInputRequests(pending);
-  };
+  }, []);
 
-  const handleInputRequestResponse = async (data: InputRequestResponse) => {
+  const handleInputRequestResponse = useCallback(async (data: InputRequestResponse) => {
     try {
       const response = await window.electronAPI.respondToInputRequest(data);
       // Keep the prompt visible while the daemon still reports an in-progress mutation.
@@ -961,7 +1296,7 @@ export function App() {
         message: "Could not submit your response. Please try again.",
       });
     }
-  };
+  }, [addToast, syncPendingInputRequests]);
 
   const handleSessionApproveAllConfirm = () => {
     setSessionAutoApproveAll(true);
@@ -1020,7 +1355,7 @@ export function App() {
     eventsRef.current = events;
   }, [events]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     selectedTaskIdRef.current = selectedTaskId;
   }, [selectedTaskId]);
 
@@ -1123,6 +1458,7 @@ export function App() {
         ...rawEvent,
         type: effectiveType,
       } as TaskEvent;
+      noteRendererTaskEventReceived(event, rendererPerfLoggingEnabled);
       const eventTimestamp =
         typeof rawEvent?.timestamp === "number" && Number.isFinite(rawEvent.timestamp)
           ? rawEvent.timestamp
@@ -1172,28 +1508,59 @@ export function App() {
         isInputRequestResolutionEvent &&
         (event.payload?.terminalTask === true ||
           isTerminalTaskStatus(tasksRef.current.find((t) => t.id === event.taskId)?.status));
+      const nextStatus = newStatus as Task["status"] | undefined;
       if (newStatus && !skipBlockedStateForAutoApproval) {
-        setTasks((prev) =>
-          prev.map((t) => {
-            if (t.id !== event.taskId) return t;
-            if (isTerminalInputResolution && isTerminalTaskStatus(t.status)) {
-              return t;
-            }
-            const resolvedStatus =
-              resolveTaskStatusUpdateFromEvent(t, newStatus as Task["status"]) ?? t.status;
-            return {
-              ...t,
-              status: resolvedStatus,
-              ...(shouldClearTerminalStatus
-                ? { terminalStatus: undefined, failureClass: undefined }
-                : eventTerminalStatus !== undefined
-                  ? { terminalStatus: eventTerminalStatus }
-                  : {}),
-              ...(payloadFailureClass !== undefined ? { failureClass: payloadFailureClass } : {}),
-              ...(payloadBestKnownOutcome ? { bestKnownOutcome: payloadBestKnownOutcome } : {}),
-            };
-          }),
-        );
+        const applyTaskStatusUpdate = () =>
+          setTasks((prev) =>
+            updateTaskPreservingIdentity(prev, event.taskId, (t) => {
+              if (isTerminalInputResolution && isTerminalTaskStatus(t.status)) {
+                return t;
+              }
+              const resolvedStatus =
+                resolveTaskStatusUpdateFromEvent(t, newStatus as Task["status"]) ?? t.status;
+              const updates: Partial<Task> = {
+                status: resolvedStatus,
+              };
+              if (shouldClearTerminalStatus) {
+                updates.terminalStatus = undefined;
+                updates.failureClass = undefined;
+              } else if (eventTerminalStatus !== undefined) {
+                updates.terminalStatus = eventTerminalStatus;
+              }
+              if (payloadFailureClass !== undefined) {
+                updates.failureClass = payloadFailureClass;
+              }
+              if (payloadBestKnownOutcome) {
+                updates.bestKnownOutcome = payloadBestKnownOutcome;
+              }
+              return mergeTaskPreservingIdentity(t, updates);
+            }),
+          );
+
+        if (event.taskId === selectedTaskIdRef.current) {
+          applyTaskStatusUpdate();
+        } else {
+          startTransition(() => {
+            applyTaskStatusUpdate();
+          });
+        }
+      }
+
+      if (
+        shouldRefreshCanonicalEventsForTerminalUpdate({
+          selectedTaskId: selectedTaskIdRef.current,
+          event,
+          nextStatus,
+        }) &&
+        !terminalEventRefreshInFlightRef.current.has(event.taskId)
+      ) {
+        terminalEventRefreshInFlightRef.current.add(event.taskId);
+        void reconcileTaskFromCanonical(event.taskId, {
+          refreshEventsWhenTerminal: true,
+        }).catch((error) => {
+          terminalEventRefreshInFlightRef.current.delete(event.taskId);
+          console.error("Failed to refresh selected task events after terminal update:", error);
+        });
       }
 
       if (event.type === "approval_requested" && !isAutoApprovalRequested) {
@@ -1232,16 +1599,30 @@ export function App() {
             event.type === "approval_granted",
           );
           if (approvalFeedback) {
-            void window.electronAPI.addNotification({
-              type: approvalFeedback.type,
-              title:
-                event.type === "approval_granted"
-                  ? "Approval saved"
-                  : "Approval recorded",
-              message: approvalFeedback.message,
-              taskId: event.taskId,
-              workspaceId: tasksRef.current.find((t) => t.id === event.taskId)?.workspaceId,
-            });
+            void (async () => {
+              try {
+                const traySettings = await window.electronAPI.getTraySettings();
+                if (
+                  !traySettings.showNotifications ||
+                  !traySettings.showApprovalSavedNotifications
+                ) {
+                  return;
+                }
+
+                await window.electronAPI.addNotification({
+                  type: approvalFeedback.type,
+                  title:
+                    event.type === "approval_granted"
+                      ? "Approval saved"
+                      : "Approval recorded",
+                  message: approvalFeedback.message,
+                  taskId: event.taskId,
+                  workspaceId: tasksRef.current.find((t) => t.id === event.taskId)?.workspaceId,
+                });
+              } catch (error) {
+                console.error("Failed to add approval persistence notification:", error);
+              }
+            })();
           }
         }
       }
@@ -1490,25 +1871,14 @@ export function App() {
       }
 
       // Add event to events list if it's for the selected task
-      const isSelectedTask = event.taskId === selectedTaskId;
+      const isSelectedTask = event.taskId === selectedTaskIdRef.current;
+      const shouldIncludeInSelectedSession = shouldIncludeTaskEventInSelectedSession({
+        selectedTaskId: selectedTaskIdRef.current,
+        event,
+        tasks: tasksRef.current,
+      });
 
-      // For collaborative/multi-LLM roots, also capture file events from child tasks
-      const isChildFileEvent =
-        !isSelectedTask &&
-        (event.type === "file_created" ||
-          event.type === "file_modified" ||
-          event.type === "file_deleted" ||
-          event.type === "artifact_created") &&
-        (() => {
-          const childTask = tasksRef.current.find((t) => t.id === event.taskId);
-          if (!childTask?.parentTaskId || childTask.parentTaskId !== selectedTaskId) return false;
-          const parentTask = tasksRef.current.find((t) => t.id === selectedTaskId);
-          return !!(
-            parentTask?.agentConfig?.collaborativeMode || parentTask?.agentConfig?.multiLlmMode
-          );
-        })();
-
-      if (isSelectedTask || isChildFileEvent) {
+      if (shouldIncludeInSelectedSession) {
         if (RENDERER_DROPPED_EVENT_TYPES.has(event.type)) {
           return;
         }
@@ -1524,42 +1894,70 @@ export function App() {
 
         const isMilestone = EVENT_TYPES_MILESTONE.has(event.type);
         const isBatchable = EVENT_TYPES_BATCHABLE.has(event.type);
+        const shouldFlushImmediately = EVENT_TYPES_FLUSH_IMMEDIATELY.has(event.type);
 
-        const flushPendingToolEvents = () => {
-          if (pendingToolEventsRef.current.length === 0) return;
-          const toAppend = pendingToolEventsRef.current;
+        const appendSelectedTaskEvents = (
+          incomingEvents: TaskEvent[],
+          options?: { queuedAtByEventId?: Map<string, number> },
+        ) => {
+          if (incomingEvents.length === 0) return;
+          const queuedAtByEventId = options?.queuedAtByEventId;
+          noteRendererTaskEventsAppendDispatched(incomingEvents, rendererPerfLoggingEnabled);
+          setEvents((prev) => {
+            noteRendererTaskEventsAppended(
+              incomingEvents.map((incomingEvent) => ({
+                event: incomingEvent,
+                queuedAtMs: queuedAtByEventId?.get(incomingEvent.id),
+              })),
+              rendererPerfLoggingEnabled,
+            );
+            return appendRendererTaskEvents(prev, incomingEvents);
+          });
+        };
+
+        const flushPendingToolEvents = (extraEvents: TaskEvent[] = []) => {
+          const queuedEntries = pendingToolEventsRef.current;
           pendingToolEventsRef.current = [];
           if (pendingToolEventsFlushTimerRef.current) {
             clearTimeout(pendingToolEventsFlushTimerRef.current);
             pendingToolEventsFlushTimerRef.current = null;
           }
-          setEvents((prev) => capTaskEvents([...prev, ...toAppend]));
+          const flushedEvents = queuedEntries.map((entry) => entry.event);
+          const queuedAtByEventId = new Map(
+            queuedEntries.map((entry) => [entry.event.id, entry.queuedAtMs] as const),
+          );
+          if (flushedEvents.length + extraEvents.length === 0) return;
+          lastBatchableAppendAtRef.current = performance.now();
+          appendSelectedTaskEvents([...flushedEvents, ...extraEvents], { queuedAtByEventId });
         };
 
-        if (event.type === "llm_streaming") {
-          // Replace the previous streaming event to avoid array bloat
-          setEvents((prev) => {
-            const lastIdx = prev.length - 1;
-            if (lastIdx >= 0 && getEffectiveTaskEventType(prev[lastIdx]) === "llm_streaming") {
-              const updated = [...prev];
-              updated[lastIdx] = rawEvent;
-              return updated;
-            }
-            return capTaskEvents([...prev, rawEvent]);
-          });
-        } else if (isMilestone) {
-          flushPendingToolEvents();
-          setEvents((prev) => capTaskEvents([...prev, rawEvent]));
+        const schedulePendingToolEventFlush = () => {
+          if (pendingToolEventsFlushTimerRef.current) return;
+          pendingToolEventsFlushTimerRef.current = setTimeout(() => {
+            pendingToolEventsFlushTimerRef.current = null;
+            flushPendingToolEvents();
+          }, EVENT_BATCH_FLUSH_INTERVAL_MS);
+        };
+
+        if (isMilestone) {
+          flushPendingToolEvents([event]);
+        } else if (shouldFlushImmediately && isSelectedTask) {
+          flushPendingToolEvents([event]);
         } else if (isBatchable && isSelectedTask) {
-          pendingToolEventsRef.current.push(rawEvent);
-          if (!pendingToolEventsFlushTimerRef.current) {
-            pendingToolEventsFlushTimerRef.current = setTimeout(() => {
-              pendingToolEventsFlushTimerRef.current = null;
-              flushPendingToolEvents();
-            }, EVENT_BATCH_FLUSH_INTERVAL_MS);
+          const nowMs = performance.now();
+          const withinBurstWindow =
+            pendingToolEventsRef.current.length > 0 ||
+            nowMs - lastBatchableAppendAtRef.current <= EVENT_BATCH_BURST_WINDOW_MS;
+          if (!withinBurstWindow) {
+            lastBatchableAppendAtRef.current = nowMs;
+            appendSelectedTaskEvents([event]);
+          } else {
+            pendingToolEventsRef.current.push({ event, queuedAtMs: nowMs });
+            noteRendererTaskEventQueued(event, nowMs, rendererPerfLoggingEnabled);
+            schedulePendingToolEventFlush();
           }
         } else {
-          setEvents((prev) => capTaskEvents([...prev, rawEvent]));
+          appendSelectedTaskEvents([event]);
         }
       }
 
@@ -1582,21 +1980,37 @@ export function App() {
     return () => {
       // Flush pending batched events before unsubscribe so we don't lose the last batch
       if (pendingToolEventsRef.current.length > 0) {
-        const toAppend = pendingToolEventsRef.current;
+        const queuedEntries = pendingToolEventsRef.current;
         pendingToolEventsRef.current = [];
         if (pendingToolEventsFlushTimerRef.current) {
           clearTimeout(pendingToolEventsFlushTimerRef.current);
           pendingToolEventsFlushTimerRef.current = null;
         }
-        setEvents((prev) => capTaskEvents([...prev, ...toAppend]));
+        const queuedAtByEventId = new Map(
+          queuedEntries.map((entry) => [entry.event.id, entry.queuedAtMs] as const),
+        );
+        const queuedEvents = queuedEntries.map((entry) => entry.event);
+        noteRendererTaskEventsAppendDispatched(queuedEvents, rendererPerfLoggingEnabled);
+        setEvents((prev) => {
+          noteRendererTaskEventsAppended(
+            queuedEvents.map((queuedEvent) => ({
+              event: queuedEvent,
+              queuedAtMs: queuedAtByEventId.get(queuedEvent.id),
+            })),
+            rendererPerfLoggingEnabled,
+          );
+          return appendRendererTaskEvents(prev, queuedEvents);
+        });
       }
+      lastBatchableAppendAtRef.current = 0;
       if (typeof unsubscribe === "function") unsubscribe();
     };
-  }, [selectedTaskId, remoteTaskView]);
+  }, [selectedTaskId, remoteTaskView, rendererPerfLoggingEnabled]);
 
   // Load historical events when task is selected
   useEffect(() => {
     pendingToolEventsRef.current = [];
+    lastBatchableAppendAtRef.current = 0;
     if (pendingToolEventsFlushTimerRef.current) {
       clearTimeout(pendingToolEventsFlushTimerRef.current);
       pendingToolEventsFlushTimerRef.current = null;
@@ -1620,21 +2034,32 @@ export function App() {
       return;
     }
 
+    const requestedTaskId = selectedTaskId;
+    let cancelled = false;
+    setEvents([]);
+
     const loadHistoricalEvents = async () => {
       try {
-        const historicalEvents = await window.electronAPI.getTaskEvents(selectedTaskId);
-        setEvents(capTaskEvents(historicalEvents));
+        const historicalEvents = await window.electronAPI.getTaskEvents(requestedTaskId);
+        if (cancelled) return;
+        setEvents((prev) =>
+          capTaskEvents(hydrateSelectedTaskEvents(requestedTaskId, prev, historicalEvents)),
+        );
         const latestTimestamp = getLatestEventTimestamp(historicalEvents);
         if (latestTimestamp > 0) {
-          taskLastEventTimestampRef.current.set(selectedTaskId, latestTimestamp);
+          taskLastEventTimestampRef.current.set(requestedTaskId, latestTimestamp);
         }
       } catch (error) {
+        if (cancelled) return;
         console.error("Failed to load historical events:", error);
         setEvents([]);
       }
     };
 
-    loadHistoricalEvents();
+    void loadHistoricalEvents();
+    return () => {
+      cancelled = true;
+    };
   }, [selectedTaskId, remoteTaskView]);
 
   // Reconcile stale executing/interrupted task state if event delivery falls behind.
@@ -1998,8 +2423,73 @@ export function App() {
     }
   };
 
-  const selectedTask = remoteTaskView?.task || tasks.find((t) => t.id === selectedTaskId);
   const replayControls = useReplayMode(events, selectedTask);
+  const sharedTaskEventUi = useMemo(
+    () =>
+      measureRendererPerf("App.sharedTaskEventUi", rendererPerfLoggingEnabled, () =>
+        deriveSharedTaskEventUiState({
+          rawEvents: events,
+          task: selectedTask,
+          workspace: currentWorkspace,
+          verboseSteps: false,
+        }),
+      ),
+    [
+      currentWorkspace?.id,
+      currentWorkspace?.path,
+      events,
+      rendererPerfLoggingEnabled,
+      selectedTask,
+    ],
+  );
+  const rightPanelChildTasks = remoteTaskView ? [] : childTasks;
+  const rightPanelHasActiveChildren = useMemo(
+    () =>
+      rightPanelChildTasks.some((task) =>
+        ["executing", "planning", "queued", "pending"].includes(task.status),
+      ),
+    [rightPanelChildTasks],
+  );
+  const rightPanelRunningTasks = useMemo(
+    () => (queueStatus ? tasks.filter((task) => queueStatus.runningTaskIds.includes(task.id)) : []),
+    [queueStatus, tasks],
+  );
+  const rightPanelQueuedTasks = useMemo(
+    () => (queueStatus ? tasks.filter((task) => queueStatus.queuedTaskIds.includes(task.id)) : []),
+    [queueStatus, tasks],
+  );
+  const rightPanelHighlightPath = useMemo(
+    () =>
+      selectedTaskId && rightPanelHighlight?.taskId === selectedTaskId
+        ? rightPanelHighlight.path
+        : null,
+    [rightPanelHighlight, selectedTaskId],
+  );
+  const rightPanelInput = useMemo(
+    () => ({
+      task: selectedTask,
+      workspace: currentWorkspace,
+      events,
+      sharedTaskEventUi,
+      hasActiveChildren: rightPanelHasActiveChildren,
+      runningTasks: rightPanelRunningTasks,
+      queuedTasks: rightPanelQueuedTasks,
+      queueStatus,
+      highlightOutputPath: rightPanelHighlightPath,
+    }),
+    [
+      currentWorkspace,
+      events,
+      queueStatus,
+      rightPanelHasActiveChildren,
+      rightPanelHighlightPath,
+      rightPanelQueuedTasks,
+      rightPanelRunningTasks,
+      selectedTask,
+      sharedTaskEventUi,
+    ],
+  );
+  const deferredRightPanelInput = useDeferredValue(rightPanelInput);
   const activeInputRequest = useMemo(() => {
     if (remoteTaskView) return null;
     if (!selectedTaskId) return null;
@@ -2305,14 +2795,56 @@ export function App() {
     },
     [clearRemoteTaskView],
   );
+  const handleSelectChildTaskFromMainContent = useCallback((taskId: string) => {
+    const task = tasksRef.current.find((candidate) => candidate.id === taskId);
+    if (task && isSynthesisChildTask(task)) return;
+    setSelectedTaskId(taskId);
+  }, []);
+  const handleSubmitInputRequestFromMainContent = useCallback(
+    (requestId: string, answers: Record<string, { optionLabel?: string; otherText?: string }>) => {
+      void handleInputRequestResponse({
+        requestId,
+        status: "submitted",
+        answers,
+      });
+    },
+    [handleInputRequestResponse],
+  );
+  const handleDismissInputRequestFromMainContent = useCallback(
+    (requestId: string) => {
+      void handleInputRequestResponse({
+        requestId,
+        status: "dismissed",
+      });
+    },
+    [handleInputRequestResponse],
+  );
+  const handleViewTaskOutputsFromMainContent = useCallback(
+    (taskId: string, primaryOutputPath?: string) => {
+      setCurrentView("main");
+      clearRemoteTaskView();
+      setSelectedTaskId(taskId);
+      setRightSidebarCollapsed(false);
+      if (primaryOutputPath) {
+        setRightPanelHighlight({ taskId, path: primaryOutputPath });
+      }
+      setUnseenOutputTaskIds((prev) => prev.filter((id) => id !== taskId));
+      setUnseenCompletedTaskIds((prev) => prev.filter((id) => id !== taskId));
+    },
+    [clearRemoteTaskView],
+  );
+  const handleRightPanelHighlightConsumed = useCallback(() => {
+    setRightPanelHighlight((prev) =>
+      prev && prev.taskId === selectedTaskId ? null : prev,
+    );
+  }, [selectedTaskId]);
 
   // When opening a session from history, ensure we have the full task (including prompt)
   // in case it wasn't in the initial list or has stale data
   useEffect(() => {
     if (!selectedTaskId || remoteTaskView || !window.electronAPI?.getTask) return;
 
-    const task = tasks.find((t) => t.id === selectedTaskId);
-    const hasPrompt = task && (task.rawPrompt || task.userPrompt || task.prompt);
+    const hasPrompt = selectedTask && (selectedTask.rawPrompt || selectedTask.userPrompt || selectedTask.prompt);
     if (hasPrompt) return;
 
     let cancelled = false;
@@ -2320,11 +2852,9 @@ export function App() {
       try {
         const fullTask = (await window.electronAPI.getTask(selectedTaskId)) as Task | null;
         if (cancelled || !fullTask) return;
-        setTasks((prev) => {
-          const idx = prev.findIndex((t) => t.id === fullTask.id);
-          if (idx >= 0) return prev.map((t) => (t.id === fullTask.id ? { ...t, ...fullTask } : t));
-          return [fullTask, ...prev];
-        });
+        setTasks((prev) =>
+          upsertTaskPreservingIdentity(prev, fullTask, { prependIfMissing: true }),
+        );
       } catch (error) {
         if (!cancelled) console.error("Failed to fetch task for session view:", error);
       }
@@ -2333,7 +2863,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedTaskId, remoteTaskView, tasks]);
+  }, [selectedTaskId, remoteTaskView, selectedTask]);
 
   const openTaskById = useCallback(
     async (taskId: string) => {
@@ -2352,13 +2882,7 @@ export function App() {
         const task = (await window.electronAPI.getTask(taskId)) as Task | null;
         if (!task) return;
 
-        setTasks((prev) => {
-          const existingIndex = prev.findIndex((item) => item.id === task.id);
-          if (existingIndex >= 0) {
-            return prev.map((item) => (item.id === task.id ? { ...item, ...task } : item));
-          }
-          return [task, ...prev];
-        });
+        setTasks((prev) => upsertTaskPreservingIdentity(prev, task, { prependIfMissing: true }));
         setSelectedTaskId(task.id);
       } catch (error) {
         console.error("Failed to open task from shell navigation:", error);
@@ -2390,7 +2914,7 @@ export function App() {
       const next = prev.filter((taskId) => completedTaskIds.has(taskId));
       return next.length === prev.length ? prev : next;
     });
-  }, [tasks]);
+  }, [completedTaskIdsSignature]);
 
   useEffect(() => {
     if (!window.electronAPI?.onNavigateToTask) return;
@@ -2982,94 +3506,43 @@ export function App() {
                 />
               </main>
             ) : (
-              <MainContent
+              <SelectedTaskWorkspaceView
                 task={selectedTask}
                 selectedTaskId={selectedTaskId}
                 workspace={currentWorkspace}
-                events={replayControls.replayEvents}
                 replayControls={replayControls}
-                childTasks={remoteTaskView ? [] : childTasks}
-                childEvents={remoteTaskView ? [] : childEvents}
-                onSelectChildTask={(taskId) => {
-                  const task = childTasks.find((t) => t.id === taskId);
-                  if (task && isSynthesisChildTask(task)) return;
-                  setSelectedTaskId(taskId);
-                }}
+                sharedTaskEventUi={sharedTaskEventUi}
+                remoteTaskView={remoteTaskView}
+                childTasks={childTasks}
+                childEvents={childEvents}
+                activeInputRequest={activeInputRequest}
+                selectedModel={selectedModel}
+                availableModels={availableModels}
+                availableProviders={availableProviders}
+                uiDensity={uiDensity}
+                rendererPerfLoggingEnabled={rendererPerfLoggingEnabled}
+                effectiveRightCollapsed={effectiveRightCollapsed}
+                rightPanelInput={deferredRightPanelInput}
+                onSelectChildTask={handleSelectChildTaskFromMainContent}
                 onSelectTask={handleSelectTaskFromShell}
                 onSendMessage={handleSendMessage}
                 onStartOnboarding={handleShowOnboarding}
                 onCreateTask={handleCreateTask}
                 onChangeWorkspace={handleChangeWorkspace}
-                onSelectWorkspace={(workspace) => setCurrentWorkspace(workspace)}
+                onSelectWorkspace={setCurrentWorkspace}
                 onOpenSettings={(tab) => {
-                  setSettingsTab(
-                    (tab as typeof settingsTab | undefined) || "appearance",
-                  );
+                  setSettingsTab((tab as typeof settingsTab | undefined) || "appearance");
                   setCurrentView("settings");
                 }}
                 onStopTask={handleCancelTask}
                 onWrapUpTask={handleWrapUpTask}
-                inputRequest={activeInputRequest}
-                onSubmitInputRequest={(requestId, answers) => {
-                  void handleInputRequestResponse({
-                    requestId,
-                    status: "submitted",
-                    answers,
-                  });
-                }}
-                onDismissInputRequest={(requestId) => {
-                  void handleInputRequestResponse({
-                    requestId,
-                    status: "dismissed",
-                  });
-                }}
+                onSubmitInputRequest={handleSubmitInputRequestFromMainContent}
+                onDismissInputRequest={handleDismissInputRequestFromMainContent}
                 onOpenBrowserView={handleOpenBrowserView}
-                onViewTaskOutputs={(taskId, primaryOutputPath) => {
-                  setCurrentView("main");
-                  clearRemoteTaskView();
-                  setSelectedTaskId(taskId);
-                  setRightSidebarCollapsed(false);
-                  if (primaryOutputPath) {
-                    setRightPanelHighlight({ taskId, path: primaryOutputPath });
-                  }
-                  setUnseenOutputTaskIds((prev) => prev.filter((id) => id !== taskId));
-                  setUnseenCompletedTaskIds((prev) => prev.filter((id) => id !== taskId));
-                }}
-                selectedModel={selectedModel}
-                availableModels={availableModels}
+                onViewTaskOutputs={handleViewTaskOutputsFromMainContent}
+                onCancelTaskById={handleCancelTaskById}
+                onHighlightConsumed={handleRightPanelHighlightConsumed}
                 onModelChange={handleModelChange}
-                availableProviders={availableProviders}
-                uiDensity={uiDensity}
-                remoteSession={
-                  remoteTaskView
-                    ? {
-                        deviceId: remoteTaskView.deviceId,
-                        deviceName: remoteTaskView.deviceName,
-                      }
-                    : null
-                }
-              />
-            )}
-            {currentView === "main" && !effectiveRightCollapsed && !remoteTaskView && (
-              <RightPanel
-                task={selectedTask}
-                workspace={currentWorkspace}
-                events={events}
-                tasks={tasks}
-                childTasks={remoteTaskView ? [] : childTasks}
-                queueStatus={queueStatus}
-                onSelectTask={handleSelectTaskFromShell}
-                onCancelTask={handleCancelTaskById}
-                highlightOutputPath={
-                  selectedTaskId && rightPanelHighlight?.taskId === selectedTaskId
-                    ? rightPanelHighlight.path
-                    : null
-                }
-                onHighlightConsumed={() => {
-                  setRightPanelHighlight((prev) =>
-                    prev && prev.taskId === selectedTaskId ? null : prev,
-                  );
-                }}
               />
             )}
           </div>

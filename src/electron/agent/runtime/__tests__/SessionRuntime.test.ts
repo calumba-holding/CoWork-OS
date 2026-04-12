@@ -78,6 +78,10 @@ function createBaseState(): SessionRuntimeState {
       pendingFollowUps: [],
       stepFeedbackSignal: null,
     },
+    skills: {
+      pendingParameterCollection: null,
+      primarySlashCommandHandled: false,
+    },
     worker: {
       dispatchedMentionedAgents: false,
       verificationAgentState: {},
@@ -192,6 +196,10 @@ function createV2Snapshot(
     queues: {
       pendingFollowUps: [],
       stepFeedbackSignal: null,
+    },
+    skills: {
+      pendingParameterCollection: null,
+      primarySlashCommandHandled: false,
     },
     worker: {
       dispatchedMentionedAgents: false,
@@ -839,6 +847,25 @@ describe("SessionRuntime", () => {
     expect(updated.verificationNudgeNeeded).toBe(false);
   });
 
+  it("treats repeated checklist creation as an update while preserving matching item ids", () => {
+    const harness = createHarness();
+
+    const created = harness.runtime.createTaskList([
+      { title: "Inspect code", status: "completed" },
+      { title: "Implement fix", status: "in_progress" },
+    ]);
+    const preservedId = created.items[0]?.id;
+
+    const recreated = harness.runtime.createTaskList([
+      { title: "Inspect code", status: "completed" },
+      { title: "Verify fix", kind: "verification", status: "pending" },
+    ]);
+
+    expect(recreated.items[0]?.id).toBe(preservedId);
+    expect(recreated.items[1]?.title).toBe("Verify fix");
+    expect(recreated.items[1]?.kind).toBe("verification");
+  });
+
   it("rejects invalid checklist mutations", () => {
     const harness = createHarness();
 
@@ -958,6 +985,40 @@ describe("SessionRuntime", () => {
     harness.runtime.getAvailableTools();
 
     expect(renderToolsForContext).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores pending slash-skill parameter collection from replay events", () => {
+    const harness = createHarness();
+
+    harness.runtime.restoreFromEvents([
+      {
+        type: "skill_parameter_collection_started",
+        payload: {
+          pending: {
+            skillId: "novelist",
+            skillName: "Novelist",
+            trigger: "slash",
+            parameters: { genre: "literary" },
+            requiredParameterNames: ["seed"],
+            currentParameterIndex: 0,
+            startedAt: 1,
+          },
+        },
+      } as Any,
+      {
+        type: "assistant_message",
+        payload: { message: "I need one more detail for Novelist." },
+      } as Any,
+    ]);
+
+    expect(harness.runtime.getPendingSkillParameterCollection()).toEqual(
+      expect.objectContaining({
+        skillId: "novelist",
+        parameters: { genre: "literary" },
+        requiredParameterNames: ["seed"],
+      }),
+    );
+    expect(harness.runtime.hasHandledPrimarySlashCommand()).toBe(true);
   });
 
   it("triggers and clears the verification nudge under the expected conditions", () => {

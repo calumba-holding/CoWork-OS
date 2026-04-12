@@ -10,6 +10,7 @@ describe("normalizeTraySettings", () => {
         startMinimized: false,
         closeToTray: true,
         showNotifications: true,
+        showApprovalSavedNotifications: true,
       }).enabled,
     ).toBe(true);
   });
@@ -28,6 +29,7 @@ describe("normalizeTraySettings", () => {
     expect(s.showDockIcon).toBe(true);
     expect(s.closeToTray).toBe(true);
     expect(s.showNotifications).toBe(true);
+    expect(s.showApprovalSavedNotifications).toBe(false);
     expect(s.startMinimized).toBe(false);
   });
 });

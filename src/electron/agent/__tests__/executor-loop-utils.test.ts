@@ -5,6 +5,7 @@ import {
   handleMaxTokensRecovery,
   maybeInjectLowProgressNudge,
   maybeInjectStopReasonNudge,
+  recordPackagingFailureFingerprint,
   shouldRetryEmptyFollowUpEndTurn,
   shouldForceStopAfterSkippedToolOnlyTurns,
   shouldLockFollowUpToolCalls,
@@ -54,6 +55,35 @@ describe("executor-loop-utils guardrails", () => {
     expect(messages.length).toBe(2);
     expect(messages[0].role).toBe("assistant");
     expect(messages[1].role).toBe("user");
+  });
+
+  it("treats unavailable tools with explicit alternatives as recoverable", () => {
+    const decision = computeToolFailureDecision({
+      toolResults: [
+        {
+          type: "tool_result",
+          tool_use_id: "tool-1",
+          content: JSON.stringify({
+            error: 'Tool "create_document" is not available.',
+            unavailable: true,
+            alternatives: ["write_file"],
+          }),
+          is_error: true,
+        },
+      ] as Any,
+      hasDisabledToolAttempt: false,
+      hasDuplicateToolAttempt: false,
+      hasUnavailableToolAttempt: true,
+      hasHardToolFailureAttempt: false,
+      toolRecoveryHintInjected: false,
+      iterationCount: 1,
+      maxIterations: 6,
+      allowRecoveryHint: true,
+    });
+
+    expect(decision.shouldStopFromFailures).toBe(false);
+    expect(decision.shouldStopFromHardFailure).toBe(false);
+    expect(decision.shouldInjectRecoveryHint).toBe(true);
   });
 
   it("skips continuation retries when adaptive output handling disallows it", () => {
@@ -241,6 +271,50 @@ describe("executor-loop-utils guardrails", () => {
       allowImmediateTurnBudgetLock: false,
     });
     expect(shouldLock).toBe(false);
+  });
+
+  it("locks follow-up tool calls after repeated identical packaging failures", () => {
+    const counts = new Map<string, number>();
+    const first = recordPackagingFailureFingerprint({
+      toolName: "run_command",
+      input: { command: "python3 make_pdf.py --output book.pdf" },
+      error: "Command exited with code 1",
+      counts,
+    });
+    const second = recordPackagingFailureFingerprint({
+      toolName: "run_command",
+      input: { command: "python3 make_pdf.py --output book.pdf" },
+      error: "Command exited with code 1",
+      counts,
+    });
+
+    expect(first.isPackagingFailure).toBe(true);
+    expect(first.count).toBe(1);
+    expect(second.count).toBe(2);
+    expect(second.thresholdReached).toBe(true);
+
+    const shouldLock = shouldLockFollowUpToolCalls({
+      stopReason: "tool_use",
+      consecutiveToolUseStops: 1,
+      followUpToolCallCount: 2,
+      stopReasonNudgeInjected: false,
+      repeatedPackagingFailureCount: second.count,
+    });
+    expect(shouldLock).toBe(true);
+  });
+
+  it("ignores non-packaging failures for early follow-up locking", () => {
+    const counts = new Map<string, number>();
+    const result = recordPackagingFailureFingerprint({
+      toolName: "read_file",
+      input: { path: "notes.txt" },
+      error: "ENOENT",
+      counts,
+    });
+
+    expect(result.isPackagingFailure).toBe(false);
+    expect(result.count).toBe(0);
+    expect(counts.size).toBe(0);
   });
 
   it("tracks skipped-tool-only streak and forces stop after threshold", () => {

@@ -272,6 +272,25 @@ export class AppearanceManager {
   }
 }
 
+export function getDevLogCaptureEnabled(): boolean {
+  if (process.env.NODE_ENV !== "development") {
+    return false;
+  }
+
+  try {
+    const configPath = path.resolve(process.cwd(), DEV_LOG_SETTINGS_FILE);
+    if (!fs.existsSync(configPath)) {
+      return false;
+    }
+
+    const raw = fs.readFileSync(configPath, "utf-8");
+    const parsed = JSON.parse(raw) as { captureEnabled?: boolean };
+    return parsed.captureEnabled === true;
+  } catch {
+    return false;
+  }
+}
+
 function isValidThemeMode(value: unknown): value is ThemeMode {
   return value === "light" || value === "dark" || value === "system";
 }

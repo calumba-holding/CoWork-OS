@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import type { TaskEvent } from "../../../shared/types";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { getEffectiveTaskEventType } from "../../utils/task-event-compat";
@@ -7,6 +8,8 @@ export interface ActionBlockSummary {
   summary: string;
   /** Total number of actions in the block */
   actionCount: number;
+  /** Number of steps in the block */
+  stepCount: number;
   /** Number of tool calls in the block */
   toolCallCount: number;
   /** Duration in ms from first to last event in the block */
@@ -167,6 +170,7 @@ export function buildActionBlockSummary(
   return {
     summary,
     actionCount: totalTools + stepCount || events.length,
+    stepCount,
     toolCallCount: totalTools,
     durationMs,
     outputTokens,
@@ -193,6 +197,7 @@ function formatTokenCount(count: number): string {
 interface ActionBlockProps {
   blockId: string;
   summary: string;
+  stepCount: number;
   toolCallCount: number;
   durationMs: number;
   outputTokens: number;
@@ -213,6 +218,7 @@ interface ActionBlockProps {
 export function ActionBlock({
   blockId,
   summary,
+  stepCount,
   toolCallCount,
   durationMs,
   outputTokens,
@@ -224,8 +230,23 @@ export function ActionBlock({
   lastStepLabel,
   children,
 }: ActionBlockProps) {
+  const [localExpanded, setLocalExpanded] = useState(expanded);
+
+  useEffect(() => {
+    setLocalExpanded(expanded);
+  }, [blockId, expanded]);
+
+  const visibleExpanded = isActive ? true : localExpanded;
+
+  const handleToggle = useCallback(() => {
+    if (!isActive) {
+      setLocalExpanded((prev) => !prev);
+    }
+    onToggle();
+  }, [isActive, onToggle]);
+
   return (
-    <div className={`action-block timeline-event ${expanded ? "expanded" : "collapsed"} ${isActive ? "active" : ""}`}>
+    <div className={`action-block timeline-event ${visibleExpanded ? "expanded" : "collapsed"} ${isActive ? "active" : ""}`}>
       <div className="event-indicator action-block-indicator">
         {showConnectorAbove && <span className="event-connector event-connector-above" aria-hidden="true" />}
         <span className="action-block-dot" aria-hidden="true" />
@@ -235,31 +256,37 @@ export function ActionBlock({
       <button
         type="button"
         className="action-block-header"
-        onClick={onToggle}
-        aria-expanded={expanded}
+        onClick={handleToggle}
+        aria-expanded={visibleExpanded}
         aria-controls={`action-block-content-${blockId}`}
         id={`action-block-toggle-${blockId}`}
       >
         <span className="action-block-chevron" aria-hidden="true">
-          {expanded ? (
+          {visibleExpanded ? (
             <ChevronDown size={14} strokeWidth={2.5} />
           ) : (
             <ChevronRight size={14} strokeWidth={2.5} />
           )}
         </span>
         <span className="action-block-summary">{summary}</span>
-        {!expanded && lastStepLabel && (
+        {!visibleExpanded && lastStepLabel && (
           <span className="action-block-last-step-label" aria-label="Last step">{lastStepLabel}</span>
         )}
         <span className="action-block-meta">
+          {stepCount > 0 && (
+            <span className="action-block-count">
+              {stepCount} step{stepCount === 1 ? "" : "s"}
+            </span>
+          )}
           {toolCallCount > 0 && (
             <span className="action-block-count">
+              {stepCount > 0 && <span className="action-block-stats-sep"> · </span>}
               {toolCallCount} tool call{toolCallCount === 1 ? "" : "s"}
             </span>
           )}
           {(durationMs > 0 || outputTokens > 0) && (
             <span className="action-block-stats">
-              {toolCallCount > 0 && (durationMs > 0 || outputTokens > 0) && (
+              {(stepCount > 0 || toolCallCount > 0) && (durationMs > 0 || outputTokens > 0) && (
                 <span className="action-block-stats-sep"> · </span>
               )}
               {durationMs > 0 && formatDurationMs(durationMs)}
@@ -278,9 +305,9 @@ export function ActionBlock({
         className="action-block-content"
         role="region"
         aria-labelledby={`action-block-toggle-${blockId}`}
-        hidden={!expanded}
+        hidden={!visibleExpanded}
       >
-        {expanded && <div className="action-block-events">{children}</div>}
+        {visibleExpanded && <div className="action-block-events">{children}</div>}
       </div>
       </div>
     </div>

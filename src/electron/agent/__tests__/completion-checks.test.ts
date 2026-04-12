@@ -100,6 +100,32 @@ describe("evaluateDomainCompletion", () => {
     expect(result.failed).toBe(false);
   });
 
+  it("passes for a concise general-domain result when prior tool execution already succeeded", () => {
+    const result = evaluateDomainCompletion({
+      domain: "general",
+      isLastStep: true,
+      assistantText: "hello world",
+      hadAnyToolSuccess: false,
+      hadPriorToolSuccess: true,
+      stepDescription: "Return the result directly.",
+      taskIntent: "run command 'echo hello world'",
+    });
+    expect(result.failed).toBe(false);
+  });
+
+  it("fails for a general-domain status-only reply when only prior tool execution succeeded", () => {
+    const result = evaluateDomainCompletion({
+      domain: "general",
+      isLastStep: true,
+      assistantText: "done",
+      hadAnyToolSuccess: false,
+      hadPriorToolSuccess: true,
+      stepDescription: "Return the result directly.",
+    });
+    expect(result.failed).toBe(true);
+    expect(result.reason).toMatch(/actual result|next step/i);
+  });
+
   // ── No tool success: NON_SUBSTANTIVE_RESPONSES still blocked ─────────
   it("fails when no tool success and response is a non-substantive phrase", () => {
     const result = evaluateDomainCompletion({
@@ -110,6 +136,55 @@ describe("evaluateDomainCompletion", () => {
     });
     expect(result.failed).toBe(true);
     expect(result.reason).toMatch(/brief/i);
+  });
+
+  it("passes for a concise literal reply when the task explicitly asks for direct output", () => {
+    const result = evaluateDomainCompletion({
+      domain: "general",
+      isLastStep: true,
+      assistantText: "42",
+      hadAnyToolSuccess: false,
+      stepDescription: "Return the result directly.",
+      taskIntent: "Answer with exactly 42.",
+    });
+    expect(result.failed).toBe(false);
+  });
+
+  it("passes for a concise literal reply when the step asks for an exact quoted output", () => {
+    const result = evaluateDomainCompletion({
+      domain: "general",
+      isLastStep: true,
+      assistantText: "hello world",
+      hadAnyToolSuccess: false,
+      stepDescription: "Output is exactly `hello world`",
+      taskIntent: 'run command "echo hello world"',
+    });
+    expect(result.failed).toBe(false);
+  });
+
+  it("passes for a concise literal reply when success is phrased as printed output", () => {
+    const result = evaluateDomainCompletion({
+      domain: "general",
+      isLastStep: true,
+      assistantText: "hello world",
+      hadAnyToolSuccess: false,
+      stepDescription: "Return the result clearly.",
+      taskIntent:
+        "You want the command run in the current session context, and success means it prints `hello world`.",
+    });
+    expect(result.failed).toBe(false);
+  });
+
+  it("passes for a concise literal reply when the step asks for an exact quoted exit code", () => {
+    const result = evaluateDomainCompletion({
+      domain: "general",
+      isLastStep: true,
+      assistantText: "0",
+      hadAnyToolSuccess: false,
+      stepDescription: "Exit code is `0`",
+      taskIntent: 'run command "echo hello world"',
+    });
+    expect(result.failed).toBe(false);
   });
 
   // ── Research quality gate without tool success ────────────────────────
@@ -135,4 +210,3 @@ describe("evaluateDomainCompletion", () => {
     expect(result.failed).toBe(false);
   });
 });
-

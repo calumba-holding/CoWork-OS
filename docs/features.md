@@ -75,7 +75,7 @@
 - **Structured Input Requests**: In plan-mode flows, the agent can pause with 1-3 short multiple-choice questions instead of asking ambiguous free-text follow-ups
 - **Parallel Tool Timeline**: Concurrent read-only tool bursts are grouped into lane-based timeline cards instead of flooding the event feed; screenshot-heavy refinement loops stay more compact in summary mode
 - **Renderer Performance**: In the `CoWork-OS/CoWork-OS` repo, the renderer uses `@chenglou/pretext` for text-heavy sidebar/timeline measurement, with flattened visible sidebar rows and post-render height reconciliation for expanded timeline cards
-- **Adaptive Runtime Recovery**: Execute tasks use adaptive turn budgets, bounded follow-up recovery, retry-aware turn guidance, and safety-stop escalation instead of hard window failure by default
+- **Adaptive Runtime Recovery**: Main interactive tasks no longer receive implicit strategy turn caps. They use explicit-only window caps, bounded follow-up recovery, retry-aware turn guidance, and lifetime/emergency safety-stop escalation instead of default hard-window failure
 - **Session Snapshot Resume**: SessionRuntime prefers `session_runtime_v2` checkpoint and event payloads, falls back to legacy `conversationHistory` payloads or event-derived history, and rewrites legacy resumes to V2 on the next checkpoint
 - **Workspace Rule Manager**: Settings can list and remove workspace-local permission rules directly, and approval prompts can persist new workspace or profile rules with explicit reasons and scope previews.
 - **Path Drift Repair**: `/workspace/...` aliases and drifted relative paths can be normalized back into the active workspace or pinned task root, with strict-fail policies when hard enforcement is preferred
@@ -285,7 +285,7 @@ The runtime now includes a set of decision and recovery contracts aimed at keepi
 | Capability | Behavior |
 |------------|----------|
 | **Structured input requests** | `request_user_input` asks 1-3 concise multiple-choice questions, pauses the task, and resumes after submit/dismiss. Only available in plan mode. |
-| **Adaptive turn-window recovery** | Execute-oriented tasks default to `adaptive_unbounded`, soft-log exhausted windows, reserve space for finalization, and allow a bounded follow-up recovery attempt before triggering a safety stop. Retrying turns can carry attempt count, retry reason/class, pending verification items, and recent session recall so the agent continues instead of restarting. |
+| **Explicit turn-window recovery** | Main interactive tasks run without an implicit turn window. If a caller, managed template, or helper explicitly sets `maxTurns` or `windowTurnCap`, the runtime applies the requested `turnBudgetPolicy`, soft-logs exhausted adaptive windows, reserves space for finalization, and allows bounded follow-up recovery before triggering a safety stop. |
 | **Context overflow retry** | Context-capacity errors trigger compaction plus retry instead of immediate hard failure when the model context window is exceeded. |
 | **Workspace alias repair** | Absolute alias paths such as `/workspace/...` can be remapped into the active workspace for file and directory tools, or blocked via `strict_fail`. |
 | **Pinned task-root repair** | Relative paths that drift outside the task's canonical root can be rewritten back under the pinned root, retried with a bounded budget, or rejected under strict policy. |

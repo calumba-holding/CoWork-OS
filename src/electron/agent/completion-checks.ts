@@ -67,6 +67,9 @@ export interface DomainCompletionInput {
   isLastStep: boolean;
   assistantText: string;
   hadAnyToolSuccess: boolean;
+  hadPriorToolSuccess?: boolean;
+  taskIntent?: string;
+  stepDescription?: string;
 }
 
 export interface DomainCompletionResult {
@@ -87,6 +90,60 @@ const NON_SUBSTANTIVE_RESPONSES = new Set([
   "ok.",
 ]);
 
+const DIRECT_RESULT_INTENT_PATTERNS = [
+  /\breturn\b[\s\S]{0,40}\b(directly|exactly|verbatim|raw|only|result|output)\b/i,
+  /\b(respond|reply|answer)\b[\s\S]{0,40}\b(exactly|verbatim|only|directly)\b/i,
+  /\b(stdout|output)\b[\s\S]{0,20}\b(exactly|verbatim)\b/i,
+  /\b(?:prints?|outputs?|returns?|emits?|produces?)\b[\s\S]{0,20}\b(exactly|verbatim)\b/i,
+  /\brun command\b/i,
+  /\becho\b/i,
+];
+
+function extractExpectedLiteralFromContext(input: DomainCompletionInput): string | null {
+  const context = `${input.stepDescription || ""}\n${input.taskIntent || ""}`.trim();
+  if (!context) return null;
+
+  const patterns = [
+    /\b(?:is|equals?|exactly)\s*`([^`]+)`/i,
+    /\b(?:is|equals?|exactly)\s*"([^"]+)"/i,
+    /\b(?:is|equals?|exactly)\s*'([^']+)'/i,
+    /\b(?:prints?|outputs?|returns?|emits?|produces?)\s*`([^`]+)`/i,
+    /\b(?:prints?|outputs?|returns?|emits?|produces?)\s*"([^"]+)"/i,
+    /\b(?:prints?|outputs?|returns?|emits?|produces?)\s*'([^']+)'/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = context.match(pattern);
+    const literal = String(match?.[1] || "").trim();
+    if (literal) return literal;
+  }
+
+  return null;
+}
+
+function contextIndicatesDirectResult(input: DomainCompletionInput): boolean {
+  const context = `${input.stepDescription || ""}\n${input.taskIntent || ""}`.trim();
+  if (!context) return false;
+  return DIRECT_RESULT_INTENT_PATTERNS.some((pattern) => pattern.test(context));
+}
+
+function shouldAllowConciseDirectResult(input: DomainCompletionInput, normalized: string): boolean {
+  if (NON_SUBSTANTIVE_RESPONSES.has(normalized)) {
+    return false;
+  }
+
+  const expectedLiteral = extractExpectedLiteralFromContext(input);
+  if (expectedLiteral && normalized === expectedLiteral.toLowerCase()) {
+    return true;
+  }
+
+  if (input.hadAnyToolSuccess || input.hadPriorToolSuccess) {
+    return true;
+  }
+
+  return contextIndicatesDirectResult(input);
+}
+
 export function evaluateDomainCompletion(input: DomainCompletionInput): DomainCompletionResult {
   if (!input.isLastStep) return { failed: false };
 
@@ -95,12 +152,13 @@ export function evaluateDomainCompletion(input: DomainCompletionInput): DomainCo
 
   const text = String(input.assistantText || "").trim();
   const normalized = text.toLowerCase();
+  const hadTaskToolSuccess = input.hadAnyToolSuccess || Boolean(input.hadPriorToolSuccess);
 
   // When tools succeeded, the tool evidence IS the proof of completion for most
   // domains. However, research and writing tasks still need a user-facing summary
   // or actual content — the work was done via tools, but the user still needs
   // findings/draft, not just a "done" status line.
-  if (input.hadAnyToolSuccess) {
+  if (hadTaskToolSuccess) {
     if (!text) {
       return {
         failed: true,
@@ -122,6 +180,17 @@ export function evaluateDomainCompletion(input: DomainCompletionInput): DomainCo
         failed: true,
         reason:
           "Tools ran but response lacks the actual written content. Include the draft/content.",
+      };
+    }
+    if (
+      !input.hadAnyToolSuccess &&
+      (domain === "general" || domain === "auto") &&
+      NON_SUBSTANTIVE_RESPONSES.has(normalized)
+    ) {
+      return {
+        failed: true,
+        reason:
+          "Prior execution succeeded, but the final response only reports status. Include the actual result or next step.",
       };
     }
     // For all other domains, tool evidence suffices.
@@ -162,6 +231,9 @@ export function evaluateDomainCompletion(input: DomainCompletionInput): DomainCo
   }
 
   if ((domain === "general" || domain === "auto") && text.length < 20) {
+    if (shouldAllowConciseDirectResult(input, normalized)) {
+      return { failed: false };
+    }
     return {
       failed: true,
       reason:

@@ -59,6 +59,7 @@ export interface TraySettings {
   startMinimized: boolean;
   closeToTray: boolean;
   showNotifications: boolean;
+  showApprovalSavedNotifications: boolean;
 }
 
 const DEFAULT_SETTINGS: TraySettings = {
@@ -67,6 +68,7 @@ const DEFAULT_SETTINGS: TraySettings = {
   startMinimized: false,
   closeToTray: true,
   showNotifications: true,
+  showApprovalSavedNotifications: false,
 };
 
 /**
@@ -94,6 +96,10 @@ export function normalizeTraySettings(
       typeof merged.showNotifications === "boolean"
         ? merged.showNotifications
         : DEFAULT_SETTINGS.showNotifications,
+    showApprovalSavedNotifications:
+      typeof merged.showApprovalSavedNotifications === "boolean"
+        ? merged.showApprovalSavedNotifications
+        : DEFAULT_SETTINGS.showApprovalSavedNotifications,
   };
 }
 

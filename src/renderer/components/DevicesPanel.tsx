@@ -272,6 +272,10 @@ function getTaskBadge(task: Task) {
   return { className: "pending", label: task.status, icon: <Clock3 size={12} /> };
 }
 
+function isTerminalDeviceTask(task: Task): boolean {
+  return task.status === "completed" || task.status === "failed" || task.status === "cancelled";
+}
+
 const EXECUTION_MODE_ORDER: ExecutionMode[] = ["chat", "execute", "plan", "analyze", "debug", "verified"];
 const TASK_DOMAIN_ORDER: TaskDomain[] = [
   "auto",
@@ -602,7 +606,14 @@ export function DevicesPanel({
     }
 
     const sorted = Array.from(merged.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    setDeviceTasks(taskFilter === "attention" ? sorted.filter((task) => isTaskAttention(task)) : sorted);
+    const visible = sorted.filter((task) => {
+      const taskNodeId = typeof task.targetNodeId === "string" ? task.targetNodeId : "";
+      const taskDevice = remoteDevices.find((device) => device.taskNodeId === taskNodeId);
+      if (!taskDevice || taskDevice.role !== "remote") return true;
+      if (taskDevice.status === "connected") return true;
+      return isTerminalDeviceTask(task);
+    });
+    setDeviceTasks(taskFilter === "attention" ? visible.filter((task) => isTaskAttention(task)) : visible);
   }, [activeDevice, remoteDevices, taskFilter]);
 
   useEffect(() => {
@@ -1101,6 +1112,16 @@ export function DevicesPanel({
           <span className="dp-input-spacer" />
           <button className="dp-input-action-btn" disabled>
             <Mic size={20} />
+          </button>
+          <button
+            type="button"
+            className="dp-input-action-btn"
+            onClick={() => void handleRunTask()}
+            disabled={!activeDevice || submittingTask || !taskPrompt.trim()}
+            aria-label="Send task"
+            title="Send task"
+          >
+            <Send size={20} />
           </button>
         </div>
       </div>

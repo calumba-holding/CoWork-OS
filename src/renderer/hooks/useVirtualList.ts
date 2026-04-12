@@ -33,6 +33,8 @@ export interface UseVirtualListOptions<T> {
   overscan?: number;
   /** Master switch — when false the hook returns all items unstyled. */
   enabled?: boolean;
+  /** Top offset of the list content within the scroll container. */
+  scrollOffsetTop?: number;
 }
 
 export interface UseVirtualListResult<T> {
@@ -94,6 +96,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     estimatedItemHeight = 40,
     overscan = 5,
     enabled = true,
+    scrollOffsetTop = 0,
   } = options;
 
   const [scrollTop, setScrollTop] = useState(0);
@@ -181,11 +184,15 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       height: estimatedItemHeight,
     }));
   } else {
-    const startIndex = Math.max(findStartIndex(offsets, scrollTop) - overscan, 0);
-    const endBound = scrollTop + viewportHeight;
+    const visibleWindowStart = Math.max(0, scrollTop - scrollOffsetTop);
+    const visibleWindowEnd = Math.max(
+      visibleWindowStart,
+      scrollTop + viewportHeight - scrollOffsetTop,
+    );
+    const startIndex = Math.max(findStartIndex(offsets, visibleWindowStart) - overscan, 0);
 
     let endIndex = startIndex;
-    while (endIndex < items.length && offsets[endIndex] < endBound) {
+    while (endIndex < items.length && offsets[endIndex] < visibleWindowEnd) {
       endIndex++;
     }
     endIndex = Math.min(endIndex + overscan, items.length);
@@ -207,9 +214,9 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     (index: number) => {
       const container = containerRef.current;
       if (!container || index < 0 || index >= offsets.length) return;
-      container.scrollTop = offsets[index];
+      container.scrollTop = offsets[index] + scrollOffsetTop;
     },
-    [containerRef, offsets],
+    [containerRef, offsets, scrollOffsetTop],
   );
 
   const scrollToBottom = useCallback(() => {

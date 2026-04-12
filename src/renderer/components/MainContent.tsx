@@ -2,6 +2,7 @@ import {
   memo,
   useState,
   useEffect,
+  useLayoutEffect,
   useRef,
   useCallback,
   useMemo,
@@ -67,11 +68,19 @@ import { shouldShowPersistentNeedsUserActionBanner } from "../utils/task-complet
 import {
   ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES,
   filterVerboseTimelineNoise,
+  shouldShowTaskEventInStepFeed,
   shouldShowTaskEventInSummaryMode,
 } from "../utils/task-event-visibility";
 import { friendlyToolCallTitle, friendlyToolResultTitle } from "../utils/timeline-tool-labels";
 import { normalizeEventsForTimelineUi } from "../utils/timeline-projection";
 import { getEffectiveTaskEventType } from "../utils/task-event-compat";
+import {
+  incrementRendererPerfCounter,
+  markTaskEventRenderable,
+  markTaskEventVisible,
+  measureRendererPerf,
+  recordRendererRender,
+} from "../utils/renderer-perf";
 import {
   ATTACHMENT_CONTENT_END_MARKER,
   ATTACHMENT_CONTENT_START_MARKER,
@@ -86,6 +95,12 @@ import {
 import { sanitizeToolCallTextFromAssistant } from "../../shared/tool-call-text-sanitizer";
 import { formatProviderErrorForDisplay } from "../../shared/provider-error-format";
 import { buildApprovalCommandPreview } from "../../shared/approval-command-preview";
+import {
+  deriveSharedTaskEventUiState,
+  type BaseTimelineItem,
+  type CommandOutputSession,
+  type SharedTaskEventUiState,
+} from "../utils/task-event-derived";
 import {
   Check as CheckIcon,
   MessageCircle,
@@ -106,7 +121,9 @@ import type { LucideIcon } from "lucide-react";
 import { InlineVideoPreview } from "./InlineVideoPreview";
 import { ReplayControlsBar } from "./ReplayControls";
 import { DebugSessionPanel } from "./DebugSessionPanel";
+import { TaskPauseBanner } from "./TaskPauseBanner";
 import type { ReplayControls } from "../hooks/useReplayMode";
+import { useVirtualList } from "../hooks/useVirtualList";
 
 const CODE_PREVIEWS_EXPANDED_KEY = "cowork:codePreviewsExpanded";
 const TASK_TITLE_MAX_LENGTH = 50;
@@ -284,6 +301,55 @@ const buildTaskTitle = (text: string): string => {
   return `${trimmed.slice(0, TASK_TITLE_MAX_LENGTH)}...`;
 };
 
+export function deriveTaskHeaderPresentation(task?: {
+  title?: string | null;
+  prompt?: string | null;
+  rawPrompt?: string | null;
+  userPrompt?: string | null;
+} | null): {
+  cleanedDisplayPrompt: string;
+  trimmedPrompt: string;
+  promptAttachmentNames: string[];
+  headerTitle: string;
+  headerTooltip: string;
+  showHeaderTitle: boolean;
+} {
+  const displayPromptValue =
+    typeof task?.rawPrompt === "string" && task.rawPrompt.trim().length > 0
+      ? task.rawPrompt
+      : typeof task?.userPrompt === "string" && task.userPrompt.trim().length > 0
+        ? task.userPrompt
+        : typeof task?.prompt === "string"
+          ? task.prompt
+          : "";
+  const cleanedDisplayPromptValue = displayPromptValue
+    ? stripStrategyContextBlock(stripPptxBubbleContent(displayPromptValue))
+    : "";
+  const trimmedPromptValue = cleanedDisplayPromptValue.trim();
+  const promptAttachmentNamesValue = displayPromptValue ? extractAttachmentNames(displayPromptValue) : [];
+  const baseTitleValue = task?.title || buildTaskTitle(trimmedPromptValue);
+  const normalizedTitle = baseTitleValue.replace(TITLE_ELLIPSIS_REGEX, "").trim();
+  const titleMatchesPrompt =
+    normalizedTitle.length > 0 &&
+    trimmedPromptValue.length > 0 &&
+    (trimmedPromptValue === normalizedTitle || trimmedPromptValue.startsWith(normalizedTitle));
+  const isTitleTruncated = titleMatchesPrompt && trimmedPromptValue.length > normalizedTitle.length;
+  const headerTitleValue =
+    isTitleTruncated && !TITLE_ELLIPSIS_REGEX.test(baseTitleValue)
+      ? `${baseTitleValue}...`
+      : baseTitleValue;
+  const showHeaderTitle = headerTitleValue.trim().length > 0 && !titleMatchesPrompt;
+
+  return {
+    cleanedDisplayPrompt: cleanedDisplayPromptValue,
+    trimmedPrompt: trimmedPromptValue,
+    promptAttachmentNames: promptAttachmentNamesValue,
+    headerTitle: headerTitleValue,
+    headerTooltip: trimmedPromptValue || baseTitleValue,
+    showHeaderTitle,
+  };
+}
+
 export function shouldCreateFreshTaskForSend(params: {
   executionMode: ExecutionMode;
   selectedTaskId: string | null;
@@ -441,7 +507,12 @@ type SlashCommandOption = SkillSlashCommandOption | BuiltinSlashCommandOption;
 
 const normalizeMentionSearch = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]/g, "");
-import { SkillParameterModal } from "./SkillParameterModal";
+import {
+  SkillParameterModal,
+  expandSkillPrompt,
+  type SkillParameterFormValues,
+} from "./SkillParameterModal";
+import { buildSlashSkillPrompt } from "./skill-parameter-utils";
 import { DocumentAwareFileModal } from "./DocumentAwareFileModal";
 import { ThemeIcon } from "./ThemeIcon";
 import {
@@ -572,7 +643,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
     document.documentElement.classList.contains("theme-light") ? "light" : "dark",
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const observer = new MutationObserver(() => {
       const next =
         document.documentElement.classList.contains("theme-light") ? "light" : "dark";
@@ -585,7 +656,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     initMermaid();
     let cancelled = false;
     setError(null);
@@ -2828,6 +2899,7 @@ interface MainContentProps {
   selectedTaskId: string | null; // Added to distinguish "no task" from "task not in list"
   workspace: Workspace | null;
   events: TaskEvent[];
+  sharedTaskEventUi?: SharedTaskEventUiState | null;
   childTasks?: Task[];
   childEvents?: TaskEvent[];
   onSelectChildTask?: (taskId: string) => void;
@@ -2862,29 +2934,691 @@ interface MainContentProps {
   onModelChange: (model: string) => void;
   availableProviders?: Array<{ type: string; name: string; configured: boolean }>;
   uiDensity?: "focused" | "full" | "power";
+  rendererPerfLoggingEnabled?: boolean;
   remoteSession?: { deviceId: string; deviceName: string } | null;
   replayControls?: ReplayControls;
 }
 
-// Track command execution sessions for timeline rendering
-interface CommandOutputSession {
-  id: string;
-  command: string;
-  output: string;
-  isRunning: boolean;
-  exitCode: number | null;
-  startTimestamp: number; // When the command started, for positioning in timeline
-  cwd?: string; // Working directory where the command runs
+const STEP_WINDOW_SIZE = 7;
+const VIRTUALIZED_FEED_ROW_THRESHOLD = 18;
+
+type TaskFeedRow =
+  | {
+      kind: "leading-command-outputs";
+      key: string;
+      estimatedHeight: number;
+      sessions: CommandOutputSession[];
+      revision: string;
+      visiblePerfEventId: null;
+    }
+  | {
+      kind: "timeline";
+      key: string;
+      estimatedHeight: number;
+      timelineIndex: number;
+      item: any;
+      revision: string;
+      visiblePerfEventId: string | null;
+    };
+
+type SkillModalLaunchMode = "skill_menu" | "slash";
+
+type SelectedSkillModalState = {
+  skill: CustomSkill;
+  launchMode: SkillModalLaunchMode;
+};
+
+export type TranscriptMode = "live" | "inspect";
+
+function getTaskFeedRowEventType(row: TaskFeedRow): string | null {
+  if (row.kind !== "timeline" || row.item.kind !== "event") return null;
+  return getEffectiveTaskEventType(row.item.event as TaskEvent);
 }
 
-const STEP_WINDOW_SIZE = 7;
+function getTaskFeedRowEvent(row: TaskFeedRow): TaskEvent | null {
+  if (row.kind !== "timeline" || row.item.kind !== "event") return null;
+  return row.item.event as TaskEvent;
+}
+
+function getTaskFeedRowVisiblePerfEventId(row: TaskFeedRow): string | null {
+  return row.visiblePerfEventId ?? null;
+}
+
+const LIVE_TRANSCRIPT_TRANSIENT_RAW_EVENT_TYPES = new Set([
+  "llm_output_budget",
+  "llm_output_budget_escalation",
+  "llm_streaming",
+]);
+
+const LIVE_TRANSCRIPT_URGENT_EFFECTIVE_EVENT_TYPES = new Set([
+  "approval_requested",
+  "error",
+  "input_request_created",
+  "step_failed",
+  "task_cancelled",
+  "task_completed",
+  "verification_failed",
+  "verification_pending_user_action",
+]);
+
+export function getDefaultTranscriptMode(args: {
+  isTaskWorking: boolean;
+  isReplayMode: boolean;
+  verboseSteps: boolean;
+  isChatTask: boolean;
+}): TranscriptMode {
+  return args.isTaskWorking && !args.isReplayMode && !args.verboseSteps && !args.isChatTask
+    ? "live"
+    : "inspect";
+}
+
+function isUserFacingProgressMessage(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  if (/^thinking(?:\.\.\.)?$/i.test(trimmed)) return false;
+  if (/^executing$/i.test(trimmed)) return false;
+  if (/^progress_update$/i.test(trimmed)) return false;
+  return true;
+}
+
+function isTransientLiveTranscriptRow(row: TaskFeedRow): boolean {
+  const event = getTaskFeedRowEvent(row);
+  if (!event) return false;
+  if (LIVE_TRANSCRIPT_TRANSIENT_RAW_EVENT_TYPES.has(event.type)) return true;
+
+  const effectiveType = getEffectiveTaskEventType(event);
+  if (effectiveType === "executing" || effectiveType === "llm_streaming") {
+    return true;
+  }
+  if (effectiveType !== "progress_update") return false;
+
+  const payloadMessage =
+    typeof event.payload?.message === "string" ? event.payload.message : "";
+  return !isUserFacingProgressMessage(payloadMessage);
+}
+
+function isUrgentLiveTranscriptRow(row: TaskFeedRow): boolean {
+  const effectiveType = getTaskFeedRowEventType(row);
+  return effectiveType ? LIVE_TRANSCRIPT_URGENT_EFFECTIVE_EVENT_TYPES.has(effectiveType) : false;
+}
+
+function isMeaningfulLiveTranscriptRow(row: TaskFeedRow): boolean {
+  if (row.kind === "leading-command-outputs") return false;
+  if (row.kind !== "timeline") return true;
+  if (row.item.kind !== "event") return true;
+  return !isTransientLiveTranscriptRow(row);
+}
+
+function isUserFacingLiveStatusRow(row: TaskFeedRow): boolean {
+  const event = getTaskFeedRowEvent(row);
+  if (!event || isTransientLiveTranscriptRow(row)) return false;
+
+  const effectiveType = getEffectiveTaskEventType(event);
+  if (effectiveType === "step_started") return true;
+  if (effectiveType !== "progress_update") return false;
+
+  const payloadMessage =
+    typeof event.payload?.message === "string" ? event.payload.message : "";
+  return isUserFacingProgressMessage(payloadMessage);
+}
+
+export function selectVisibleTaskFeedRows(
+  feedRows: TaskFeedRow[],
+  transcriptMode: TranscriptMode,
+): { visibleFeedRows: TaskFeedRow[]; hiddenLiveFeedRowCount: number } {
+  if (transcriptMode !== "live" || feedRows.length <= 8) {
+    return { visibleFeedRows: feedRows, hiddenLiveFeedRowCount: 0 };
+  }
+
+  const keepIndexes = new Set<number>();
+  const keepLastMatch = (predicate: (row: TaskFeedRow) => boolean) => {
+    for (let index = feedRows.length - 1; index >= 0; index -= 1) {
+      if (predicate(feedRows[index])) {
+        keepIndexes.add(index);
+        return;
+      }
+    }
+  };
+
+  let meaningfulRowsKept = 0;
+  for (let index = feedRows.length - 1; index >= 0 && meaningfulRowsKept < 4; index -= 1) {
+    const row = feedRows[index];
+    if (!isMeaningfulLiveTranscriptRow(row)) continue;
+    keepIndexes.add(index);
+    meaningfulRowsKept += 1;
+  }
+
+  keepLastMatch((row) => row.kind === "timeline" && row.item.kind === "action_block");
+  keepLastMatch((row) => getTaskFeedRowEventType(row) === "assistant_message");
+  keepLastMatch((row) => getTaskFeedRowEventType(row) === "user_message");
+  keepLastMatch((row) => row.kind === "timeline" && row.item.kind === "dispatched-agents");
+  keepLastMatch((row) => row.kind === "timeline" && row.item.kind === "cli-agent-frame");
+  keepLastMatch((row) => row.kind === "timeline" && row.item.kind === "canvas");
+  keepLastMatch((row) => isUserFacingLiveStatusRow(row));
+  keepLastMatch((row) => isUrgentLiveTranscriptRow(row));
+
+  const visibleFeedRows = feedRows.filter((_, index) => keepIndexes.has(index));
+  return {
+    visibleFeedRows,
+    hiddenLiveFeedRowCount: Math.max(0, feedRows.length - visibleFeedRows.length),
+  };
+}
+
+export function hasInactiveStringSetEntries(
+  selectedIds: ReadonlySet<string>,
+  activeIds: ReadonlySet<string>,
+): boolean {
+  for (const id of selectedIds) {
+    if (!activeIds.has(id)) return true;
+  }
+  return false;
+}
+
+export function pruneStringSetToActiveIds(
+  selectedIds: ReadonlySet<string>,
+  activeIds: ReadonlySet<string>,
+): Set<string> {
+  const next = new Set<string>();
+  for (const id of selectedIds) {
+    if (activeIds.has(id)) next.add(id);
+  }
+  return next;
+}
+
+function getCommandOutputSessionsRevision(sessions: CommandOutputSession[] | undefined): string {
+  if (!sessions || sessions.length === 0) return "none";
+  return sessions
+    .map(
+      (session) =>
+        `${session.id}:${session.isRunning ? 1 : 0}:${session.exitCode ?? "null"}:${session.output.length}`,
+    )
+    .join("|");
+}
+
+export function collectInlineRunCommandSessionIds(args: {
+  events: TaskEvent[];
+  eventIndices: number[];
+  commandOutputSessionsByInsertIndex: Map<number, CommandOutputSession[]>;
+  isEventExpanded: (event: TaskEvent) => boolean;
+}): Set<string> {
+  const inlineRunCommandSessionIds = new Set<string>();
+  for (let idx = 0; idx < args.events.length; idx++) {
+    const event = args.events[idx];
+    const eventIndex = args.eventIndices[idx];
+    if (
+      getEffectiveTaskEventType(event) === "tool_call" &&
+      event.payload?.tool === "run_command" &&
+      args.isEventExpanded(event)
+    ) {
+      for (const session of args.commandOutputSessionsByInsertIndex.get(eventIndex) ?? []) {
+        inlineRunCommandSessionIds.add(session.id);
+      }
+    }
+  }
+  return inlineRunCommandSessionIds;
+}
+
+export function estimateTaskFeedRowHeight(
+  item: any,
+  options?: {
+    expanded?: boolean;
+    visibleEventCount?: number;
+    hasVisibilityToggle?: boolean;
+  },
+): number {
+  if (item.kind === "canvas") return 320;
+  if (item.kind === "cli-agent-frame") return 240;
+  if (item.kind === "dispatched-agents") return 220;
+  if (item.kind === "action_block") {
+    const expanded = options?.expanded === true;
+    const visibleEventCount = Math.max(0, options?.visibleEventCount ?? 0);
+    const hasVisibilityToggle = options?.hasVisibilityToggle === true;
+
+    // Virtualized history views should estimate against the collapsed/windowed
+    // action block that is actually rendered, not the raw hidden event count.
+    if (!expanded) return 56;
+
+    const headerHeight = 44;
+    const controlsHeight = hasVisibilityToggle ? 32 : 0;
+    const eventsHeight = visibleEventCount * 56;
+    const paddingHeight = visibleEventCount > 0 ? 20 : 8;
+    return Math.min(520, headerHeight + controlsHeight + eventsHeight + paddingHeight);
+  }
+
+  const event = item.event as TaskEvent;
+  const effectiveType = getEffectiveTaskEventType(event);
+  if (effectiveType === "assistant_message" || effectiveType === "user_message") {
+    const messageLength =
+      typeof event.payload?.message === "string" ? event.payload.message.length : 0;
+    return Math.min(420, 120 + Math.ceil(messageLength / 180) * 44);
+  }
+
+  return 120;
+}
+
+function assignTimelineRef(
+  ref: React.RefObject<HTMLDivElement | null> | undefined,
+  node: HTMLDivElement | null,
+) {
+  if (!ref) return;
+  (ref as React.MutableRefObject<HTMLDivElement | null>).current = node;
+}
+
+export function getAutoScrollTargetTop(scrollHeight: number, clientHeight: number): number {
+  return Math.max(0, scrollHeight - clientHeight);
+}
+
+export function shouldScheduleAutoScrollWrite(args: {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  lastTargetTop: number | null;
+}): boolean {
+  const targetTop = getAutoScrollTargetTop(args.scrollHeight, args.clientHeight);
+  const alreadyAtTarget = Math.abs(args.scrollTop - targetTop) < 2;
+  return !(alreadyAtTarget && args.lastTargetTop !== null && Math.abs(args.lastTargetTop - targetTop) < 2);
+}
+
+function VirtualizedTaskFeedRow({
+  itemKey,
+  offsetTop,
+  estimatedHeight,
+  onHeightChange,
+  visiblePerfEventId,
+  visibilityEnabled,
+  children,
+}: {
+  itemKey: string;
+  offsetTop: number;
+  estimatedHeight: number;
+  onHeightChange: (itemKey: string, height: number) => void;
+  visiblePerfEventId: string | null;
+  visibilityEnabled: boolean;
+  children: React.ReactNode;
+}) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  const visibleNotifiedEventIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const element = rowRef.current;
+    if (!element) return;
+
+    let frame = 0;
+    const measure = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const nextHeight = Math.ceil(element.getBoundingClientRect().height);
+        if (nextHeight > 0) {
+          onHeightChange(itemKey, nextHeight);
+          if (
+            visibilityEnabled &&
+            visiblePerfEventId &&
+            visibleNotifiedEventIdRef.current !== visiblePerfEventId
+          ) {
+            visibleNotifiedEventIdRef.current = visiblePerfEventId;
+            markTaskEventVisible({ id: visiblePerfEventId }, "measured-row", visibilityEnabled);
+          }
+        }
+      });
+    };
+
+    measure();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => measure());
+      observer.observe(element);
+      return () => {
+        if (frame) cancelAnimationFrame(frame);
+        observer.disconnect();
+      };
+    }
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [itemKey, onHeightChange, visibilityEnabled, visiblePerfEventId]);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: offsetTop,
+        left: 0,
+        right: 0,
+        minHeight: estimatedHeight,
+      }}
+    >
+      <div ref={rowRef}>{children}</div>
+    </div>
+  );
+}
+
+function MeasuredTaskFeedRow({
+  visiblePerfEventId,
+  enabled,
+  children,
+}: {
+  visiblePerfEventId: string | null;
+  enabled: boolean;
+  children: React.ReactNode;
+}) {
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const visibleNotifiedEventIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const element = rowRef.current;
+    if (!element) return;
+
+    let frame = 0;
+    const measure = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const nextHeight = Math.ceil(element.getBoundingClientRect().height);
+        if (
+          nextHeight > 0 &&
+          enabled &&
+          visiblePerfEventId &&
+          visibleNotifiedEventIdRef.current !== visiblePerfEventId
+        ) {
+          visibleNotifiedEventIdRef.current = visiblePerfEventId;
+          markTaskEventVisible({ id: visiblePerfEventId }, "measured-row", enabled);
+        }
+      });
+    };
+
+    measure();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => measure());
+      observer.observe(element);
+      return () => {
+        if (frame) cancelAnimationFrame(frame);
+        observer.disconnect();
+      };
+    }
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [enabled, visiblePerfEventId]);
+
+  return (
+    <div ref={rowRef}>
+      {children}
+    </div>
+  );
+}
+
+function getTaskFeedRowsSignature(rows: TaskFeedRow[]): string {
+  return rows.map((row) => `${row.key}:${row.revision}`).join("|");
+}
+
+const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows({
+  taskId,
+  rendererPerfLoggingEnabled,
+  visibleFeedRows,
+  isReplayMode,
+  transcriptMode,
+  hiddenLiveFeedRowCount,
+  canReturnToLiveView,
+  onShowFullTimeline,
+  onBackToLiveView,
+  mainBodyRef,
+  timelineRef,
+  getRenderedFeedRow,
+}: {
+  taskId: string | undefined;
+  rendererPerfLoggingEnabled: boolean;
+  visibleFeedRows: TaskFeedRow[];
+  isReplayMode: boolean;
+  transcriptMode: TranscriptMode;
+  hiddenLiveFeedRowCount: number;
+  canReturnToLiveView: boolean;
+  onShowFullTimeline: () => void;
+  onBackToLiveView: () => void;
+  mainBodyRef: React.RefObject<HTMLDivElement | null>;
+  timelineRef: React.RefObject<HTMLDivElement | null>;
+  getRenderedFeedRow: (row: TaskFeedRow) => React.ReactNode;
+}) {
+  recordRendererRender(
+    "MainContent.taskConversationFlow",
+    taskId ? `task:${taskId}` : "task:none",
+    rendererPerfLoggingEnabled,
+  );
+
+  const useVirtualizedFeed =
+    transcriptMode === "live" &&
+    visibleFeedRows.length >= VIRTUALIZED_FEED_ROW_THRESHOLD &&
+    !isReplayMode;
+  const [feedRowHeights, setFeedRowHeights] = useState<Map<string, number>>(() => new Map());
+  const feedRowHeightsRef = useRef<Map<string, number>>(new Map());
+  const pendingFeedRowHeightsRef = useRef<Map<string, number>>(new Map());
+  const feedRowHeightFlushFrameRef = useRef<number | null>(null);
+  const [conversationFlowOffsetTop, setConversationFlowOffsetTop] = useState(0);
+  const conversationFlowRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    feedRowHeightsRef.current = feedRowHeights;
+  }, [feedRowHeights]);
+
+  useEffect(() => {
+    const activeKeys = new Set(visibleFeedRows.map((row) => row.key));
+    setFeedRowHeights((prev) => {
+      let changed = false;
+      const next = new Map<string, number>();
+      for (const [key, value] of prev.entries()) {
+        if (activeKeys.has(key)) {
+          next.set(key, value);
+        } else {
+          changed = true;
+        }
+      }
+      if (changed) {
+        feedRowHeightsRef.current = next;
+      }
+      return changed ? next : prev;
+    });
+  }, [visibleFeedRows]);
+
+  useEffect(() => {
+    if (!rendererPerfLoggingEnabled) return;
+    for (const row of visibleFeedRows) {
+      const visiblePerfEventId = getTaskFeedRowVisiblePerfEventId(row);
+      if (!visiblePerfEventId) continue;
+      markTaskEventRenderable({ id: visiblePerfEventId }, rendererPerfLoggingEnabled);
+    }
+  }, [rendererPerfLoggingEnabled, visibleFeedRows]);
+
+  const flushFeedRowHeights = useCallback(() => {
+    feedRowHeightFlushFrameRef.current = null;
+    setFeedRowHeights((prev) => {
+      if (pendingFeedRowHeightsRef.current.size === 0) return prev;
+
+      let changed = false;
+      const next = new Map(prev);
+      for (const [itemKey, nextHeight] of pendingFeedRowHeightsRef.current.entries()) {
+        const currentHeight = next.get(itemKey);
+        if (currentHeight !== undefined && Math.abs(currentHeight - nextHeight) < 2) {
+          continue;
+        }
+        next.set(itemKey, nextHeight);
+        changed = true;
+      }
+      pendingFeedRowHeightsRef.current.clear();
+      if (changed) {
+        feedRowHeightsRef.current = next;
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
+  const handleFeedRowHeightChange = useCallback(
+    (itemKey: string, height: number) => {
+      const pendingHeight = pendingFeedRowHeightsRef.current.get(itemKey);
+      const currentHeight = pendingHeight ?? feedRowHeightsRef.current.get(itemKey);
+      if (currentHeight !== undefined && Math.abs(currentHeight - height) < 2) {
+        return;
+      }
+      pendingFeedRowHeightsRef.current.set(itemKey, height);
+      if (feedRowHeightFlushFrameRef.current !== null) return;
+      feedRowHeightFlushFrameRef.current = window.requestAnimationFrame(flushFeedRowHeights);
+    },
+    [flushFeedRowHeights],
+  );
+
+  useEffect(
+    () => () => {
+      if (feedRowHeightFlushFrameRef.current !== null) {
+        cancelAnimationFrame(feedRowHeightFlushFrameRef.current);
+        feedRowHeightFlushFrameRef.current = null;
+      }
+    },
+    [],
+  );
+
+  const setConversationFlowNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      conversationFlowRef.current = node;
+      assignTimelineRef(timelineRef, node);
+    },
+    [timelineRef],
+  );
+
+  useEffect(() => {
+    if (!useVirtualizedFeed) {
+      setConversationFlowOffsetTop(0);
+      return;
+    }
+
+    const flow = conversationFlowRef.current;
+    if (!flow) return;
+
+    let frame = requestAnimationFrame(() => {
+      const nextOffset = Math.max(0, flow.offsetTop);
+      setConversationFlowOffsetTop((prev) =>
+        Math.abs(prev - nextOffset) < 1 ? prev : nextOffset,
+      );
+    });
+
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  }, [useVirtualizedFeed, visibleFeedRows.length]);
+
+  const { virtualItems: virtualFeedRows, totalHeight: virtualFeedTotalHeight } = useVirtualList({
+    items: visibleFeedRows,
+    containerRef: mainBodyRef as React.RefObject<HTMLElement | null>,
+    getItemHeight: (row) => feedRowHeights.get(row.key) ?? row.estimatedHeight,
+    estimatedItemHeight: 160,
+    overscan: 4,
+    enabled: useVirtualizedFeed,
+    scrollOffsetTop: conversationFlowOffsetTop,
+  });
+  const renderedFeedRows = useMemo(
+    () => (useVirtualizedFeed ? virtualFeedRows.map((row) => row.item) : visibleFeedRows),
+    [useVirtualizedFeed, virtualFeedRows, visibleFeedRows],
+  );
+
+  return (
+    <div className="conversation-flow" ref={setConversationFlowNode}>
+      {transcriptMode === "live" && hiddenLiveFeedRowCount > 0 && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "10px 12px",
+            border: "1px solid var(--border-color, rgba(255,255,255,0.12))",
+            borderRadius: 10,
+            background: "var(--surface-secondary, rgba(255,255,255,0.04))",
+            color: "var(--text-secondary, rgba(255,255,255,0.72))",
+            fontSize: 12,
+            lineHeight: 1.45,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <span>
+              Showing the current live work. {hiddenLiveFeedRowCount} earlier
+              {hiddenLiveFeedRowCount === 1 ? " item is" : " items are"} hidden while the task is running.
+            </span>
+            <button type="button" className="action-block-show-all-btn" onClick={onShowFullTimeline}>
+              Show full timeline
+            </button>
+          </div>
+        </div>
+      )}
+      {transcriptMode === "inspect" && canReturnToLiveView && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "10px 12px",
+            border: "1px solid var(--border-color, rgba(255,255,255,0.12))",
+            borderRadius: 10,
+            background: "var(--surface-secondary, rgba(255,255,255,0.04))",
+            color: "var(--text-secondary, rgba(255,255,255,0.72))",
+            fontSize: 12,
+            lineHeight: 1.45,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <span>Inspecting the full transcript.</span>
+          <button type="button" className="action-block-show-all-btn" onClick={onBackToLiveView}>
+            Back to live view
+          </button>
+        </div>
+      )}
+      {!useVirtualizedFeed ? (
+        renderedFeedRows.map((row) => (
+          <MeasuredTaskFeedRow
+            key={row.key}
+            visiblePerfEventId={getTaskFeedRowVisiblePerfEventId(row)}
+            enabled={Boolean(rendererPerfLoggingEnabled)}
+          >
+            {getRenderedFeedRow(row)}
+          </MeasuredTaskFeedRow>
+        ))
+      ) : (
+        <div style={{ height: virtualFeedTotalHeight, position: "relative" }}>
+          {virtualFeedRows.map((virtualRow) => (
+            <VirtualizedTaskFeedRow
+              key={virtualRow.item.key}
+              itemKey={virtualRow.item.key}
+              offsetTop={virtualRow.offsetTop}
+              estimatedHeight={virtualRow.height}
+              onHeightChange={handleFeedRowHeightChange}
+              visiblePerfEventId={getTaskFeedRowVisiblePerfEventId(virtualRow.item)}
+              visibilityEnabled={Boolean(rendererPerfLoggingEnabled)}
+            >
+              {getRenderedFeedRow(virtualRow.item)}
+            </VirtualizedTaskFeedRow>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}, (prev, next) =>
+  prev.taskId === next.taskId &&
+  prev.rendererPerfLoggingEnabled === next.rendererPerfLoggingEnabled &&
+  prev.isReplayMode === next.isReplayMode &&
+  prev.transcriptMode === next.transcriptMode &&
+  prev.hiddenLiveFeedRowCount === next.hiddenLiveFeedRowCount &&
+  prev.canReturnToLiveView === next.canReturnToLiveView &&
+  prev.onShowFullTimeline === next.onShowFullTimeline &&
+  prev.onBackToLiveView === next.onBackToLiveView &&
+  prev.mainBodyRef === next.mainBodyRef &&
+  prev.timelineRef === next.timelineRef &&
+  prev.getRenderedFeedRow === next.getRenderedFeedRow &&
+  getTaskFeedRowsSignature(prev.visibleFeedRows) ===
+    getTaskFeedRowsSignature(next.visibleFeedRows)
+);
 
 const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
+  const rendererPerfLoggingEnabled = props.rendererPerfLoggingEnabled as boolean | undefined;
   const agentContext = props.agentContext as AgentContext;
   const childEvents = props.childEvents as TaskEvent[];
   const childTasks = props.childTasks as Task[];
   const collaborativeRun = props.collaborativeRun as AgentTeamRun | null;
-  const codePreviewsExpanded = props.codePreviewsExpanded as boolean;
   const commandOutputSessionsByInsertIndex = props.commandOutputSessionsByInsertIndex as Map<
     number,
     CommandOutputSession[]
@@ -2903,12 +3637,12 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   const initialPromptEventId = props.initialPromptEventId as string | null;
   const markdownComponents = props.markdownComponents as any;
   const messageFeedbackMap = props.messageFeedbackMap as Map<string, string>;
+  const mainBodyRef = props.mainBodyRef as React.RefObject<HTMLDivElement | null>;
   const onOpenBrowserView = props.onOpenBrowserView as ((url?: string) => void) | undefined;
   const onQuoteAssistantMessage = props.onQuoteAssistantMessage as
     | ((quote: QuotedAssistantMessage) => void)
     | undefined;
   const onSelectChildTask = props.onSelectChildTask as ((taskId: string) => void) | undefined;
-  const onSelectTask = props.onSelectTask as ((taskId: string) => void) | undefined;
   const onViewTaskOutputs = props.onViewTaskOutputs as
     | ((taskId: string, primaryOutputPath?: string) => void)
     | undefined;
@@ -2931,7 +3665,6 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   const setStepFeedbackText = props.setStepFeedbackText as React.Dispatch<
     React.SetStateAction<string>
   >;
-  const setToggledEvents = props.setToggledEvents as React.Dispatch<React.SetStateAction<Set<string>>>;
   const setViewerFilePath = props.setViewerFilePath as React.Dispatch<React.SetStateAction<string | null>>;
   const formatTime = props.formatTime as (timestamp: number) => string;
   const shouldRenderTimelineEventInStepFeed = props.shouldRenderTimelineEventInStepFeed as (
@@ -2942,7 +3675,6 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   const hasEventDetails = props.hasEventDetails as (event: TaskEvent) => boolean;
   const isEventExpanded = props.isEventExpanded as (event: TaskEvent) => boolean;
   const showAllActionBlocks = props.showAllActionBlocks as Set<string>;
-  const showSteps = props.showSteps as boolean;
   const stepFeedbackOpen = props.stepFeedbackOpen as boolean;
   const stepFeedbackSending = props.stepFeedbackSending as boolean;
   const stepFeedbackText = props.stepFeedbackText as string;
@@ -2956,6 +3688,12 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   const voiceEnabled = props.voiceEnabled as boolean;
   const wrappingUp = props.wrappingUp as boolean;
   const workspace = props.workspace as Workspace | null;
+
+  recordRendererRender(
+    "MainContent.taskConversationShell",
+    task?.id ? `task:${task.id}` : "task:none",
+    rendererPerfLoggingEnabled,
+  );
 
   const stepFeedTimelineIndexPosition = new Map<number, number>();
   let stepFeedEventCount = 0;
@@ -2984,19 +3722,319 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
     stepFeedEventCount += 1;
   });
 
+  const leadingCommandOutputSessions = commandOutputSessionsByInsertIndex.get(-1) ?? [];
+  const getActionBlockRenderState = useCallback(
+    (blockEvents: TaskEvent[], blockEventIndices: number[], blockId: string) => {
+      const isBlockShowAll = showAllActionBlocks.has(blockId);
+      const renderableRawIndices: number[] = [];
+      for (let ri = 0; ri < blockEvents.length; ri += 1) {
+        const event = blockEvents[ri] as TaskEvent;
+        if (
+          suppressedParallelEventIds.has(event.id) &&
+          !parallelGroupsByAnchorEventId.has(event.id)
+        ) {
+          continue;
+        }
+        if (
+          !parallelGroupsByAnchorEventId.has(event.id) &&
+          !shouldRenderTimelineEventInStepFeed(event)
+        ) {
+          continue;
+        }
+        renderableRawIndices.push(ri);
+      }
+
+      const renderableCount = renderableRawIndices.length;
+      const visibleRenderableRawIndices =
+        !isBlockShowAll && renderableCount > STEP_WINDOW_SIZE
+          ? renderableRawIndices.slice(-STEP_WINDOW_SIZE)
+          : renderableRawIndices;
+      const renderableEvents = renderableRawIndices.map((ri) => blockEvents[ri] as TaskEvent);
+      const visibleBlockEvents = visibleRenderableRawIndices.map((ri) => blockEvents[ri] as TaskEvent);
+      const visibleBlockEventIndices = visibleRenderableRawIndices.map((ri) => blockEventIndices[ri] as number);
+      const commandOutputsForBlock = blockEventIndices.flatMap(
+        (eventIndex: number) => commandOutputSessionsByInsertIndex.get(eventIndex) ?? [],
+      );
+
+      return {
+        renderableCount,
+        renderableEvents,
+        visibleBlockEvents,
+        visibleBlockEventIndices,
+        hiddenBlockEventCount: Math.max(0, renderableCount - visibleRenderableRawIndices.length),
+        hasBlockCommandOutputs: commandOutputsForBlock.length > 0,
+        commandOutputsForBlock,
+      };
+    },
+    [
+      commandOutputSessionsByInsertIndex,
+      parallelGroupsByAnchorEventId,
+      shouldRenderTimelineEventInStepFeed,
+      showAllActionBlocks,
+      suppressedParallelEventIds,
+    ],
+  );
+  const feedRows = useMemo<TaskFeedRow[]>(() => {
+    const rows: TaskFeedRow[] = [];
+    let lastActionBlockTimelineIndex = -1;
+    for (let i = timelineItems.length - 1; i >= 0; i -= 1) {
+      if (timelineItems[i].kind === "action_block") {
+        lastActionBlockTimelineIndex = i;
+        break;
+      }
+    }
+
+    if (leadingCommandOutputSessions.length > 0) {
+      rows.push({
+        kind: "leading-command-outputs",
+        key: "command-outputs:-1",
+        estimatedHeight: 180,
+        sessions: leadingCommandOutputSessions,
+        revision: getCommandOutputSessionsRevision(leadingCommandOutputSessions),
+        visiblePerfEventId: null,
+      });
+    }
+
+    timelineItems.forEach((item, timelineIndex) => {
+      let visiblePerfEventId: string | null = null;
+      const key =
+        item.kind === "canvas"
+          ? `canvas:${item.session.id}`
+          : item.kind === "cli-agent-frame"
+            ? `cli-agent:${item.childTask.id}`
+            : item.kind === "dispatched-agents"
+              ? "dispatched-agents"
+              : item.kind === "action_block"
+                ? `action-block:${item.blockId}`
+                : `event:${item.event.id}`;
+      if (item.kind === "event") {
+        visiblePerfEventId = item.event.id;
+      } else if (item.kind === "action_block") {
+        const actionBlockState = getActionBlockRenderState(
+          item.events as TaskEvent[],
+          item.eventIndices,
+          item.blockId,
+        );
+        if (actionBlockState.renderableCount === 0 && !actionBlockState.hasBlockCommandOutputs) {
+          return;
+        }
+        const visibleBlockEvents = actionBlockState.visibleBlockEvents;
+        visiblePerfEventId = visibleBlockEvents[visibleBlockEvents.length - 1]?.id ?? null;
+      }
+      const revision =
+        item.kind === "canvas"
+          ? `${item.session.id}:${item.forceSnapshot ? 1 : 0}`
+          : item.kind === "cli-agent-frame"
+            ? `${item.childTask.id}:${item.childTask.status}:${item.childTaskEvents.length}:${
+                item.childTaskEvents[item.childTaskEvents.length - 1]?.id ?? "none"
+              }`
+            : item.kind === "dispatched-agents"
+              ? `${childTasks
+                  .map((childTask) => `${childTask.id}:${childTask.status}`)
+                  .join(",")}:${childEvents.length}:${collaborativeRun?.id ?? "none"}`
+              : item.kind === "action_block"
+                ? `${item.blockId}:${item.events.length}:${
+                    item.events[item.events.length - 1]?.id ?? "none"
+                  }:${item.eventIndices
+                    .map((eventIndex: number) =>
+                      getCommandOutputSessionsRevision(
+                        commandOutputSessionsByInsertIndex.get(eventIndex),
+                      ),
+                    )
+                    .join("||")}`
+                : `${item.event.id}:${getEffectiveTaskEventType(item.event)}:${
+                    toolCallPairing.completions.get(item.event.id)?.id ?? "none"
+                  }:${getCommandOutputSessionsRevision(
+                    commandOutputSessionsByInsertIndex.get(item.eventIndex),
+                  )}`;
+
+      rows.push({
+        kind: "timeline",
+        key,
+        estimatedHeight:
+          item.kind === "action_block"
+            ? (() => {
+                const actionBlockState = getActionBlockRenderState(
+                  item.events as TaskEvent[],
+                  item.eventIndices,
+                  item.blockId,
+                );
+                if (actionBlockState.renderableCount === 0) {
+                  return actionBlockState.hasBlockCommandOutputs ? 180 : 0;
+                }
+                const isLatestActionBlock = timelineIndex === lastActionBlockTimelineIndex;
+                const isActive = isLatestActionBlock && (isTaskWorking || isReplayMode);
+                const expanded = resolveDisclosureExpanded({
+                  forceExpanded: isActive,
+                  defaultExpanded: isLatestActionBlock,
+                  toggled: expandedActionBlocks.has(item.blockId),
+                });
+                const visibleEventCount = expanded
+                  ? actionBlockState.visibleBlockEvents.length
+                  : 0;
+                return estimateTaskFeedRowHeight(item, {
+                  expanded,
+                  visibleEventCount,
+                  hasVisibilityToggle:
+                    expanded &&
+                    (actionBlockState.hiddenBlockEventCount > 0 ||
+                      showAllActionBlocks.has(item.blockId)),
+                });
+              })()
+            : estimateTaskFeedRowHeight(item),
+        timelineIndex,
+        item,
+        revision,
+        visiblePerfEventId,
+      });
+    });
+
+    return rows;
+  }, [
+    childEvents,
+    childTasks,
+    collaborativeRun?.id,
+    commandOutputSessionsByInsertIndex,
+    leadingCommandOutputSessions,
+    timelineItems,
+    showAllActionBlocks,
+    expandedActionBlocks,
+    shouldRenderTimelineEventInStepFeed,
+    suppressedParallelEventIds,
+    parallelGroupsByAnchorEventId,
+    toolCallPairing.completions,
+    isTaskWorking,
+    isReplayMode,
+    getActionBlockRenderState,
+  ]);
+  const defaultTranscriptMode = getDefaultTranscriptMode({
+    isTaskWorking,
+    isReplayMode,
+    verboseSteps,
+    isChatTask,
+  });
+  const [transcriptModeOverride, setTranscriptModeOverride] = useState<TranscriptMode | null>(null);
+  const transcriptMode = transcriptModeOverride ?? defaultTranscriptMode;
+  useEffect(() => {
+    setTranscriptModeOverride(null);
+  }, [task?.id]);
+  useEffect(() => {
+    if (defaultTranscriptMode === "inspect" && transcriptModeOverride === "live") {
+      setTranscriptModeOverride(null);
+    }
+  }, [defaultTranscriptMode, transcriptModeOverride]);
+  const showFullTimeline = useCallback(() => {
+    setTranscriptModeOverride("inspect");
+  }, []);
+  const returnToLiveTranscript = useCallback(() => {
+    setTranscriptModeOverride("live");
+  }, []);
+  const { visibleFeedRows, hiddenLiveFeedRowCount } = useMemo(
+    () => selectVisibleTaskFeedRows(feedRows, transcriptMode),
+    [feedRows, transcriptMode],
+  );
+  const feedRowRenderCacheRef = useRef<Map<string, { signature: string; node: React.ReactNode }>>(
+    new Map(),
+  );
+
+  useEffect(() => {
+    const activeKeys = new Set(visibleFeedRows.map((row) => row.key));
+    for (const key of feedRowRenderCacheRef.current.keys()) {
+      if (!activeKeys.has(key)) {
+        feedRowRenderCacheRef.current.delete(key);
+      }
+    }
+  }, [visibleFeedRows]);
+  useEffect(() => {
+    const activeActionBlockIds = new Set(
+      timelineItems
+        .filter((item: Any) => item.kind === "action_block")
+        .map((item: Any) => item.blockId as string),
+    );
+    if (hasInactiveStringSetEntries(expandedActionBlocks, activeActionBlockIds)) {
+      setExpandedActionBlocks(pruneStringSetToActiveIds(expandedActionBlocks, activeActionBlockIds));
+    }
+    if (hasInactiveStringSetEntries(showAllActionBlocks, activeActionBlockIds)) {
+      setShowAllActionBlocks(pruneStringSetToActiveIds(showAllActionBlocks, activeActionBlockIds));
+    }
+  }, [timelineItems, expandedActionBlocks, showAllActionBlocks]);
+  const lastActionBlockTimelineIndex = useMemo(() => {
+    for (let i = timelineItems.length - 1; i >= 0; i -= 1) {
+      if (timelineItems[i].kind === "action_block") return i;
+    }
+    return -1;
+  }, [timelineItems]);
+
   const conversationFlow = useMemo(
     () => (
       <>
-          {/* Conversation Flow - renders all events in order; show when we have events OR collaborative run with child tasks */}
-          {(events.length > 0 || (collaborativeRun && childTasks.length > 0)) && (
-            <div className="conversation-flow" ref={timelineRef}>
-              {/* Render command outputs that started before any visible event */}
-              {renderCommandOutputs(commandOutputSessionsByInsertIndex.get(-1))}
-              {timelineItems.map((item, timelineIndex) => {
+        {/* Conversation Flow - renders all events in order; show when we have events OR collaborative run with child tasks */}
+        {(events.length > 0 || (collaborativeRun && childTasks.length > 0)) &&
+          (() => {
+                const getRowRenderSignature = (row: TaskFeedRow): string => {
+                  if (row.kind === "leading-command-outputs") {
+                    return row.revision;
+                  }
+
+                  const { item, timelineIndex } = row;
+                  if (item.kind === "canvas" || item.kind === "cli-agent-frame") {
+                    return row.revision;
+                  }
+                  if (item.kind === "dispatched-agents") {
+                    return `${row.revision}:${wrappingUp ? 1 : 0}`;
+                  }
+                  if (item.kind === "action_block") {
+                    const visibleEventState = item.events
+                      .map((event: TaskEvent) => {
+                        const toggled = toggledEvents.has(event.id) ? 1 : 0;
+                        const parallel = parallelGroupsByAnchorEventId.has(event.id) ? 1 : 0;
+                        const suppressed = suppressedParallelEventIds.has(event.id) ? 1 : 0;
+                        return `${event.id}:${toggled}:${parallel}:${suppressed}`;
+                      })
+                      .join("|");
+                    return [
+                      row.revision,
+                      expandedActionBlocks.has(item.blockId) ? 1 : 0,
+                      showAllActionBlocks.has(item.blockId) ? 1 : 0,
+                      timelineIndex === lastActionBlockTimelineIndex ? 1 : 0,
+                      isTaskWorking ? 1 : 0,
+                      isReplayMode ? 1 : 0,
+                      verboseSteps ? 1 : 0,
+                      visibleEventState,
+                    ].join(":");
+                  }
+
+                  const event = item.event as TaskEvent;
+                  const effectiveType = getEffectiveTaskEventType(event);
+                  return [
+                    row.revision,
+                    toggledEvents.has(event.id) ? 1 : 0,
+                    rejectMenuOpenFor === event.id ? 1 : 0,
+                    messageFeedbackMap.get(event.id) ?? "none",
+                    lastAssistantMessage?.id === event.id ? 1 : 0,
+                    stepFeedbackOpen ? 1 : 0,
+                    stepFeedbackSending ? 1 : 0,
+                    stepFeedbackText,
+                    currentStep?.description ?? "none",
+                    task.status,
+                    task.terminalStatus ?? "none",
+                    isTaskWorking ? 1 : 0,
+                    verboseSteps ? 1 : 0,
+                    effectiveType,
+                    parallelGroupsByAnchorEventId.has(event.id) ? 1 : 0,
+                    suppressedParallelEventIds.has(event.id) ? 1 : 0,
+                  ].join(":");
+                };
+
+                const renderFeedRow = (row: TaskFeedRow) => {
+                  if (row.kind === "leading-command-outputs") {
+                    return renderCommandOutputs(row.sessions);
+                  }
+
+                  const { item, timelineIndex } = row;
                 if (item.kind === "canvas") {
                   return (
                     <CanvasPreview
-                      key={item.session.id}
                       session={item.session}
                       onClose={() => handleCanvasClose(item.session.id)}
                       forceSnapshot={item.forceSnapshot}
@@ -3009,7 +4047,6 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                   const agentType = resolveCliAgentType(item.childTask, item.childTaskEvents) || "codex-cli";
                   return (
                     <CliAgentFrame
-                      key={`cli-frame-${item.childTask.id}`}
                       task={item.childTask}
                       events={item.childTaskEvents}
                       agentType={agentType}
@@ -3111,17 +4148,35 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                       </Fragment>
                     );
                   }
-                  const lastActionBlockIndex = (() => {
-                    for (let i = timelineItems.length - 1; i >= 0; i--) {
-                      if (timelineItems[i].kind === "action_block") return i;
-                    }
-                    return -1;
-                  })();
-                  const isLatestActionBlock = timelineIndex === lastActionBlockIndex;
+                  const isLatestActionBlock = timelineIndex === lastActionBlockTimelineIndex;
                   const isActive =
                     isLatestActionBlock && (isTaskWorking || isReplayMode);
-                  const { summary, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
-                    item.events,
+                  const actionBlockState = getActionBlockRenderState(
+                    item.events as TaskEvent[],
+                    item.eventIndices,
+                    item.blockId,
+                  );
+                  const {
+                    renderableCount,
+                    renderableEvents,
+                    visibleBlockEvents,
+                    visibleBlockEventIndices,
+                    hiddenBlockEventCount,
+                    hasBlockCommandOutputs,
+                    commandOutputsForBlock,
+                  } = actionBlockState;
+                  if (renderableCount === 0) {
+                    if (hasBlockCommandOutputs) {
+                      return (
+                        <Fragment key={item.blockId}>
+                          {renderCommandOutputs(commandOutputsForBlock)}
+                        </Fragment>
+                      );
+                    }
+                    return null;
+                  }
+                  const { summary, stepCount, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
+                    renderableEvents,
                     events,
                     { isActive },
                   );
@@ -3144,49 +4199,21 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                   const showConnectorBelow =
                     typeof indicatorPosition === "number" &&
                     indicatorPosition < stepFeedEventCount - 1;
-                  // Exclude sessions shown inline inside run_command tool call frames
-                  const inlineRunCommandSessionIds = new Set<string>();
-                  for (let idx = 0; idx < item.events.length; idx++) {
-                    const ev = item.events[idx];
-                    const evIndex = item.eventIndices[idx];
-                    if (
-                      getEffectiveTaskEventType(ev) === "tool_call" &&
-                      ev.payload?.tool === "run_command" &&
-                      isEventExpanded(ev)
-                    ) {
-                      for (const s of commandOutputSessionsByInsertIndex.get(evIndex) ?? []) {
-                        inlineRunCommandSessionIds.add(s.id);
-                      }
-                    }
-                  }
                   const isBlockShowAll = showAllActionBlocks.has(item.blockId);
-                  // Count only truly renderable events to avoid slicing on non-renderable raw events
-                  const renderableRawIndices: number[] = [];
-                  for (let ri = 0; ri < item.events.length; ri++) {
-                    const ev = item.events[ri];
-                    if (suppressedParallelEventIds.has(ev.id) && !parallelGroupsByAnchorEventId.has(ev.id)) continue;
-                    if (!parallelGroupsByAnchorEventId.has(ev.id) && !shouldRenderTimelineEventInStepFeed(ev)) continue;
-                    renderableRawIndices.push(ri);
-                  }
-                  const renderableCount = renderableRawIndices.length;
-                  const needsWindow = !isBlockShowAll && renderableCount > STEP_WINDOW_SIZE;
-                  const hiddenBlockEventCount = needsWindow ? renderableCount - STEP_WINDOW_SIZE : 0;
-                  let visibleBlockEvents: typeof item.events;
-                  let visibleBlockEventIndices: typeof item.eventIndices;
-                  if (needsWindow) {
-                    const firstVisibleRawIdx = renderableRawIndices[renderableCount - STEP_WINDOW_SIZE];
-                    visibleBlockEvents = item.events.slice(firstVisibleRawIdx);
-                    visibleBlockEventIndices = item.eventIndices.slice(firstVisibleRawIdx);
-                  } else {
-                    visibleBlockEvents = item.events;
-                    visibleBlockEventIndices = item.eventIndices;
-                  }
-                  const lastRenderableEvent = [...item.events].reverse().find((ev: TaskEvent) => {
-                    if (suppressedParallelEventIds.has(ev.id) && !parallelGroupsByAnchorEventId.has(ev.id)) return false;
-                    return parallelGroupsByAnchorEventId.has(ev.id) || shouldRenderTimelineEventInStepFeed(ev);
+                  // Exclude sessions shown inline inside currently visible expanded run_command frames.
+                  // Hidden rows must not suppress their command outputs, or terminals disappear from the windowed feed.
+                  const inlineRunCommandSessionIds = collectInlineRunCommandSessionIds({
+                    events: visibleBlockEvents,
+                    eventIndices: visibleBlockEventIndices,
+                    commandOutputSessionsByInsertIndex,
+                    isEventExpanded,
                   });
-                  const lastStepLabelRaw = lastRenderableEvent
-                    ? renderEventTitle(lastRenderableEvent, workspace?.path, setViewerFilePath, agentContext, { summaryMode: !verboseSteps })
+                  const lastVisibleBlockEvent = visibleBlockEvents[visibleBlockEvents.length - 1];
+                  const lastVisibleRenderEvent = lastVisibleBlockEvent
+                    ? toolCallPairing.completions.get(lastVisibleBlockEvent.id) ?? lastVisibleBlockEvent
+                    : undefined;
+                  const lastStepLabelRaw = lastVisibleRenderEvent
+                    ? renderEventTitle(lastVisibleRenderEvent, workspace?.path, setViewerFilePath, agentContext, { summaryMode: !verboseSteps })
                     : undefined;
                   const lastStepLabel = typeof lastStepLabelRaw === "string" ? lastStepLabelRaw : undefined;
                   return (
@@ -3194,6 +4221,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                       <ActionBlock
                         blockId={item.blockId}
                         summary={summary}
+                        stepCount={stepCount}
                         toolCallCount={toolCallCount}
                         durationMs={durationMs}
                         outputTokens={outputTokens}
@@ -3216,7 +4244,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                               })
                             }
                           >
-                            ↑ Show all ({item.events.length} steps)
+                            ↑ Show all ({renderableCount} steps)
                           </button>
                         )}
                         {isBlockShowAll && (
@@ -3234,149 +4262,206 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                             Show less
                           </button>
                         )}
-                        {visibleBlockEvents.map((event: TaskEvent, idx: number) => {
-                          const eventIndex = visibleBlockEventIndices[idx];
-                          const parallelGroup = parallelGroupsByAnchorEventId.get(event.id);
-                          if (suppressedParallelEventIds.has(event.id) && !parallelGroup) return null;
-                          if (!parallelGroup && !shouldRenderTimelineEventInStepFeed(event)) {
-                            return null;
-                          }
-                          const isLastChild = idx === visibleBlockEvents.length - 1;
-                          const showChildConnectorAbove = true;
-                          const showChildConnectorBelow = !isLastChild || showConnectorBelow;
+                        {(() => {
+                          const nestedParallelEventIds = new Set<string>();
+                          return visibleBlockEvents.map((event: TaskEvent, idx: number) => {
+                            if (nestedParallelEventIds.has(event.id)) return null;
 
-                          const perEventCmdSessions = (commandOutputSessionsByInsertIndex.get(eventIndex) ?? [])
-                            .filter((s: CommandOutputSession) => !inlineRunCommandSessionIds.has(s.id));
+                            const eventIndex = visibleBlockEventIndices[idx];
+                            const parallelGroup = parallelGroupsByAnchorEventId.get(event.id);
+                            if (suppressedParallelEventIds.has(event.id) && !parallelGroup) return null;
+                            if (!parallelGroup && !shouldRenderTimelineEventInStepFeed(event)) {
+                              return null;
+                            }
+                            const isLastChild = idx === visibleBlockEvents.length - 1;
+                            const showChildConnectorAbove = true;
+                            const showChildConnectorBelow = !isLastChild || showConnectorBelow;
 
-                          if (parallelGroup) {
-                            const shouldDefaultExpandGroup =
-                              isLatestActionBlock && idx === visibleBlockEvents.length - 1;
+                            const perEventCmdSessions = (
+                              commandOutputSessionsByInsertIndex.get(eventIndex) ?? []
+                            ).filter((s: CommandOutputSession) => !inlineRunCommandSessionIds.has(s.id));
+
+                            if (parallelGroup) {
+                              const shouldDefaultExpandGroup =
+                                isLatestActionBlock && idx === visibleBlockEvents.length - 1;
+                              return (
+                                <Fragment key={event.id || `event-${eventIndex}`}>
+                                  <ParallelGroupFeed
+                                    group={parallelGroup}
+                                    timeLabel={formatTime(parallelGroup.startedAt)}
+                                    formatTime={formatTime}
+                                    showConnectorAbove={showChildConnectorAbove}
+                                    showConnectorBelow={showChildConnectorBelow}
+                                    defaultExpanded={isActive || shouldDefaultExpandGroup}
+                                  />
+                                  {renderCommandOutputs(perEventCmdSessions)}
+                                </Fragment>
+                              );
+                            }
+
+                            const nestedParallelChildren: Array<{
+                              event: TaskEvent;
+                              eventIndex: number;
+                              group: Any;
+                            }> = [];
+                            const parentStepId =
+                              canStepEventOwnParallelChildren(event) ? getTimelineEventStepId(event) : null;
+                            if (parentStepId) {
+                              for (let childIdx = idx + 1; childIdx < visibleBlockEvents.length; childIdx += 1) {
+                                const childEvent = visibleBlockEvents[childIdx] as TaskEvent;
+                                const childParallelGroup = parallelGroupsByAnchorEventId.get(childEvent.id);
+                                if (!childParallelGroup) break;
+                                const ownerStepId = getParallelGroupOwnerStepId(childParallelGroup.groupId);
+                                if (!ownerStepId || ownerStepId !== parentStepId) break;
+                                nestedParallelEventIds.add(childEvent.id);
+                                nestedParallelChildren.push({
+                                  event: childEvent,
+                                  eventIndex: visibleBlockEventIndices[childIdx] as number,
+                                  group: childParallelGroup,
+                                });
+                              }
+                            }
+
+                            const effectiveType = getEffectiveTaskEventType(event);
+                            const outputSummary = resolveTaskOutputSummaryFromCompletionEvent(
+                              event,
+                              events,
+                            );
+                            const completionSummaryText = getCompletionSummaryText(event);
+                            const isMinimalCompletion =
+                              !verboseSteps &&
+                              effectiveType === "task_completed" &&
+                              !hasTaskOutputs(outputSummary) &&
+                              completionSummaryText.length === 0;
+                            if (isMinimalCompletion) {
+                              return (
+                                <Fragment key={event.id || `event-${eventIndex}`}>
+                                  <div className="timeline-event completion-compact">
+                                    <div className="event-indicator">
+                                      {showChildConnectorAbove && (
+                                        <span className="event-connector event-connector-above" aria-hidden="true" />
+                                      )}
+                                      <span
+                                        className="event-indicator-icon tone-success"
+                                        aria-hidden="true"
+                                        title="Done"
+                                      >
+                                        <CheckIcon size={12} strokeWidth={2} />
+                                      </span>
+                                      {showChildConnectorBelow && (
+                                        <span className="event-connector event-connector-below" aria-hidden="true" />
+                                      )}
+                                    </div>
+                                    <div className="event-content completion-compact-content">
+                                      <span className="completion-compact-label">Done</span>
+                                      <span className="event-time-muted">{formatTime(event.timestamp)}</span>
+                                    </div>
+                                  </div>
+                                  {renderCommandOutputs(perEventCmdSessions)}
+                                </Fragment>
+                              );
+                            }
+
+                            const hasNestedChildren = nestedParallelChildren.length > 0;
+                            const isExpandable = hasEventDetails(event) || hasNestedChildren;
+                            const shouldDefaultExpandChild =
+                              isExpandable &&
+                              (hasNestedChildren ||
+                                shouldDefaultExpand(event) ||
+                                (isLatestActionBlock && idx === visibleBlockEvents.length - 1));
+                            const isExpanded = resolveDisclosureExpanded({
+                              forceExpanded: isExpandable && isActive,
+                              defaultExpanded: shouldDefaultExpandChild,
+                              toggled: toggledEvents.has(event.id),
+                            });
+                            const toolCallResultEvent = toolCallPairing.completions.get(event.id);
+                            const renderEvent = toolCallResultEvent ?? event;
+                            const eventTitle = renderEventTitle(
+                              renderEvent,
+                              workspace?.path,
+                              setViewerFilePath,
+                              agentContext,
+                              { summaryMode: !verboseSteps },
+                            );
+                            const eventDetails = hasEventDetails(event)
+                              ? renderEventDetails(event, voiceEnabled, markdownComponents, {
+                                  workspacePath: workspace?.path,
+                                  onOpenViewer: setViewerFilePath,
+                                  onQuoteAssistantMessage,
+                                  events,
+                                  onViewOutputs: onViewTaskOutputs,
+                                  hideVerificationSteps: true,
+                                  summaryMode: !verboseSteps,
+                                  task,
+                                  childTasks,
+                                  commandOutputSessions:
+                                    commandOutputSessionsByInsertIndex.get(eventIndex) ?? [],
+                                  renderCommandOutput: renderCommandOutputs,
+                                })
+                              : undefined;
+
                             return (
                               <Fragment key={event.id || `event-${eventIndex}`}>
-                                <ParallelGroupFeed
-                                  group={parallelGroup}
-                                  timeLabel={formatTime(parallelGroup.startedAt)}
-                                  formatTime={formatTime}
+                                <StepFeed
+                                  title={
+                                    typeof eventTitle === "string" ? (
+                                      <ReactMarkdown
+                                        remarkPlugins={[remarkGfm]}
+                                        components={eventTitleMarkdownComponents}
+                                      >
+                                        {normalizeTimelineTitleMarkdownForDisplay(eventTitle)}
+                                      </ReactMarkdown>
+                                    ) : (
+                                      eventTitle
+                                    )
+                                  }
+                                  titleTooltip={typeof eventTitle === "string" ? eventTitle : undefined}
+                                  timeLabel={formatTime(event.timestamp)}
+                                  indicator={resolveTimelineIndicator(renderEvent, {
+                                    isTaskCompleted: !isTaskWorking,
+                                  })}
                                   showConnectorAbove={showChildConnectorAbove}
                                   showConnectorBelow={showChildConnectorBelow}
-                                  defaultExpanded={isActive || shouldDefaultExpandGroup}
+                                  showBranchStub={shouldShowTimelineBranchStub(event)}
+                                  expandable={isExpandable}
+                                  expanded={isExpanded}
+                                  onToggle={
+                                    isExpandable ? () => toggleEventExpanded(event.id) : undefined
+                                  }
+                                  details={
+                                    isExpanded ? (
+                                      <>
+                                        {hasNestedChildren ? (
+                                          <div className="timeline-step-child-groups">
+                                            {nestedParallelChildren.map((child) => {
+                                              const childCmdSessions = (
+                                                commandOutputSessionsByInsertIndex.get(child.eventIndex) ?? []
+                                              ).filter(
+                                                (s: CommandOutputSession) => !inlineRunCommandSessionIds.has(s.id),
+                                              );
+                                              return (
+                                                <Fragment key={child.event.id || `event-${child.eventIndex}`}>
+                                                  <ParallelGroupFeed
+                                                    group={child.group}
+                                                    timeLabel={formatTime(child.group.startedAt)}
+                                                    formatTime={formatTime}
+                                                  />
+                                                  {renderCommandOutputs(childCmdSessions)}
+                                                </Fragment>
+                                              );
+                                            })}
+                                          </div>
+                                        ) : null}
+                                        {eventDetails}
+                                      </>
+                                    ) : undefined
+                                  }
                                 />
                                 {renderCommandOutputs(perEventCmdSessions)}
                               </Fragment>
                             );
-                          }
-                          // In summary mode, render minimal "Done" for task_completed with no outputs
-                          // to preserve turn rhythm without the noisy "1 step / All set" card
-                          const effectiveType = getEffectiveTaskEventType(event);
-                          const outputSummary = resolveTaskOutputSummaryFromCompletionEvent(
-                            event,
-                            events,
-                          );
-                          const completionSummaryText = getCompletionSummaryText(event);
-                          const isMinimalCompletion =
-                            !verboseSteps &&
-                            effectiveType === "task_completed" &&
-                            !hasTaskOutputs(outputSummary) &&
-                            completionSummaryText.length === 0;
-                          if (isMinimalCompletion) {
-                            return (
-                              <Fragment key={event.id || `event-${eventIndex}`}>
-                                <div
-                                  className="timeline-event completion-compact"
-                                >
-                                  <div className="event-indicator">
-                                    {showChildConnectorAbove && (
-                                      <span className="event-connector event-connector-above" aria-hidden="true" />
-                                    )}
-                                    <span
-                                      className="event-indicator-icon tone-success"
-                                      aria-hidden="true"
-                                      title="Done"
-                                    >
-                                      <CheckIcon size={12} strokeWidth={2} />
-                                    </span>
-                                    {showChildConnectorBelow && (
-                                      <span className="event-connector event-connector-below" aria-hidden="true" />
-                                    )}
-                                  </div>
-                                  <div className="event-content completion-compact-content">
-                                    <span className="completion-compact-label">Done</span>
-                                    <span className="event-time-muted">{formatTime(event.timestamp)}</span>
-                                  </div>
-                                </div>
-                                {renderCommandOutputs(perEventCmdSessions)}
-                              </Fragment>
-                            );
-                          }
-                          const isExpandable = hasEventDetails(event);
-                          const shouldDefaultExpandChild =
-                            isExpandable &&
-                            (shouldDefaultExpand(event) ||
-                              (isLatestActionBlock && idx === visibleBlockEvents.length - 1));
-                          const isExpanded = resolveDisclosureExpanded({
-                            forceExpanded: isExpandable && isActive,
-                            defaultExpanded: shouldDefaultExpandChild,
-                            toggled: toggledEvents.has(event.id),
                           });
-                          const toolCallResultEvent = toolCallPairing.completions.get(event.id);
-                          const renderEvent = toolCallResultEvent ?? event;
-                          const eventTitle = renderEventTitle(
-                            renderEvent,
-                            workspace?.path,
-                            setViewerFilePath,
-                            agentContext,
-                            { summaryMode: !verboseSteps },
-                          );
-                          return (
-                            <Fragment key={event.id || `event-${eventIndex}`}>
-                              <StepFeed
-                                title={
-                                  typeof eventTitle === "string" ? (
-                                    <ReactMarkdown
-                                      remarkPlugins={[remarkGfm]}
-                                      components={eventTitleMarkdownComponents}
-                                    >
-                                      {normalizeTimelineTitleMarkdownForDisplay(eventTitle)}
-                                    </ReactMarkdown>
-                                  ) : (
-                                    eventTitle
-                                  )
-                                }
-                                timeLabel={formatTime(event.timestamp)}
-                                indicator={resolveTimelineIndicator(renderEvent, {
-                                  isTaskCompleted: !isTaskWorking,
-                                })}
-                                showConnectorAbove={showChildConnectorAbove}
-                                showConnectorBelow={showChildConnectorBelow}
-                                showBranchStub={shouldShowTimelineBranchStub(event)}
-                                expandable={isExpandable}
-                                expanded={isExpanded}
-                                onToggle={
-                                  isExpandable ? () => toggleEventExpanded(event.id) : undefined
-                                }
-                                details={
-                                  isExpanded
-                                    ? renderEventDetails(event, voiceEnabled, markdownComponents, {
-                                        workspacePath: workspace?.path,
-                                        onOpenViewer: setViewerFilePath,
-                                        onQuoteAssistantMessage,
-                                        events,
-                                        onViewOutputs: onViewTaskOutputs,
-                                        hideVerificationSteps: true,
-                                        summaryMode: !verboseSteps,
-                                        task,
-                                        childTasks,
-                                        commandOutputSessions:
-                                          commandOutputSessionsByInsertIndex.get(eventIndex) ?? [],
-                                        renderCommandOutput: renderCommandOutputs,
-                                      })
-                                    : undefined
-                                }
-                              />
-                              {renderCommandOutputs(perEventCmdSessions)}
-                            </Fragment>
-                          );
-                        })}
+                        })()}
                       </ActionBlock>
                     </Fragment>
                   );
@@ -3549,7 +4634,11 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                                 </span>
                               )}
                               {task.status === "paused" && (
-                                <span className="chat-status">Waiting for your direction</span>
+                                <span className="chat-status">
+                                  {task.awaitingUserInputReasonCode === "skill_parameters"
+                                    ? "Waiting for your skill answer"
+                                    : "Waiting for your direction"}
+                                </span>
                               )}
                               {task.status === "blocked" && (
                                 <span className="chat-status">
@@ -3831,6 +4920,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                           eventTitle
                         )
                       }
+                      titleTooltip={typeof eventTitle === "string" ? eventTitle : undefined}
                       timeLabel={formatTime(event.timestamp)}
                       indicator={resolveTimelineIndicator(renderEvent2, {
                         isTaskCompleted: !isTaskWorking,
@@ -3870,9 +4960,42 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                     )}
                   </Fragment>
                 );
-              })}
-            </div>
-          )}
+                };
+
+                const getRenderedFeedRow = (row: TaskFeedRow) => {
+                  const signature = getRowRenderSignature(row);
+                  const cached = feedRowRenderCacheRef.current.get(row.key);
+                  if (cached && cached.signature === signature) {
+                    return cached.node;
+                  }
+
+                  recordRendererRender(
+                    "MainContent.feedRow",
+                    row.key,
+                    rendererPerfLoggingEnabled,
+                  );
+                  const node = renderFeedRow(row);
+                  feedRowRenderCacheRef.current.set(row.key, { signature, node });
+                  return node;
+                };
+
+                return (
+                  <TaskConversationRenderedRows
+                    taskId={task?.id}
+                    rendererPerfLoggingEnabled={Boolean(rendererPerfLoggingEnabled)}
+                    visibleFeedRows={visibleFeedRows}
+                    isReplayMode={isReplayMode}
+                    transcriptMode={transcriptMode}
+                    hiddenLiveFeedRowCount={hiddenLiveFeedRowCount}
+                    canReturnToLiveView={defaultTranscriptMode === "live"}
+                    onShowFullTimeline={showFullTimeline}
+                    onBackToLiveView={returnToLiveTranscript}
+                    mainBodyRef={mainBodyRef}
+                    timelineRef={timelineRef}
+                    getRenderedFeedRow={getRenderedFeedRow}
+                  />
+                );
+              })()}
       </>
     ),
     [
@@ -3880,7 +5003,6 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
       childEvents,
       childTasks,
       collaborativeRun,
-      codePreviewsExpanded,
       commandOutputSessionsByInsertIndex,
       currentStep,
       eventTitleMarkdownComponents,
@@ -3894,11 +5016,11 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
       isTaskWorking,
       isReplayMode,
       markdownComponents,
+      mainBodyRef,
       messageFeedbackMap,
       onOpenBrowserView,
       onQuoteAssistantMessage,
       onSelectChildTask,
-      onSelectTask,
       onViewTaskOutputs,
       parallelGroupsByAnchorEventId,
       rejectMenuOpenFor,
@@ -3908,41 +5030,101 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
       setShowAllActionBlocks,
       setStepFeedbackOpen,
       setStepFeedbackText,
-      setToggledEvents,
       setViewerFilePath,
       showAllActionBlocks,
-      showSteps,
       stepFeedbackOpen,
       stepFeedbackSending,
       stepFeedbackText,
       suppressedParallelEventIds,
       task,
-      task?.id,
-      task?.prompt,
       task?.status,
       task?.terminalStatus,
-      task?.userPrompt,
+      feedRows,
+      hiddenLiveFeedRowCount,
+      transcriptMode,
+      defaultTranscriptMode,
+      lastActionBlockTimelineIndex,
+      returnToLiveTranscript,
+      showFullTimeline,
       timelineItems,
       timelineRef,
       toggledEvents,
       toggleEventExpanded,
+      visibleFeedRows,
       verboseSteps,
       voiceEnabled,
       wrappingUp,
       workspace,
-      workspace?.id,
       workspace?.path,
     ],
   );
 
   return conversationFlow;
-});
+}, areTaskConversationFlowPropsEqual);
 
-export function MainContent({
+function areTaskConversationFlowPropsEqual(prev: any, next: any): boolean {
+  return (
+    prev.rendererPerfLoggingEnabled === next.rendererPerfLoggingEnabled &&
+    prev.agentContext === next.agentContext &&
+    prev.childEvents === next.childEvents &&
+    prev.childTasks === next.childTasks &&
+    prev.collaborativeRun === next.collaborativeRun &&
+    prev.commandOutputSessionsByInsertIndex === next.commandOutputSessionsByInsertIndex &&
+    prev.currentStep?.description === next.currentStep?.description &&
+    prev.eventTitleMarkdownComponents === next.eventTitleMarkdownComponents &&
+    prev.events === next.events &&
+    prev.expandedActionBlocks === next.expandedActionBlocks &&
+    prev.isChatTask === next.isChatTask &&
+    prev.isTaskWorking === next.isTaskWorking &&
+    prev.isReplayMode === next.isReplayMode &&
+    prev.lastAssistantMessage?.id === next.lastAssistantMessage?.id &&
+    prev.initialPromptEventId === next.initialPromptEventId &&
+    prev.markdownComponents === next.markdownComponents &&
+    prev.messageFeedbackMap === next.messageFeedbackMap &&
+    prev.mainBodyRef === next.mainBodyRef &&
+    prev.parallelGroupsByAnchorEventId === next.parallelGroupsByAnchorEventId &&
+    prev.rejectMenuOpenFor === next.rejectMenuOpenFor &&
+    prev.rejectMenuRef === next.rejectMenuRef &&
+    prev.showAllActionBlocks === next.showAllActionBlocks &&
+    prev.stepFeedbackOpen === next.stepFeedbackOpen &&
+    prev.stepFeedbackSending === next.stepFeedbackSending &&
+    prev.stepFeedbackText === next.stepFeedbackText &&
+    prev.suppressedParallelEventIds === next.suppressedParallelEventIds &&
+    prev.task?.id === next.task?.id &&
+    prev.task?.status === next.task?.status &&
+    prev.task?.terminalStatus === next.task?.terminalStatus &&
+    prev.task?.prompt === next.task?.prompt &&
+    prev.task?.userPrompt === next.task?.userPrompt &&
+    prev.task?.rawPrompt === next.task?.rawPrompt &&
+    prev.timelineItems === next.timelineItems &&
+    prev.timelineRef === next.timelineRef &&
+    prev.toggledEvents === next.toggledEvents &&
+    prev.verboseSteps === next.verboseSteps &&
+    prev.voiceEnabled === next.voiceEnabled &&
+    prev.wrappingUp === next.wrappingUp &&
+    prev.workspace?.path === next.workspace?.path &&
+    prev.toolCallPairing?.completions === next.toolCallPairing?.completions &&
+    prev.toolCallPairing?.claimedResultIds === next.toolCallPairing?.claimedResultIds &&
+    prev.hasEventDetails === next.hasEventDetails &&
+    prev.isEventExpanded === next.isEventExpanded &&
+    prev.shouldDefaultExpand === next.shouldDefaultExpand &&
+    prev.shouldRenderTimelineEventInStepFeed === next.shouldRenderTimelineEventInStepFeed &&
+    prev.formatTime === next.formatTime &&
+    prev.renderCommandOutputs === next.renderCommandOutputs &&
+    prev.toggleEventExpanded === next.toggleEventExpanded &&
+    prev.onOpenBrowserView === next.onOpenBrowserView &&
+    prev.onQuoteAssistantMessage === next.onQuoteAssistantMessage &&
+    prev.onSelectChildTask === next.onSelectChildTask &&
+    prev.onViewTaskOutputs === next.onViewTaskOutputs
+  );
+}
+
+function MainContentComponent({
   task,
   selectedTaskId,
   workspace,
   events: rawEvents,
+  sharedTaskEventUi = null,
   childTasks = [],
   childEvents: rawChildEvents = [],
   onSelectChildTask,
@@ -3965,11 +5147,33 @@ export function MainContent({
   onModelChange,
   availableProviders = [],
   uiDensity = "focused",
+  rendererPerfLoggingEnabled = false,
   remoteSession = null,
   replayControls,
 }: MainContentProps) {
-  const events = useMemo(() => normalizeEventsForTimelineUi(rawEvents), [rawEvents]);
-  const childEvents = useMemo(() => normalizeEventsForTimelineUi(rawChildEvents), [rawChildEvents]);
+  recordRendererRender(
+    "MainContent",
+    task?.id ? `task:${task.id}` : selectedTaskId ?? "task:none",
+    rendererPerfLoggingEnabled,
+  );
+  const events = useMemo(
+    () => {
+      if (sharedTaskEventUi) {
+        return sharedTaskEventUi.normalizedEvents;
+      }
+      return measureRendererPerf("MainContent.normalizeEvents", rendererPerfLoggingEnabled, () =>
+        normalizeEventsForTimelineUi(rawEvents),
+      );
+    },
+    [rawEvents, rendererPerfLoggingEnabled, sharedTaskEventUi],
+  );
+  const childEvents = useMemo(
+    () =>
+      measureRendererPerf("MainContent.normalizeChildEvents", rendererPerfLoggingEnabled, () =>
+        normalizeEventsForTimelineUi(rawChildEvents),
+      ),
+    [rawChildEvents, rendererPerfLoggingEnabled],
+  );
   const researchWorkflowEnabled = Boolean(task?.agentConfig?.researchWorkflow?.enabled);
   // Agent personality context for personalized messages
   const agentContext = useAgentContext();
@@ -4136,10 +5340,14 @@ export function MainContent({
   useEffect(() => {
     if (rotatingPlaceholders.length <= 1 || inputValue) return;
     const interval = setInterval(() => {
-      setPlaceholderFading(true);
+      if (placeholderTimeoutRef.current !== null) {
+        clearTimeout(placeholderTimeoutRef.current);
+      }
+      setPlaceholderFading((prev) => (prev ? prev : true));
       placeholderTimeoutRef.current = window.setTimeout(() => {
         setRotatingIndex((prev) => (prev + 1) % rotatingPlaceholders.length);
-        setPlaceholderFading(false);
+        setPlaceholderFading((prev) => (prev ? false : prev));
+        placeholderTimeoutRef.current = null;
       }, 300);
     }, 4000);
     return () => {
@@ -4212,7 +5420,8 @@ export function MainContent({
   const [customSkills, setCustomSkills] = useState<CustomSkill[]>([]);
   const [showSkillsMenu, setShowSkillsMenu] = useState(false);
   const [skillsSearchQuery, setSkillsSearchQuery] = useState("");
-  const [selectedSkillForParams, setSelectedSkillForParams] = useState<CustomSkill | null>(null);
+  const [selectedSkillForParams, setSelectedSkillForParams] =
+    useState<SelectedSkillModalState | null>(null);
   // Track wrap-up requested state for button feedback
   const [wrappingUp, setWrappingUp] = useState(false);
 
@@ -4462,86 +5671,94 @@ export function MainContent({
   const domainDropdownRef = useRef<HTMLDivElement>(null);
   const [guardrailDefaultMaxAutoContinuations, setGuardrailDefaultMaxAutoContinuations] =
     useState<number | null>(null);
-
   // Filter events based on verbose mode
   const filteredEvents = useMemo(() => {
-    const baseEvents = verboseSteps
-      ? filterVerboseTimelineNoise(events)
-      : events.filter((event) => shouldShowTaskEventInSummaryMode(event, task?.status));
-    // Command output is rendered separately via CommandOutput component
-    const visibleEvents = baseEvents.filter(
-      (event) => event.type !== "command_output" && event.type !== "timeline_command_output",
-    );
-    const terminalErrorDedupWindowMs = 10_000;
-    const lastErrorByFingerprint = new Map<string, number>();
-    const escalationDedupWindowMs = 60_000;
-    const lastEscalationByReason = new Map<string, number>();
-    const dedupedEvents = visibleEvents.filter((event) => {
-      const effectiveType = getEffectiveTaskEventType(event);
+    if (!verboseSteps && sharedTaskEventUi) {
+      return sharedTaskEventUi.filteredEvents;
+    }
+    return measureRendererPerf("MainContent.filteredEvents", rendererPerfLoggingEnabled, () => {
+      const baseEvents = verboseSteps
+        ? filterVerboseTimelineNoise(events)
+        : events.filter((event) => shouldShowTaskEventInSummaryMode(event, task?.status));
+      // Command output is rendered separately via CommandOutput component
+      const visibleEvents = baseEvents.filter(
+        (event) => event.type !== "command_output" && event.type !== "timeline_command_output",
+      );
+      const terminalErrorDedupWindowMs = 10_000;
+      const lastErrorByFingerprint = new Map<string, number>();
+      const escalationDedupWindowMs = 60_000;
+      const lastEscalationByReason = new Map<string, number>();
+      const dedupedEvents = visibleEvents.filter((event) => {
+        const effectiveType = getEffectiveTaskEventType(event);
 
-      // Deduplicate consecutive step_contract_escalated events with the same reason
-      // so repeated nudges don't appear as multiple identical steps in the feed.
-      if (effectiveType === "step_contract_escalated") {
+        if (effectiveType === "step_contract_escalated") {
+          const payload =
+            event.payload && typeof event.payload === "object"
+              ? (event.payload as Record<string, unknown>)
+              : {};
+          const reason = typeof payload.reason === "string" ? payload.reason.trim() : "__unknown__";
+          const previousTimestamp = lastEscalationByReason.get(reason);
+          if (
+            typeof previousTimestamp === "number" &&
+            event.timestamp - previousTimestamp <= escalationDedupWindowMs
+          ) {
+            return false;
+          }
+          lastEscalationByReason.set(reason, event.timestamp);
+          return true;
+        }
+
+        if (effectiveType !== "error") return true;
         const payload =
           event.payload && typeof event.payload === "object"
             ? (event.payload as Record<string, unknown>)
             : {};
-        const reason = typeof payload.reason === "string" ? payload.reason.trim() : "__unknown__";
-        const previousTimestamp = lastEscalationByReason.get(reason);
+        const fingerprint =
+          (typeof payload.terminal_failure_fingerprint === "string"
+            ? payload.terminal_failure_fingerprint
+            : typeof payload.terminalFailureFingerprint === "string"
+              ? payload.terminalFailureFingerprint
+              : typeof payload.errorFingerprint === "string"
+                ? payload.errorFingerprint
+                : typeof payload.message === "string"
+                  ? payload.message
+                  : typeof payload.error === "string"
+                    ? payload.error
+                    : "")
+            .trim();
+        if (!fingerprint) return true;
+        const previousTimestamp = lastErrorByFingerprint.get(fingerprint);
         if (
           typeof previousTimestamp === "number" &&
-          event.timestamp - previousTimestamp <= escalationDedupWindowMs
+          event.timestamp - previousTimestamp <= terminalErrorDedupWindowMs
         ) {
           return false;
         }
-        lastEscalationByReason.set(reason, event.timestamp);
+        lastErrorByFingerprint.set(fingerprint, event.timestamp);
         return true;
-      }
-
-      if (effectiveType !== "error") return true;
-      const payload =
-        event.payload && typeof event.payload === "object"
-          ? (event.payload as Record<string, unknown>)
-          : {};
-      const fingerprint =
-        (typeof payload.terminal_failure_fingerprint === "string"
-          ? payload.terminal_failure_fingerprint
-          : typeof payload.terminalFailureFingerprint === "string"
-            ? payload.terminalFailureFingerprint
-            : typeof payload.errorFingerprint === "string"
-              ? payload.errorFingerprint
-              : typeof payload.message === "string"
-                ? payload.message
-                : typeof payload.error === "string"
-                  ? payload.error
-                  : "")
-          .trim();
-      if (!fingerprint) return true;
-      const previousTimestamp = lastErrorByFingerprint.get(fingerprint);
-      if (
-        typeof previousTimestamp === "number" &&
-        event.timestamp - previousTimestamp <= terminalErrorDedupWindowMs
-      ) {
-        return false;
-      }
-      lastErrorByFingerprint.set(fingerprint, event.timestamp);
-      return true;
+      });
+      return dedupedEvents.filter((event) => {
+        if (verboseSteps && shouldRevealInternalAssistantMessageInVerbose(event)) {
+          return true;
+        }
+        return !isVerificationNoiseEvent(event);
+      });
     });
-    // Always keep explicit verification steps silent; surface failures elsewhere.
-    return dedupedEvents.filter((event) => {
-      if (verboseSteps && shouldRevealInternalAssistantMessageInVerbose(event)) {
-        return true;
-      }
-      return !isVerificationNoiseEvent(event);
-    });
-  }, [events, verboseSteps, task?.status]);
+  }, [events, sharedTaskEventUi, verboseSteps, task?.status, rendererPerfLoggingEnabled]);
 
   // Build projection from raw events so tool_call/tool_result data embedded
   // in timeline_step_updated (which is filtered for display) still populates
   // lane titles with URLs/results.
   const parallelGroupProjection = useMemo(
-    () => buildParallelGroupProjection(events),
-    [events],
+    () => {
+      if (sharedTaskEventUi) return sharedTaskEventUi.parallelGroupProjection;
+      return measureRendererPerf(
+        "MainContent.parallelGroupProjection",
+        rendererPerfLoggingEnabled,
+        () => buildParallelGroupProjection(events),
+      );
+    },
+    [events, sharedTaskEventUi, rendererPerfLoggingEnabled],
   );
   const parallelGroupsByAnchorEventId = parallelGroupProjection.groupsByAnchorEventId;
   const suppressedParallelEventIds = parallelGroupProjection.suppressedEventIds;
@@ -4549,6 +5766,9 @@ export function MainContent({
   // Pair individual tool_call / tool_result events (outside parallel groups) so that
   // the tool_result row is suppressed and the tool_call row reflects the completed state.
   const toolCallPairing = useMemo(() => {
+    if (!verboseSteps && sharedTaskEventUi) {
+      return sharedTaskEventUi.toolCallPairing;
+    }
     // callId → tool_call event
     const callIdToEvent = new Map<string, TaskEvent>();
     // tool_call event ID → tool_result event
@@ -4590,7 +5810,7 @@ export function MainContent({
       }
     }
     return { completions, claimedResultIds };
-  }, [filteredEvents, suppressedParallelEventIds]);
+  }, [filteredEvents, sharedTaskEventUi, suppressedParallelEventIds, verboseSteps]);
 
   const latestUserMessageTimestamp = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i--) {
@@ -4823,20 +6043,29 @@ export function MainContent({
     }, pool[0]).id;
   }, [canvasSessions, latestUserMessageTimestamp]);
 
+  const baseTimelineItems = useMemo<BaseTimelineItem[]>(() => {
+    if (!verboseSteps && sharedTaskEventUi) {
+      return sharedTaskEventUi.baseTimelineItems;
+    }
+    return measureRendererPerf("MainContent.baseTimelineItems", rendererPerfLoggingEnabled, () =>
+      deriveSharedTaskEventUiState({
+        rawEvents,
+        task,
+        workspace,
+        verboseSteps,
+      }).baseTimelineItems,
+    );
+  }, [
+    rawEvents,
+    rendererPerfLoggingEnabled,
+    sharedTaskEventUi,
+    task,
+    verboseSteps,
+    workspace,
+  ]);
+
   const timelineItems = useMemo(() => {
-    type EventItem = {
-      kind: "event";
-      event: (typeof filteredEvents)[number];
-      eventIndex: number;
-      timestamp: number;
-    };
-    type ActionBlockItem = {
-      kind: "action_block";
-      blockId: string;
-      events: (typeof filteredEvents)[number][];
-      eventIndices: number[];
-      timestamp: number;
-    };
+    return measureRendererPerf("MainContent.timelineItems", rendererPerfLoggingEnabled, () => {
     type CanvasItem = {
       kind: "canvas";
       session: (typeof canvasSessions)[number];
@@ -4850,85 +6079,13 @@ export function MainContent({
       childTask: Task;
       childTaskEvents: TaskEvent[];
     };
-    type TimelineItem = EventItem | ActionBlockItem | CanvasItem | DispatchedItem | CliAgentFrameItem;
+    type TimelineItem =
+      | BaseTimelineItem
+      | CanvasItem
+      | DispatchedItem
+      | CliAgentFrameItem;
 
-    // Group consecutive action events (tool calls, steps) between assistant messages
-    const eventItems: (EventItem | ActionBlockItem)[] = [];
-    let currentBlock: (typeof filteredEvents)[number][] = [];
-    let currentBlockIndices: number[] = [];
-    let blockCounter = 0;
-    const lastCompletionSummaryByTask = new Map<string, { summary: string; timestamp: number }>();
-
-    for (const event of filteredEvents) {
-      const summary = getCompletionSummaryText(event);
-      if (!summary) continue;
-      lastCompletionSummaryByTask.set(event.taskId, {
-        summary,
-        timestamp: event.timestamp,
-      });
-    }
-
-    const flushBlock = () => {
-      if (currentBlock.length > 0) {
-        const blockId = `action-block-${blockCounter}`;
-        blockCounter += 1;
-        eventItems.push({
-          kind: "action_block",
-          blockId,
-          events: [...currentBlock],
-          eventIndices: [...currentBlockIndices],
-          timestamp: currentBlock[0].timestamp,
-        });
-        currentBlock = [];
-        currentBlockIndices = [];
-      }
-    };
-
-    // Event types that act as boundaries (like assistant messages): shown as separate items,
-    // not grouped into collapsible action blocks. Includes terminal, canvas-related outputs,
-    // artifacts, diagrams, etc.
-    const isBoundaryEvent = (ev: (typeof filteredEvents)[number]) => {
-      const t = getEffectiveTaskEventType(ev);
-      return (
-        t === "user_message" ||
-        t === "assistant_message" ||
-        t === "follow_up_completed" ||
-        (t === "task_completed" && getCompletionSummaryText(ev).length > 0) ||
-        t === "artifact_created" ||
-        t === "diagram_created" ||
-        ev.type === "timeline_artifact_emitted"
-      );
-    };
-
-    for (let i = 0; i < filteredEvents.length; i++) {
-      const event = filteredEvents[i];
-
-      if (isBoundaryEvent(event)) {
-        if (getEffectiveTaskEventType(event) === "assistant_message") {
-          const message = typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
-          const completion = lastCompletionSummaryByTask.get(event.taskId);
-          if (
-            message &&
-            completion &&
-            completion.summary === message &&
-            event.timestamp <= completion.timestamp
-          ) {
-            continue;
-          }
-        }
-        flushBlock();
-        eventItems.push({
-          kind: "event",
-          event,
-          eventIndex: i,
-          timestamp: event.timestamp,
-        });
-      } else {
-        currentBlock.push(event);
-        currentBlockIndices.push(i);
-      }
-    }
-    flushBlock();
+    const eventItems = baseTimelineItems;
 
     const freezeBefore = latestUserMessageTimestamp;
     const canvasItems: CanvasItem[] = canvasSessions
@@ -5006,104 +6163,124 @@ export function MainContent({
       specialIndex += 1;
     }
 
-    return merged;
+      return merged;
+    });
   }, [
-    filteredEvents,
+    baseTimelineItems,
     canvasSessions,
     latestCanvasSessionId,
     latestUserMessageTimestamp,
     collaborativeRun,
     childTasks,
     childEvents,
+    rendererPerfLoggingEnabled,
   ]);
+
+  const latestVisibleTaskEvent = useMemo<TaskEvent | null>(() => {
+    if (!verboseSteps && sharedTaskEventUi) {
+      return sharedTaskEventUi.latestVisibleTaskEvent;
+    }
+    for (let i = timelineItems.length - 1; i >= 0; i -= 1) {
+      const item = timelineItems[i];
+      if (item.kind === "event") return item.event;
+      if (item.kind === "action_block" && item.events.length > 0) {
+        return item.events[item.events.length - 1] ?? null;
+      }
+    }
+    return filteredEvents[filteredEvents.length - 1] ?? null;
+  }, [filteredEvents, sharedTaskEventUi, timelineItems, verboseSteps]);
 
   // Build all command output sessions so previous command windows remain visible.
   const commandOutputSessions = useMemo<CommandOutputSession[]>(() => {
-    const commandOutputEvents = events.filter(
-      (event) => getEffectiveTaskEventType(event) === "command_output",
-    );
-    if (commandOutputEvents.length === 0) return [];
-
-    const sessions: CommandOutputSession[] = [];
-    let currentSession: CommandOutputSession | null = null;
-    let syntheticIdCounter = 0;
-
-    const finalizeCurrentSession = () => {
-      if (!currentSession) return;
-      sessions.push(currentSession);
-      currentSession = null;
-    };
-
-    for (const event of commandOutputEvents) {
-      const payload =
-        event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
-          ? (event.payload as Record<string, unknown>)
-          : {};
-      const payloadType = typeof payload.type === "string" ? payload.type : "";
-      const payloadCommand = typeof payload.command === "string" ? payload.command : "";
-      const payloadOutput = typeof payload.output === "string" ? payload.output : "";
-      const payloadCwd = typeof payload.cwd === "string" ? payload.cwd : undefined;
-
-      if (payloadType === "start") {
-        // Previous session did not emit an end event; keep it visible in timeline.
-        finalizeCurrentSession();
-        currentSession = {
-          id: event.id || `command-${event.timestamp}-${syntheticIdCounter++}`,
-          command: payloadCommand,
-          output: payloadOutput,
-          isRunning: true,
-          exitCode: null,
-          startTimestamp: event.timestamp,
-          cwd: payloadCwd,
-        };
-        continue;
-      }
-
-      if (!currentSession) {
-        currentSession = {
-          id: event.id || `command-${event.timestamp}-${syntheticIdCounter++}`,
-          command: payloadCommand,
-          output: "",
-          isRunning: payloadType !== "end",
-          exitCode: null,
-          startTimestamp: event.timestamp,
-          cwd: payloadCwd,
-        };
-      } else {
-        if (payloadCommand) currentSession.command = payloadCommand;
-        if (payloadCwd) currentSession.cwd = payloadCwd;
-      }
-
-      if (
-        payloadType === "stdout" ||
-        payloadType === "stderr" ||
-        payloadType === "stdin" ||
-        payloadType === "error"
-      ) {
-        currentSession.output += payloadOutput;
-        continue;
-      }
-
-      if (payloadType === "end") {
-        currentSession.isRunning = false;
-        currentSession.exitCode = typeof payload.exitCode === "number" ? payload.exitCode : null;
-        finalizeCurrentSession();
-      }
+    if (sharedTaskEventUi) {
+      return sharedTaskEventUi.commandOutputSessions;
     }
+    return measureRendererPerf("MainContent.commandOutputSessions", rendererPerfLoggingEnabled, () => {
+      const commandOutputEvents = events.filter(
+        (event) => getEffectiveTaskEventType(event) === "command_output",
+      );
+      if (commandOutputEvents.length === 0) return [];
 
-    if (currentSession) {
-      sessions.push(currentSession);
-    }
+      const sessions: CommandOutputSession[] = [];
+      let currentSession: CommandOutputSession | null = null;
+      let syntheticIdCounter = 0;
 
-    const maxUiOutputChars = 50 * 1024;
-    return sessions.map((session) => {
-      if (session.output.length <= maxUiOutputChars) return session;
-      return {
-        ...session,
-        output: "[... earlier output truncated ...]\n\n" + session.output.slice(-maxUiOutputChars),
+      const finalizeCurrentSession = () => {
+        if (!currentSession) return;
+        sessions.push(currentSession);
+        currentSession = null;
       };
+
+      for (const event of commandOutputEvents) {
+        const payload =
+          event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+            ? (event.payload as Record<string, unknown>)
+            : {};
+        const payloadType = typeof payload.type === "string" ? payload.type : "";
+        const payloadCommand = typeof payload.command === "string" ? payload.command : "";
+        const payloadOutput = typeof payload.output === "string" ? payload.output : "";
+        const payloadCwd = typeof payload.cwd === "string" ? payload.cwd : undefined;
+
+        if (payloadType === "start") {
+          finalizeCurrentSession();
+          currentSession = {
+            id: event.id || `command-${event.timestamp}-${syntheticIdCounter++}`,
+            command: payloadCommand,
+            output: payloadOutput,
+            isRunning: true,
+            exitCode: null,
+            startTimestamp: event.timestamp,
+            cwd: payloadCwd,
+          };
+          continue;
+        }
+
+        if (!currentSession) {
+          currentSession = {
+            id: event.id || `command-${event.timestamp}-${syntheticIdCounter++}`,
+            command: payloadCommand,
+            output: "",
+            isRunning: payloadType !== "end",
+            exitCode: null,
+            startTimestamp: event.timestamp,
+            cwd: payloadCwd,
+          };
+        } else {
+          if (payloadCommand) currentSession.command = payloadCommand;
+          if (payloadCwd) currentSession.cwd = payloadCwd;
+        }
+
+        if (
+          payloadType === "stdout" ||
+          payloadType === "stderr" ||
+          payloadType === "stdin" ||
+          payloadType === "error"
+        ) {
+          currentSession.output += payloadOutput;
+          continue;
+        }
+
+        if (payloadType === "end") {
+          currentSession.isRunning = false;
+          currentSession.exitCode = typeof payload.exitCode === "number" ? payload.exitCode : null;
+          finalizeCurrentSession();
+        }
+      }
+
+      if (currentSession) {
+        sessions.push(currentSession);
+      }
+
+      const maxUiOutputChars = 50 * 1024;
+      return sessions.map((session) => {
+        if (session.output.length <= maxUiOutputChars) return session;
+        return {
+          ...session,
+          output: "[... earlier output truncated ...]\n\n" + session.output.slice(-maxUiOutputChars),
+        };
+      });
     });
-  }, [events]);
+  }, [events, sharedTaskEventUi, rendererPerfLoggingEnabled]);
 
   const visibleCommandOutputSessions = useMemo(
     () =>
@@ -5382,7 +6559,6 @@ export function MainContent({
           exitCode={session.exitCode}
           cwd={session.cwd}
           taskId={task?.id}
-          workspaceId={task?.workspaceId}
           onClose={() => handleDismissCommandOutput(session.id)}
         />
       ));
@@ -5747,7 +6923,7 @@ export function MainContent({
     setSkillsSearchQuery("");
     // If skill has parameters, show the parameter modal
     if (skill.parameters && skill.parameters.length > 0) {
-      setSelectedSkillForParams(skill);
+      setSelectedSkillForParams({ skill, launchMode: "skill_menu" });
     } else {
       // No parameters, just set the prompt directly
       pendingProgrammaticResizeRef.current = true;
@@ -5755,13 +6931,30 @@ export function MainContent({
     }
   };
 
-  const handleSkillParamSubmit = (expandedPrompt: string) => {
+  const handleSkillParamSubmit = (values: SkillParameterFormValues) => {
+    const modalState = selectedSkillForParams;
     setSelectedSkillForParams(null);
-    // Create task directly with the expanded prompt
+    if (!modalState) return;
     if (onCreateTask) {
+      if (modalState.launchMode === "slash") {
+        const slashPrompt = buildSlashSkillPrompt(modalState.skill.id, values);
+        const title = buildTaskTitle(`Run /${modalState.skill.id}`);
+        onCreateTask(title, slashPrompt);
+        return;
+      }
+      const expandedPrompt = expandSkillPrompt(modalState.skill, values);
       const title = buildTaskTitle(expandedPrompt);
       onCreateTask(title, expandedPrompt);
     }
+  };
+
+  const handleSkillAskInChat = (values: SkillParameterFormValues) => {
+    const modalState = selectedSkillForParams;
+    setSelectedSkillForParams(null);
+    if (!modalState || modalState.launchMode !== "slash" || !onCreateTask) return;
+    const slashPrompt = buildSlashSkillPrompt(modalState.skill.id, values);
+    const title = buildTaskTitle(`Run /${modalState.skill.id}`);
+    onCreateTask(title, slashPrompt);
   };
 
   const handleSkillParamCancel = () => {
@@ -5834,6 +7027,9 @@ export function MainContent({
     }
     // Suppress tool_result events that are paired with their tool_call (shown inline)
     if (effectiveType === "tool_result" && toolCallPairing.claimedResultIds.has(event.id)) {
+      return false;
+    }
+    if (!shouldShowTaskEventInStepFeed(event)) {
       return false;
     }
     const showEvenWithoutSteps =
@@ -5957,6 +7153,8 @@ export function MainContent({
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const mainBodyRef = useRef<HTMLDivElement>(null);
+  const autoScrollFrameRef = useRef<number | null>(null);
+  const lastAutoScrollTargetRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionContainerRef = useRef<HTMLDivElement>(null);
   const mentionDropdownRef = useRef<HTMLDivElement>(null);
@@ -5987,6 +7185,7 @@ export function MainContent({
   useEffect(() => {
     return () => {
       if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
+      if (autoScrollFrameRef.current) cancelAnimationFrame(autoScrollFrameRef.current);
     };
   }, []);
 
@@ -6042,20 +7241,59 @@ export function MainContent({
 
     // If user scrolls to near bottom, re-enable auto-scroll
     // If user scrolls away from bottom, disable auto-scroll
-    setAutoScroll(isNearBottom(container));
+    const nextAutoScroll = isNearBottom(container);
+    setAutoScroll((prev) => (prev === nextAutoScroll ? prev : nextAutoScroll));
   }, [isNearBottom]);
 
-  // Auto-scroll to bottom when new events arrive or dispatched agents change
+  // Auto-scroll to bottom when visible transcript rows materially change.
   useEffect(() => {
-    if (autoScroll && timelineRef.current && mainBodyRef.current) {
-      // Scroll the main body to show the latest event
-      mainBodyRef.current.scrollTop = mainBodyRef.current.scrollHeight;
+    if (!autoScroll || !mainBodyRef.current) return;
+    const container = mainBodyRef.current;
+    if (
+      !shouldScheduleAutoScrollWrite({
+        scrollTop: container.scrollTop,
+        scrollHeight: container.scrollHeight,
+        clientHeight: container.clientHeight,
+        lastTargetTop: lastAutoScrollTargetRef.current,
+      })
+    ) {
+      incrementRendererPerfCounter("task-scroll.follow_skipped_count", rendererPerfLoggingEnabled);
+      return;
     }
-  }, [events, autoScroll, childTasks, childEvents]);
+    if (autoScrollFrameRef.current) {
+      cancelAnimationFrame(autoScrollFrameRef.current);
+    }
+    autoScrollFrameRef.current = window.requestAnimationFrame(() => {
+      autoScrollFrameRef.current = null;
+      const nextTargetTop = getAutoScrollTargetTop(container.scrollHeight, container.clientHeight);
+      const stillAtTarget = Math.abs(container.scrollTop - nextTargetTop) < 2;
+      lastAutoScrollTargetRef.current = nextTargetTop;
+      if (!stillAtTarget) {
+        container.scrollTop = nextTargetTop;
+        incrementRendererPerfCounter("task-scroll.follow_write_count", rendererPerfLoggingEnabled);
+      } else {
+        incrementRendererPerfCounter("task-scroll.follow_skipped_count", rendererPerfLoggingEnabled);
+      }
+    });
+    return () => {
+      if (autoScrollFrameRef.current) {
+        cancelAnimationFrame(autoScrollFrameRef.current);
+        autoScrollFrameRef.current = null;
+      }
+    };
+  }, [
+    autoScroll,
+    childEvents.length,
+    childTasks.length,
+    commandOutputSessions.length,
+    latestVisibleTaskEvent?.id,
+    rendererPerfLoggingEnabled,
+  ]);
 
   // Reset auto-scroll when task changes
   useEffect(() => {
     setAutoScroll(true);
+    lastAutoScrollTargetRef.current = null;
   }, [task?.id]);
 
   const reportAttachmentError = (message: string) => {
@@ -6621,12 +7859,8 @@ export function MainContent({
     return [...builtinOptions, ...skillOptions].slice(0, 10);
   }, [slashOpen, slashQuery, customSkills, onStartOnboarding]);
 
-  // Reset slash selected index when options change
-  useEffect(() => {
-    if (slashSelectedIndex >= slashOptions.length) {
-      setSlashSelectedIndex(0);
-    }
-  }, [slashOptions, slashSelectedIndex]);
+  const effectiveSlashSelectedIndex =
+    slashOptions.length > 0 ? Math.min(slashSelectedIndex, slashOptions.length - 1) : 0;
 
   const updateMentionState = useCallback((value: string, cursor: number | null) => {
     const mention = findMentionAtCursor(value, cursor);
@@ -6688,14 +7922,15 @@ export function MainContent({
       // Show parameter modal
       pendingProgrammaticResizeRef.current = true;
       setInputValue("");
-      setSelectedSkillForParams(option.skill);
+      setSelectedSkillForParams({ skill: option.skill, launchMode: "slash" });
     } else {
-      // No parameters — create task directly with skill prompt
+      // No parameters — create task directly from slash invocation
       pendingProgrammaticResizeRef.current = true;
       setInputValue("");
       if (onCreateTask) {
-        const title = buildTaskTitle(option.skill.prompt);
-        onCreateTask(title, option.skill.prompt);
+        const slashPrompt = buildSlashSkillPrompt(option.skill.id);
+        const title = buildTaskTitle(`Run /${option.skill.id}`);
+        onCreateTask(title, slashPrompt);
       }
     }
   };
@@ -6848,7 +8083,7 @@ export function MainContent({
         {slashOptions.map((option, index) => (
           <button
             key={option.id}
-            className={`mention-autocomplete-item ${index === slashSelectedIndex ? "selected" : ""}`}
+            className={`mention-autocomplete-item ${index === effectiveSlashSelectedIndex ? "selected" : ""}`}
             onMouseDown={(e) => {
               e.preventDefault();
               handleSlashSelect(option);
@@ -6909,7 +8144,7 @@ export function MainContent({
             break;
           }
           e.preventDefault();
-          handleSlashSelect(slashOptions[slashSelectedIndex]);
+          handleSlashSelect(slashOptions[effectiveSlashSelectedIndex]);
           return;
         case "Escape":
           e.preventDefault();
@@ -7097,41 +8332,8 @@ export function MainContent({
     promptAttachmentNames,
     headerTitle,
     headerTooltip,
-  } = useMemo(() => {
-    const displayPromptValue =
-      typeof task?.rawPrompt === "string" && task.rawPrompt.trim().length > 0
-        ? task.rawPrompt
-        : typeof task?.userPrompt === "string" && task.userPrompt.trim().length > 0
-          ? task.userPrompt
-          : typeof task?.prompt === "string"
-            ? task.prompt
-            : "";
-    const cleanedDisplayPromptValue = displayPromptValue
-      ? stripStrategyContextBlock(stripPptxBubbleContent(displayPromptValue))
-      : "";
-    const trimmedPromptValue = cleanedDisplayPromptValue.trim();
-    const promptAttachmentNamesValue = displayPromptValue
-      ? extractAttachmentNames(displayPromptValue)
-      : [];
-    const baseTitleValue = task?.title || buildTaskTitle(trimmedPromptValue);
-    const normalizedTitle = baseTitleValue.replace(TITLE_ELLIPSIS_REGEX, "");
-    const titleMatchesPrompt =
-      normalizedTitle.length > 0 && trimmedPromptValue.startsWith(normalizedTitle);
-    const isTitleTruncated =
-      titleMatchesPrompt && trimmedPromptValue.length > normalizedTitle.length;
-    const headerTitleValue =
-      isTitleTruncated && !TITLE_ELLIPSIS_REGEX.test(baseTitleValue)
-        ? `${baseTitleValue}...`
-        : baseTitleValue;
-
-    return {
-      cleanedDisplayPrompt: cleanedDisplayPromptValue,
-      trimmedPrompt: trimmedPromptValue,
-      promptAttachmentNames: promptAttachmentNamesValue,
-      headerTitle: headerTitleValue,
-      headerTooltip: trimmedPromptValue || baseTitleValue,
-    };
-  }, [task?.prompt, task?.rawPrompt, task?.title, task?.userPrompt]);
+    showHeaderTitle,
+  } = useMemo(() => deriveTaskHeaderPresentation(task), [task]);
 
   const initialPromptEventId = useMemo(() => {
     if (!trimmedPrompt) return null;
@@ -8486,8 +9688,11 @@ export function MainContent({
         {/* Modal for skills with parameters - Welcome View */}
         {selectedSkillForParams && (
           <SkillParameterModal
-            skill={selectedSkillForParams}
+            skill={selectedSkillForParams.skill}
             onSubmit={handleSkillParamSubmit}
+            onAskInChat={
+              selectedSkillForParams.launchMode === "slash" ? handleSkillAskInChat : undefined
+            }
             onCancel={handleSkillParamCancel}
           />
         )}
@@ -8510,7 +9715,6 @@ export function MainContent({
       childEvents={childEvents}
       childTasks={childTasks}
       collaborativeRun={collaborativeRun}
-      codePreviewsExpanded={codePreviewsExpanded}
       commandOutputSessionsByInsertIndex={commandOutputSessionsByInsertIndex}
       currentStep={currentStep}
       lastAssistantMessage={lastAssistantMessage}
@@ -8525,11 +9729,11 @@ export function MainContent({
       isTaskWorking={isTaskWorking}
       isReplayMode={replayControls?.isReplayMode ?? false}
       markdownComponents={markdownComponents}
+      mainBodyRef={mainBodyRef}
       messageFeedbackMap={messageFeedbackMap}
       onOpenBrowserView={onOpenBrowserView}
       onQuoteAssistantMessage={handleQuoteAssistantMessage}
       onSelectChildTask={onSelectChildTask}
-      onSelectTask={onSelectTask}
       onViewTaskOutputs={onViewTaskOutputs}
       parallelGroupsByAnchorEventId={parallelGroupsByAnchorEventId}
       rejectMenuOpenFor={rejectMenuOpenFor}
@@ -8540,7 +9744,6 @@ export function MainContent({
       setShowAllActionBlocks={setShowAllActionBlocks}
       setStepFeedbackOpen={setStepFeedbackOpen}
       setStepFeedbackText={setStepFeedbackText}
-      setToggledEvents={setToggledEvents}
       setViewerFilePath={setViewerFilePath}
       formatTime={formatTime}
       shouldRenderTimelineEventInStepFeed={shouldRenderTimelineEventInStepFeed}
@@ -8549,7 +9752,6 @@ export function MainContent({
       hasEventDetails={hasEventDetails}
       isEventExpanded={isEventExpanded}
       showAllActionBlocks={showAllActionBlocks}
-      showSteps={showSteps}
       stepFeedbackOpen={stepFeedbackOpen}
       stepFeedbackSending={stepFeedbackSending}
       stepFeedbackText={stepFeedbackText}
@@ -8561,6 +9763,7 @@ export function MainContent({
       toggleEventExpanded={toggleEventExpanded}
       verboseSteps={verboseSteps}
       voiceEnabled={voiceEnabled}
+      rendererPerfLoggingEnabled={rendererPerfLoggingEnabled}
       wrappingUp={wrappingUp}
       workspace={workspace}
     />
@@ -8584,9 +9787,11 @@ export function MainContent({
             <span>Parent thread</span>
           </button>
         )}
-        <div className="main-header-title" title={headerTooltip}>
-          {headerTitle}
-        </div>
+        {showHeaderTitle && (
+          <div className="main-header-title" title={headerTooltip}>
+            {headerTitle}
+          </div>
+        )}
       </div>
       {!isChatTask && isTaskWorking && (
         <div className="main-header-status">
@@ -8863,30 +10068,11 @@ export function MainContent({
             </div>
           )}
           {task.status === "paused" && !hasActiveStructuredInputRequest && (
-            <div className="task-status-banner task-status-banner-paused">
-              <div className="task-status-banner-content">
-                <strong>Quick check-in - I'm at a decision point.</strong>
-                {latestPauseEvent?.payload?.message && (
-                  <span className="task-status-banner-detail">
-                    {latestPauseEvent.payload.message}
-                  </span>
-                )}
-                <span className="task-status-banner-detail">
-                  Type anything below to continue, or stop this task here.
-                </span>
-              </div>
-              {onStopTask && (
-                <div className="task-status-banner-actions">
-                  <button
-                    className="task-status-banner-stop-btn"
-                    onClick={onStopTask}
-                    title="Stop task"
-                  >
-                    Stop task
-                  </button>
-                </div>
-              )}
-            </div>
+            <TaskPauseBanner
+              message={latestPauseEvent?.payload?.message}
+              reasonCode={task.awaitingUserInputReasonCode}
+              onStopTask={onStopTask}
+            />
           )}
           {task.status === "blocked" && (
             <div className="task-status-banner task-status-banner-blocked">
@@ -9492,8 +10678,11 @@ export function MainContent({
 
       {selectedSkillForParams && (
         <SkillParameterModal
-          skill={selectedSkillForParams}
+          skill={selectedSkillForParams.skill}
           onSubmit={handleSkillParamSubmit}
+          onAskInChat={
+            selectedSkillForParams.launchMode === "slash" ? handleSkillAskInChat : undefined
+          }
           onCancel={handleSkillParamCancel}
         />
       )}
@@ -9509,6 +10698,61 @@ export function MainContent({
     </div>
   );
 }
+
+function getMainContentTaskSignature(task: Task | undefined): string {
+  if (!task) return "none";
+  return [
+    task.id,
+    task.status,
+    task.terminalStatus ?? "",
+    task.updatedAt,
+    task.completedAt ?? "",
+    task.prompt,
+    task.userPrompt ?? "",
+    task.rawPrompt ?? "",
+  ].join(":");
+}
+
+function getMainContentInputRequestSignature(inputRequest: InputRequest | null | undefined): string {
+  if (!inputRequest) return "none";
+  return [
+    inputRequest.id,
+    inputRequest.taskId,
+    inputRequest.status,
+    inputRequest.requestedAt,
+    inputRequest.questions.length,
+  ].join(":");
+}
+
+function getRemoteSessionSignature(
+  remoteSession: { deviceId: string; deviceName: string } | null | undefined,
+): string {
+  if (!remoteSession) return "none";
+  return `${remoteSession.deviceId}:${remoteSession.deviceName}`;
+}
+
+function areMainContentPropsEqual(prev: MainContentProps, next: MainContentProps): boolean {
+  return (
+    getMainContentTaskSignature(prev.task) === getMainContentTaskSignature(next.task) &&
+    prev.selectedTaskId === next.selectedTaskId &&
+    prev.workspace?.path === next.workspace?.path &&
+    prev.events === next.events &&
+    prev.sharedTaskEventUi === next.sharedTaskEventUi &&
+    prev.childTasks === next.childTasks &&
+    prev.childEvents === next.childEvents &&
+    getMainContentInputRequestSignature(prev.inputRequest) ===
+      getMainContentInputRequestSignature(next.inputRequest) &&
+    prev.selectedModel === next.selectedModel &&
+    prev.availableModels === next.availableModels &&
+    prev.availableProviders === next.availableProviders &&
+    prev.uiDensity === next.uiDensity &&
+    prev.rendererPerfLoggingEnabled === next.rendererPerfLoggingEnabled &&
+    getRemoteSessionSignature(prev.remoteSession) === getRemoteSessionSignature(next.remoteSession) &&
+    prev.replayControls === next.replayControls
+  );
+}
+
+export const MainContent = memo(MainContentComponent, areMainContentPropsEqual);
 
 function formatTokenCount(count: number): string {
   if (!Number.isFinite(count) || count < 0) return "0";
@@ -9744,6 +10988,44 @@ function shouldHideApprovalEventInStepFeed(event: TaskEvent): boolean {
   return isRunCommandApproval(getApprovalPayload(event));
 }
 
+function getTimelineEventStepId(event: TaskEvent): string | null {
+  if (typeof event.stepId === "string" && event.stepId.trim().length > 0) {
+    return event.stepId.trim();
+  }
+  const payload =
+    event.payload && typeof event.payload === "object"
+      ? (event.payload as Record<string, unknown>)
+      : {};
+  if (typeof payload.stepId === "string" && payload.stepId.trim().length > 0) {
+    return payload.stepId.trim();
+  }
+  const step =
+    payload.step && typeof payload.step === "object"
+      ? (payload.step as Record<string, unknown>)
+      : {};
+  if (typeof step.id === "string" && step.id.trim().length > 0) {
+    return step.id.trim();
+  }
+  return null;
+}
+
+function getParallelGroupOwnerStepId(groupId: string | null | undefined): string | null {
+  if (typeof groupId !== "string") return null;
+  const parts = groupId.split(":");
+  if (parts.length < 5 || parts[0] !== "tools") return null;
+  if (parts[1] !== "step" && parts[1] !== "follow_up") return null;
+  const stepId = parts.slice(2, -2).join(":").trim();
+  return stepId.length > 0 ? stepId : null;
+}
+
+function canStepEventOwnParallelChildren(event: TaskEvent): boolean {
+  const effectiveType = getEffectiveTaskEventType(event);
+  return (
+    effectiveType === "step_started" ||
+    (event.type === "timeline_step_updated" && effectiveType === "progress_update")
+  );
+}
+
 function renderEventTitle(
   event: TaskEvent,
   workspacePath?: string,
@@ -9773,6 +11055,33 @@ function renderEventTitle(
         quirks: DEFAULT_QUIRKS,
       };
   const effectiveType = getEffectiveTaskEventType(event);
+
+  const getStepStartedDetail = (): string => {
+    const rawStepDescription =
+      typeof event.payload?.step?.description === "string" ? event.payload.step.description : "";
+    if (rawStepDescription.trim().length > 0) {
+      return rawStepDescription;
+    }
+
+    const rawGroupLabel =
+      typeof event.payload?.groupLabel === "string" ? event.payload.groupLabel : "";
+    if (rawGroupLabel.trim().length > 0) {
+      return rawGroupLabel;
+    }
+
+    const rawMessage = typeof event.payload?.message === "string" ? event.payload.message : "";
+    const normalizedMessage = rawMessage.replace(/^Starting\s+/i, "").trim();
+    if (normalizedMessage.length > 0) {
+      return normalizedMessage;
+    }
+
+    const rawStage = typeof event.payload?.stage === "string" ? event.payload.stage : "";
+    if (rawStage.trim().length > 0) {
+      return rawStage.trim();
+    }
+
+    return "Getting started...";
+  };
 
   if (event.type === "timeline_group_started" || event.type === "timeline_group_finished") {
     const stage =
@@ -9871,8 +11180,7 @@ function renderEventTitle(
       return getMessage(
         "stepStarted",
         msgCtx,
-        sanitizeToolCallTextFromAssistant(event.payload.step?.description || "Getting started...").text ||
-          "Getting started...",
+        sanitizeToolCallTextFromAssistant(getStepStartedDetail()).text || "Getting started...",
       );
     case "step_completed":
       return getMessage(

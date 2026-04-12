@@ -214,4 +214,67 @@ describeWithSqlite("TaskRepository.delete", () => {
 
     expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
+
+  it("prunes only stale remote shadow tasks covered by the fetched window", () => {
+    const workspace = insertWorkspace();
+    const now = Date.now();
+
+    const keepTask = taskRepo.create({
+      title: "Keep remote task",
+      prompt: "still exists remotely",
+      status: "in_progress",
+      workspaceId: workspace.id,
+      targetNodeId: "remote-gateway:device-1",
+    });
+    const recentStaleTask = taskRepo.create({
+      title: "Recent stale remote task",
+      prompt: "archived on remote",
+      status: "in_progress",
+      workspaceId: workspace.id,
+      targetNodeId: "remote-gateway:device-1",
+    });
+    const oldStaleTask = taskRepo.create({
+      title: "Old remote history",
+      prompt: "older than current fetch window",
+      status: "completed",
+      workspaceId: workspace.id,
+      targetNodeId: "device-1-client-id",
+    });
+    const otherDeviceTask = taskRepo.create({
+      title: "Other remote device",
+      prompt: "should stay",
+      status: "pending",
+      workspaceId: workspace.id,
+      targetNodeId: "remote-gateway:device-2",
+    });
+
+    db.prepare("UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?").run(
+      now - 1_000,
+      now - 1_000,
+      keepTask.id,
+    );
+    db.prepare("UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?").run(
+      now - 2_000,
+      now - 2_000,
+      recentStaleTask.id,
+    );
+    db.prepare("UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?").run(
+      now - 10_000,
+      now - 10_000,
+      oldStaleTask.id,
+    );
+
+    const pruned = taskRepo.pruneByTargetNodeIds(
+      ["remote-gateway:device-1", "device-1-client-id"],
+      [keepTask.id],
+      now - 3_000,
+    );
+
+    expect(pruned).toBe(1);
+    expect(taskRepo.findById(keepTask.id)).toBeDefined();
+    expect(taskRepo.findById(recentStaleTask.id)).toBeUndefined();
+    expect(taskRepo.findById(oldStaleTask.id)).toBeDefined();
+    expect(taskRepo.findById(otherDeviceTask.id)).toBeDefined();
+    expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
 });

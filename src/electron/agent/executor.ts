@@ -37,6 +37,9 @@ import {
   type LLMRoutingReason,
   type LLMRoutingFallbackStep,
   type RuntimeToolMetadata,
+  type CustomSkill,
+  type PendingSkillParameterCollection,
+  type SkillParameter,
   type SkillApplication,
   type SkillApplicationTrigger,
   type QuotedAssistantMessage,
@@ -244,6 +247,7 @@ import {
   maybeInjectStopReasonNudge as maybeInjectStopReasonNudgeUtil,
   maybeInjectToolLoopBreak as maybeInjectToolLoopBreakUtil,
   maybeInjectVariedFailureNudge as maybeInjectVariedFailureNudgeUtil,
+  recordPackagingFailureFingerprint as recordPackagingFailureFingerprintUtil,
   shouldRetryEmptyFollowUpEndTurn as shouldRetryEmptyFollowUpEndTurnUtil,
   shouldForceStopAfterSkippedToolOnlyTurns as shouldForceStopAfterSkippedToolOnlyTurnsUtil,
   shouldLockFollowUpToolCalls as shouldLockFollowUpToolCallsUtil,
@@ -618,6 +622,7 @@ interface ParallelBatchAttemptResult {
   toolResults: LLMToolResult[];
   skippedToolCallsByPolicy: number;
   hasHardToolFailureAttempt: boolean;
+  hadRecoverableUnavailableAlternative: boolean;
   hadToolError: boolean;
   hadToolSuccessAfterError: boolean;
   hadRecoverableVisionFallback: boolean;
@@ -753,6 +758,7 @@ export class TaskExecutor {
   private webEvidenceMemory: WebEvidenceEntry[] = [];
   private toolUsageCounts: Map<string, number> = new Map();
   private successfulToolUsageCounts: Map<string, number> = new Map();
+  private taskHadAnyToolSuccess = false;
   private toolUsageEventsSinceDecay = 0;
   private toolSelectionEpoch = 0;
   private availableToolsCacheKey: string | null = null;
@@ -994,6 +1000,8 @@ export class TaskExecutor {
   private static readonly BROWSER_TOOL_TIMEOUT_MS = 90 * 1000;
   /** Video generation submission can take 10–30 s for job creation + initial processing. */
   private static readonly VIDEO_TOOL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly RUN_COMMAND_DEFAULT_TIMEOUT_MS = 120 * 1000;
+  private static readonly RUN_COMMAND_HEAVY_TIMEOUT_MS = 5 * 60 * 1000;
 
   private upsertPinnedUserBlock(
     messages: LLMMessage[],
@@ -1132,6 +1140,8 @@ export class TaskExecutor {
         : phase === "follow_up"
           ? "Follow-up tool batch"
           : "Tool batch";
+    const outcomeSummary =
+      failCount > 0 ? `${successCount} succeeded, ${failCount} failed` : `${successCount} succeeded`;
     timeline.finishGroupLane(groupId, {
       label,
       semanticSummary,
@@ -1140,8 +1150,8 @@ export class TaskExecutor {
       legacyType: status === "failed" ? "step_failed" : "step_completed",
       message:
         typeof semanticSummary === "string" && semanticSummary.trim().length > 0
-          ? `${semanticSummary.trim()}: ${successCount} succeeded, ${failCount} failed`
-          : `${label}: ${successCount} succeeded, ${failCount} failed`,
+          ? `${semanticSummary.trim()}: ${outcomeSummary}`
+          : `${label}: ${outcomeSummary}`,
     });
   }
 
@@ -1835,7 +1845,7 @@ export class TaskExecutor {
           });
           if (!recovery.recovered) {
             return {
-              error: toolError,
+              error: recovery.failureHint ? new Error(recovery.failureHint) : toolError,
               durationMs: Date.now() - startedAt,
               resultJson: "",
             };
@@ -1862,6 +1872,11 @@ export class TaskExecutor {
         if (boundaryRecovery.recovered) {
           result = boundaryRecovery.result;
           content.input = boundaryRecovery.input ?? content.input;
+        } else if (boundaryRecovery.failureHint) {
+          result =
+            result && typeof result === "object"
+              ? { ...result, success: false, error: boundaryRecovery.failureHint }
+              : { success: false, error: boundaryRecovery.failureHint };
         }
 
         return {
@@ -1930,6 +1945,7 @@ export class TaskExecutor {
     let hadToolSuccessAfterError = false;
     let hadRecoverableVisionFallback = false;
     let hadAnyToolSuccess = false;
+    let hadRecoverableUnavailableAlternative = false;
     let allToolErrorsInputDependent = true;
     let lastToolErrorReason = "";
     const successfulToolNames = new Set<string>();
@@ -1982,6 +1998,11 @@ export class TaskExecutor {
                   : "");
 
               if (rawOutcome.error) {
+                this.releaseBatchCreatedPathReservation(
+                  batchCreatedPaths,
+                  toolName,
+                  input,
+                );
                 hadToolError = true;
                 params.toolErrors.add(toolName);
                 lastToolErrorReason = `Tool ${toolName} failed: ${failureMessage}`;
@@ -2083,6 +2104,11 @@ export class TaskExecutor {
                   );
                 }
               } else {
+                this.releaseBatchCreatedPathReservation(
+                  batchCreatedPaths,
+                  toolName,
+                  input,
+                );
                 const reason = this.getToolFailureReason(result, "unknown error");
                 hadToolError = true;
                 params.toolErrors.add(toolName);
@@ -2179,6 +2205,7 @@ export class TaskExecutor {
       toolResults,
       skippedToolCallsByPolicy,
       hasHardToolFailureAttempt,
+      hadRecoverableUnavailableAlternative,
       hadToolError,
       hadToolSuccessAfterError,
       hadRecoverableVisionFallback,
@@ -3333,7 +3360,11 @@ export class TaskExecutor {
   }
 
   private sanitizePlan(plan: Plan): Plan {
-    const sanitizedPlanDescription = sanitizeToolCallTextFromAssistant(String(plan?.description || "").trim()).text;
+    const novelistConstraintContext = this.getNovelistConstraintContext();
+    const sanitizedPlanDescription = this.rewriteNovelistPlanDescription(
+      sanitizeToolCallTextFromAssistant(String(plan?.description || "").trim()).text,
+      novelistConstraintContext,
+    );
     const steps = Array.isArray(plan?.steps) ? plan.steps : [];
     const normalizedSteps = steps.map((step, index) => {
       const rawDescription = String(step?.description || "").trim();
@@ -3350,6 +3381,8 @@ export class TaskExecutor {
           : step?.kind === "recovery" || step?.kind === "primary"
             ? step.kind
             : "primary";
+
+      description = this.rewriteNovelistPlanStepDescription(description, novelistConstraintContext);
 
       return {
         ...step,
@@ -4363,9 +4396,11 @@ ${transcript}
   // Global turn tracking (across all steps) - similar to Claude Agent SDK's maxTurns
   private globalTurnCount: number = 0; // Window turns
   private lifetimeTurnCount: number = 0;
-  private readonly maxGlobalTurns: number; // Window cap (configurable via AgentConfig.maxTurns)
+  private readonly maxGlobalTurns: number | null; // Explicit window cap (configurable via AgentConfig.maxTurns/windowTurnCap)
   private readonly maxLifetimeTurns: number;
   private readonly turnBudgetPolicy: TurnBudgetPolicy;
+  private readonly hasExplicitWindowTurnCap: boolean;
+  private readonly turnBudgetSource: "explicit_config" | "managed_template" | "internal_helper" | "default_unbounded";
   private readonly verificationArtifactPathPolicy: VerificationArtifactPathPolicy;
   private readonly workspacePathAliasPolicy: WorkspacePathAliasPolicy;
   private readonly taskPathRootPolicy: TaskPathRootPolicy;
@@ -4855,6 +4890,13 @@ ${transcript}
       queues: {
         pendingFollowUps: Array.isArray(self.pendingFollowUps) ? self.pendingFollowUps : [],
         stepFeedbackSignal: self.stepFeedbackSignal || null,
+      },
+      skills: {
+        pendingParameterCollection:
+          self.pendingSkillParameterCollection && typeof self.pendingSkillParameterCollection === "object"
+            ? { ...self.pendingSkillParameterCollection }
+            : null,
+        primarySlashCommandHandled: self.primarySlashCommandHandled === true,
       },
       worker: {
         dispatchedMentionedAgents:
@@ -5472,22 +5514,32 @@ ${transcript}
       : undefined;
     this.logTag = roleName ? `[Executor:${shortId}][${roleName}]` : `[Executor:${shortId}]`;
     this.bestKnownOutcome = task.bestKnownOutcome;
+    this.lastAwaitingUserInputReasonCode =
+      typeof task.awaitingUserInputReasonCode === "string" &&
+      task.awaitingUserInputReasonCode.trim().length > 0
+        ? task.awaitingUserInputReasonCode
+        : null;
     const requestedMaxTurns =
       typeof task.agentConfig?.maxTurns === "number" && task.agentConfig.maxTurns > 0
-        ? task.agentConfig.maxTurns
-        : 150;
+        ? Math.floor(task.agentConfig.maxTurns)
+        : null;
     const requestedWindowTurnCap =
       task.agentConfig?.windowTurnCap === null
         ? null
         : typeof task.agentConfig?.windowTurnCap === "number" && task.agentConfig.windowTurnCap > 0
           ? Math.floor(task.agentConfig.windowTurnCap)
           : null;
-    const resolvedWindowTurnCap = requestedWindowTurnCap ?? requestedMaxTurns;
+    const explicitWindowTurnCap = requestedWindowTurnCap ?? requestedMaxTurns;
     const resolvedTurnBudgetPolicy: TurnBudgetPolicy =
       this.turnlessExecutionV4Enabled !== false
         ? task.agentConfig?.turnBudgetPolicy || "adaptive_unbounded"
-        : "hard_window";
-    const rawBudgetProfile = resolveExecutorBudgetProfile(task.budgetProfile, requestedMaxTurns);
+        : explicitWindowTurnCap !== null
+          ? "hard_window"
+          : "adaptive_unbounded";
+    const rawBudgetProfile = resolveExecutorBudgetProfile(
+      task.budgetProfile,
+      requestedMaxTurns ?? EXECUTOR_BUDGET_CONTRACTS.balanced.maxTurns,
+    );
     this.budgetProfile = rawBudgetProfile;
     this.budgetContract = EXECUTOR_BUDGET_CONTRACTS[this.budgetProfile];
     // Keep hard budget contracts opt-in. Product strategy now relies primarily on
@@ -5509,13 +5561,18 @@ ${transcript}
     this.verificationOutcomeV2Enabled =
       isFeatureEnabled("COWORK_VERIFICATION_OUTCOME_V2", false) ||
       isFeatureEnabled("verification_outcome_v2", false);
-    this.maxGlobalTurns = this.budgetContractsEnabled
-      ? Math.min(resolvedWindowTurnCap, this.budgetContract.maxTurns)
-      : resolvedWindowTurnCap;
+    this.maxGlobalTurns =
+      explicitWindowTurnCap === null
+        ? null
+        : this.budgetContractsEnabled
+          ? Math.min(explicitWindowTurnCap, this.budgetContract.maxTurns)
+          : explicitWindowTurnCap;
+    this.hasExplicitWindowTurnCap = this.maxGlobalTurns !== null;
     this.turnBudgetPolicy =
-      resolvedTurnBudgetPolicy === "hard_window" && task.agentConfig?.windowTurnCap === null
+      resolvedTurnBudgetPolicy === "hard_window" && explicitWindowTurnCap === null
         ? "adaptive_unbounded"
         : resolvedTurnBudgetPolicy;
+    this.turnBudgetSource = this.classifyTurnBudgetSource(task, this.hasExplicitWindowTurnCap);
     this.verificationArtifactPathPolicy = this.resolveVerificationArtifactPathPolicy(
       task.agentConfig?.verificationArtifactPathPolicy,
     );
@@ -5590,9 +5647,10 @@ ${transcript}
       (guardrailSettings as Partial<GuardrailSettings>).webSearchBlockedDomains,
     );
     const isDeepWorkTask = task.agentConfig?.deepWorkMode === true;
+    const windowTurnBasis = this.maxGlobalTurns ?? (isDeepWorkTask ? 200 : 80);
     const derivedLifetimeMaxTurns = isDeepWorkTask
-      ? Math.max(320, Math.min(1200, this.maxGlobalTurns * 6))
-      : Math.max(120, Math.min(320, this.maxGlobalTurns * 4));
+      ? Math.max(320, Math.min(1200, windowTurnBasis * 6))
+      : Math.max(120, Math.min(320, windowTurnBasis * 4));
     const settingsLifetimeCap =
       guardrailSettings.lifetimeTurnCapEnabled && guardrailSettings.defaultLifetimeTurnCap > 0
         ? Math.floor(guardrailSettings.defaultLifetimeTurnCap)
@@ -5609,14 +5667,14 @@ ${transcript}
     // Match Codex/Claude-style layered budgets: adaptive defaults with optional
     // tighter explicit caps. The tightest active budget must win.
     this.maxLifetimeTurns = Math.max(
-      this.maxGlobalTurns,
+      this.maxGlobalTurns ?? 0,
       configuredLifetimeCap ?? fallbackLifetimeCap,
     );
     this.emergencyFuseMaxTurns =
       typeof task.agentConfig?.emergencyFuseMaxTurns === "number" &&
       task.agentConfig.emergencyFuseMaxTurns > 0
-        ? Math.max(this.maxGlobalTurns, Math.floor(task.agentConfig.emergencyFuseMaxTurns))
-        : Math.max(2000, this.maxGlobalTurns * 20);
+        ? Math.max(this.maxGlobalTurns ?? 0, Math.floor(task.agentConfig.emergencyFuseMaxTurns))
+        : Math.max(2000, windowTurnBasis * 20);
     this.lifetimeTurnCount =
       typeof task.lifetimeTurnsUsed === "number" && task.lifetimeTurnsUsed > 0
         ? task.lifetimeTurnsUsed
@@ -5687,12 +5745,13 @@ ${transcript}
     this.emitEvent("turn_policy_selected", {
       taskId: this.task.id,
       policy: this.turnBudgetPolicy,
-      windowTurnCap: this.maxGlobalTurns,
+      windowTurnCap: this.maxGlobalTurns ?? undefined,
+      hasExplicitWindowTurnCap: this.hasExplicitWindowTurnCap,
       requestedWindowTurnCap: task.agentConfig?.windowTurnCap ?? undefined,
       maxLifetimeTurns: this.maxLifetimeTurns,
       emergencyFuseMaxTurns: this.emergencyFuseMaxTurns,
       followUpAutoRecovery: this.followUpAutoRecovery,
-      source: task.agentConfig?.turnBudgetPolicy ? "user_or_strategy" : "default",
+      source: this.turnBudgetSource,
     });
     this.guardrailPhaseAEnabled = isFeatureEnabled("COWORK_GUARDRAIL_PHASE_A", true);
     this.guardrailPhaseBEnabled = isFeatureEnabled("COWORK_GUARDRAIL_PHASE_B", true);
@@ -6856,7 +6915,7 @@ ${transcript}
     }
 
     const turnBudgetPolicy = this.getEffectiveTurnBudgetPolicy();
-    if (this.globalTurnCount >= this.maxGlobalTurns) {
+    if (this.maxGlobalTurns !== null && this.globalTurnCount >= this.maxGlobalTurns) {
       if (turnBudgetPolicy === "hard_window") {
         throw new TurnLimitExceededError(
           `Global turn limit exceeded: ${this.globalTurnCount}/${this.maxGlobalTurns} turns. ` +
@@ -6926,7 +6985,7 @@ ${transcript}
 
   private getRemainingTurnBudget(): number {
     const remainingWindowTurns =
-      this.getEffectiveTurnBudgetPolicy() === "adaptive_unbounded"
+      this.maxGlobalTurns === null || this.getEffectiveTurnBudgetPolicy() === "adaptive_unbounded"
         ? Number.MAX_SAFE_INTEGER
         : Math.max(0, this.maxGlobalTurns - this.globalTurnCount);
     const remainingLifetimeTurns = Math.max(0, this.maxLifetimeTurns - this.lifetimeTurnCount);
@@ -6936,6 +6995,29 @@ ${transcript}
   private getEffectiveTurnBudgetPolicy(): TurnBudgetPolicy {
     if (this.turnlessExecutionV4Enabled === false) return "hard_window";
     return this.turnBudgetPolicy || "adaptive_unbounded";
+  }
+
+  private classifyTurnBudgetSource(
+    task: Task,
+    hasExplicitWindowTurnCap: boolean,
+  ): "explicit_config" | "managed_template" | "internal_helper" | "default_unbounded" {
+    if (!hasExplicitWindowTurnCap) return "default_unbounded";
+    if (
+      task.source === "api" &&
+      (typeof task.agentConfig?.allowUserInput === "boolean" ||
+        typeof task.agentConfig?.requireWorktree === "boolean")
+    ) {
+      return "managed_template";
+    }
+    if (
+      task.parentTaskId ||
+      (typeof task.agentType === "string" && task.agentType !== "main") ||
+      task.assignedAgentRoleId ||
+      task.source === "subconscious"
+    ) {
+      return "internal_helper";
+    }
+    return "explicit_config";
   }
 
   private resolveVerificationArtifactPathPolicy(
@@ -7004,7 +7086,7 @@ ${transcript}
     ) {
       return this.emergencyFuseMaxTurns;
     }
-    return Math.max(2000, this.maxGlobalTurns * 20);
+    return Math.max(2000, (this.maxGlobalTurns ?? 80) * 20);
   }
 
   private getBudgetUsage(): NonNullable<Task["budgetUsage"]> {
@@ -7861,14 +7943,34 @@ ${transcript}
     };
 
     if (toolName === "run_command") {
-      const inputTimeout =
+      const inputTimeoutRaw =
         typeof (input as { timeout?: unknown })?.timeout === "number"
           ? (input as { timeout?: number }).timeout
+          : typeof (input as { timeout_ms?: unknown })?.timeout_ms === "number"
+            ? (input as { timeout_ms?: number }).timeout_ms
+            : typeof (input as { timeout_seconds?: unknown })?.timeout_seconds === "number"
+              ? (input as { timeout_seconds?: number }).timeout_seconds! * 1000
+              : undefined;
+      const inputTimeout =
+        typeof inputTimeoutRaw === "number" && Number.isFinite(inputTimeoutRaw) && inputTimeoutRaw > 0
+          ? Math.round(inputTimeoutRaw)
           : undefined;
       if (typeof inputTimeout === "number" && Number.isFinite(inputTimeout) && inputTimeout > 0) {
-        return Math.round(inputTimeout);
+        return Math.min(inputTimeout, TaskExecutor.RUN_COMMAND_HEAVY_TIMEOUT_MS);
       }
-      return normalizedSettingsTimeout ?? TOOL_TIMEOUT_MS;
+
+      const command = typeof toolInput.command === "string" ? toolInput.command.toLowerCase() : "";
+      const inferredDefault =
+        /\b(npm|pnpm|yarn|bun)\s+(install|ci|build|test|package|run\s+(build|test|lint|typecheck|e2e|integration|smoke))\b/.test(
+          command,
+        ) ||
+        /\b(xcodebuild|gradle|mvn|cargo|swift)\s+(build|test|package|archive)\b/.test(command) ||
+        /\b(docker|docker-compose|docker compose)\b/.test(command) ||
+        /\b(pod\s+install|bundle\s+install)\b/.test(command) ||
+        /\b(pytest|jest|vitest|playwright|cypress|turbo|nx)\b/.test(command)
+          ? TaskExecutor.RUN_COMMAND_HEAVY_TIMEOUT_MS
+          : TaskExecutor.RUN_COMMAND_DEFAULT_TIMEOUT_MS;
+      return normalizedSettingsTimeout ?? inferredDefault;
     }
 
     if (toolName === "request_user_input") {
@@ -8183,6 +8285,30 @@ ${transcript}
     return { blocked: false };
   }
 
+  private getBatchCreatedPathReservation(toolName: string, input: Any): string | null {
+    const fileCreationTools = new Set([
+      "write_file",
+      "copy_file",
+      "generate_video",
+    ]);
+    if (!(fileCreationTools.has(toolName) || isArtifactGenerationToolNameUtil(toolName))) {
+      return null;
+    }
+    const filename = input?.filename || input?.path || input?.destPath || input?.destination;
+    if (!filename) return null;
+    return String(filename).toLowerCase().replace(/\\/g, "/");
+  }
+
+  private releaseBatchCreatedPathReservation(
+    batchCreatedPaths: Set<string> | undefined,
+    toolName: string,
+    input: Any,
+  ): void {
+    const reservation = this.getBatchCreatedPathReservation(toolName, input);
+    if (!reservation) return;
+    batchCreatedPaths?.delete(reservation);
+  }
+
   /**
    * Record a file operation after successful execution
    */
@@ -8462,6 +8588,25 @@ ${transcript}
     return Array.from(candidates.values()).filter((candidate) => candidate !== "/");
   }
 
+  private buildPathDriftRecoveryFailureHint(opts: {
+    toolName: string;
+    attemptedPath: string;
+    candidatePath?: string;
+  }): string {
+    const pinnedRoot =
+      this.taskPinnedRoot && this.taskPinnedRoot !== "." ? this.taskPinnedRoot : this.workspace.path;
+    const attempted = String(opts.attemptedPath || "").trim() || "(unknown path)";
+    const candidate = String(opts.candidatePath || "").trim();
+    const retryClause = candidate
+      ? ` after trying "${candidate}"`
+      : "";
+    return (
+      `Pinned-root path recovery could not resolve "${attempted}"${retryClause}. ` +
+      `Do not retry the same missing path. First locate the real file with glob, list_directory, or search_files under "${pinnedRoot}", ` +
+      `then retry ${opts.toolName} with the discovered path.`
+    );
+  }
+
   private async tryWorkspaceBoundaryRecovery(opts: {
     toolName: string;
     input: Any;
@@ -8470,7 +8615,7 @@ ${transcript}
     targetPaths?: string[];
     stepId?: string;
     followUp?: boolean;
-  }): Promise<{ recovered: boolean; result?: Any; input?: Any }> {
+  }): Promise<{ recovered: boolean; result?: Any; input?: Any; failureHint?: string }> {
     const attemptedPath = typeof opts.input?.path === "string" ? opts.input.path.trim() : "";
     if (!attemptedPath) return { recovered: false };
     const taskId = this.task?.id || "unknown_task";
@@ -8490,6 +8635,7 @@ ${transcript}
     if (!boundaryRecoverable && !aliasRecoverable && !taskRootRecoverable) return { recovered: false };
 
     const candidatePaths = new Set<string>();
+    let failureHint: string | undefined;
     if (boundaryRecoverable) {
       for (const candidatePath of this.buildWorkspaceBoundaryRecoveryCandidates(
         attemptedPath,
@@ -8540,9 +8686,18 @@ ${transcript}
             retryCount: pathDriftAttemptsUsed,
             followUp: opts.followUp === true,
           });
+          failureHint = this.buildPathDriftRecoveryFailureHint({
+            toolName: opts.toolName,
+            attemptedPath,
+          });
           continue;
         }
         if (this.pathDriftRecoverySignatureAttempts[pathDriftSignature]) {
+          failureHint = this.buildPathDriftRecoveryFailureHint({
+            toolName: opts.toolName,
+            attemptedPath,
+            candidatePath,
+          });
           continue;
         }
         this.pathDriftRecoverySignatureAttempts[pathDriftSignature] = 1;
@@ -8621,6 +8776,11 @@ ${transcript}
             error: String(retryResult?.error || "task_root_recovery_failed"),
             followUp: opts.followUp === true,
           });
+          failureHint = this.buildPathDriftRecoveryFailureHint({
+            toolName: opts.toolName,
+            attemptedPath,
+            candidatePath,
+          });
         }
         if (retrySucceeded) {
           return { recovered: true, result: retryResult, input: retryInput };
@@ -8674,11 +8834,16 @@ ${transcript}
             error: String(retryError?.message || retryError || "task_root_recovery_failed"),
             followUp: opts.followUp === true,
           });
+          failureHint = this.buildPathDriftRecoveryFailureHint({
+            toolName: opts.toolName,
+            attemptedPath,
+            candidatePath,
+          });
         }
       }
     }
 
-    return { recovered: false };
+    return { recovered: false, ...(failureHint ? { failureHint } : {}) };
   }
 
   /**
@@ -8888,10 +9053,17 @@ ${transcript}
   private stepIndicatesBrowserSessionVerification(description: string): boolean {
     const desc = String(description || "").toLowerCase();
     if (!desc.trim()) return false;
-    // Only trigger on unambiguously browser-specific terms.
-    // "ui", "site", "layout", "scroll", "toggle", "responsive" are too broad —
-    // they appear in server/file tasks that have nothing to do with browser automation.
-    return /\b(in-browser|browser|website|web site|webpage|web page)\b/.test(desc);
+    if (/\bin-browser\b/.test(desc)) return true;
+
+    const browserSurfaceCue = /\b(browser|website|web site|webpage|web page)\b/.test(desc);
+    if (!browserSurfaceCue) return false;
+
+    // Route to browser-session verification only when the step describes
+    // interacting with or observing a live browser surface, not when it merely
+    // mentions browser names in a file/content assertion.
+    return /\b(navigate|open|visit|load|render|display|visible|interact|click|scroll|toggle|hover|viewport|responsive|session|automation|playwright|selenium|devtools|page state|behavior)\b/.test(
+      desc,
+    );
   }
 
   private stepIndicatesCanvasSessionVerification(description: string): boolean {
@@ -8916,6 +9088,17 @@ ${transcript}
       /\bif\b[\s\S]{0,80}\b(?:unknown|missing|unavailable|not available)\b[\s\S]{0,60}\b(?:repo|repository|owner\/repo|scope)\b/.test(
         desc,
       )
+    );
+  }
+
+  private shouldEnforceAnalysisOnlyMutationGuard(step: PlanStep): boolean {
+    const desc = String(step.description || "").toLowerCase();
+    if (!desc.trim()) return false;
+
+    return (
+      descriptionHasReadOnlyIntent(desc) ||
+      descriptionHasDiscoveryIntent(desc) ||
+      /\b(checklist|scorecard|qa|audit)\b/.test(desc)
     );
   }
 
@@ -9056,7 +9239,15 @@ ${transcript}
       /\b(?:test|build)\s+commands?\b[\s\S]{0,20}\b(?:complete successfully|succeed|pass)\b/.test(
         desc,
       ) ||
-      /\bcommands?\s+complete successfully\b/.test(desc);
+      /\bcommands?\s+complete successfully\b/.test(desc) ||
+      /\b(?:run|execute)\b[\s\S]{0,40}\bcommand\b[\s\S]{0,60}\b(?:current session context|stdout|stderr|standard output|standard error|exit code|exit status|print(?:s)?|output(?:s)?|return(?:s)?|emit(?:s)?|produc(?:e|es))\b/.test(
+        desc,
+      ) ||
+      /\b(?:shell|terminal)\s+command\b/.test(desc) ||
+      /\bcommand\b[\s\S]{0,40}\bcurrent session context\b/.test(desc) ||
+      /\bcommand\b[\s\S]{0,40}\b(?:stdout|stderr|standard output|standard error|exit code|exit status|print(?:s)?|output(?:s)?|return(?:s)?|emit(?:s)?|produc(?:e|es))\b/.test(
+        desc,
+      );
     if (requiresRunCommandEvidence) {
       addRequiredToolIfKnown("run_command");
     }
@@ -9159,6 +9350,19 @@ ${transcript}
   private resolveVerificationModeForStep(step: PlanStep): StepVerificationMode {
     if (!this.isVerificationStep(step)) return "none";
     const description = String(step.description || "").toLowerCase();
+    const taskPrompt = String(this.getExecutionTaskPrompt() || "").toLowerCase();
+
+    const commandOutputVerificationCue =
+      /\b(stdout|stderr|standard output|standard error|exit code|exit status|command output|shell output)\b/.test(
+        description,
+      ) ||
+      (/\boutput\b/.test(description) &&
+        /\b(run command|execute (?:the )?command|shell command|terminal command|stdout|stderr|exit code|exit status)\b/.test(
+          `${taskPrompt}\n${description}`,
+        ));
+    if (commandOutputVerificationCue) {
+      return "none";
+    }
 
     if (this.stepExplicitlyRequestsImageFileVerification(description)) {
       return "image_file";
@@ -9179,9 +9383,17 @@ ${transcript}
       return "none";
     }
 
-    const artifactVerificationCue =
+    const explicitArtifactNounCue =
       hasArtifactExtensionMention(description) ||
-      /\b(file|document|artifact|output|project|workspace|widget|scheme)\b/.test(description);
+      /\b(file|document|artifact|path|directory|folder)\b/.test(description);
+    const explicitArtifactStateCue =
+      /\b(exists?|present|readable|written|created|saved|produced|generated|exported)\b/.test(
+        description,
+      ) &&
+      /\b(output|artifact|document|report|pdf|docx|xlsx|pptx|csv|json|html|markdown)\b/.test(
+        description,
+      );
+    const artifactVerificationCue = explicitArtifactNounCue || explicitArtifactStateCue;
     if (artifactVerificationCue) {
       return "artifact_file";
     }
@@ -9944,6 +10156,170 @@ ${transcript}
       sections.push(appliedSkillContext);
     }
     return sections.filter((section) => String(section || "").trim().length > 0).join("\n\n");
+  }
+
+  private getAppliedSkillApplication(skillId: string): SkillApplication | null {
+    const appliedSkills = Array.isArray(this.appliedSkills) ? this.appliedSkills : [];
+    for (let index = appliedSkills.length - 1; index >= 0; index -= 1) {
+      const candidate = appliedSkills[index];
+      if (candidate?.skillId === skillId) return candidate;
+    }
+    return null;
+  }
+
+  private extractRequestedFranchiseLabel(text: string): string | null {
+    const source = String(text || "").trim();
+    if (!source) return null;
+
+    const patterns = [
+      /\b(?:in|within|set in|using)\s+the\s+([A-Z][A-Za-z0-9' -]{1,40})\s+universe\b/,
+      /\b(?:in|within|set in|using)\s+([A-Z][A-Za-z0-9' -]{1,40})\s+universe\b/,
+      /\b([A-Z][A-Za-z0-9' -]{1,40})\s+fanfiction\b/,
+    ];
+
+    for (const pattern of patterns) {
+      const match = source.match(pattern);
+      if (match?.[1]) {
+        return match[1].replace(/\s+/g, " ").trim();
+      }
+    }
+
+    return null;
+  }
+
+  private getNovelistConstraintContext(): {
+    active: boolean;
+    preserveEstablishedUniverse: boolean;
+    franchiseLabel: string | null;
+    artifactDir: string | null;
+    canonMode: string | null;
+  } {
+    const application = this.getAppliedSkillApplication("novelist");
+    if (!application) {
+      return {
+        active: false,
+        preserveEstablishedUniverse: false,
+        franchiseLabel: null,
+        artifactDir: null,
+        canonMode: null,
+      };
+    }
+
+    const parameters =
+      application.parameters && typeof application.parameters === "object"
+        ? (application.parameters as Record<string, unknown>)
+        : {};
+    const canonMode = String(parameters.canon_mode || "").trim().toLowerCase() || null;
+    const artifactDirectories = Array.isArray(application.contextDirectives?.artifactDirectories)
+      ? application.contextDirectives.artifactDirectories
+      : [];
+    const artifactDir =
+      artifactDirectories.find(
+        (candidate) =>
+          typeof candidate === "string" &&
+          /\/artifacts\/skills\/.+\/novelist\/?$/.test(candidate.replace(/\\/g, "/")),
+      ) ||
+      artifactDirectories.find((candidate) => typeof candidate === "string") ||
+      null;
+    const seedText = String(parameters.seed || "").trim();
+    const taskText = `${this.task?.title || ""}\n${this.getContractPrompt()}\n${seedText}`;
+    const franchiseLabel = this.extractRequestedFranchiseLabel(taskText);
+    const lowerTaskText = taskText.toLowerCase();
+    const explicitFranchiseCue =
+      canonMode === "fanfiction" ||
+      canonMode === "inspired-by" ||
+      /\bfanfiction\b/.test(lowerTaskText) ||
+      /\buniverse\b/.test(lowerTaskText) ||
+      /\bcanon\b/.test(lowerTaskText) ||
+      /\bside[- ]story\b/.test(lowerTaskText) ||
+      Boolean(franchiseLabel);
+
+    return {
+      active: true,
+      preserveEstablishedUniverse: explicitFranchiseCue && canonMode !== "original",
+      franchiseLabel,
+      artifactDir: artifactDir ? artifactDir.replace(/\\/g, "/") : null,
+      canonMode,
+    };
+  }
+
+  private shouldForceStrictStepIntentAlignment(): boolean {
+    return this.getNovelistConstraintContext().preserveEstablishedUniverse;
+  }
+
+  private buildNovelistConstraintPrompt(): string {
+    const context = this.getNovelistConstraintContext();
+    if (!context.active) return "";
+
+    const lines = ["NOVELIST SKILL CONTRACT (CRITICAL):"];
+    if (context.artifactDir) {
+      lines.push(
+        `- Write all novelist artifacts under "${context.artifactDir}". Do not substitute generic "artifacts/" paths for manuscript files.`,
+      );
+    }
+    if (context.preserveEstablishedUniverse) {
+      lines.push(
+        `- The user explicitly requested an established universe${context.franchiseLabel ? ` (${context.franchiseLabel})` : ""}. Preserve that universe.`,
+      );
+      lines.push(
+        '- Do not "reframe", "legal-distinct", or convert the project into original IP unless the user explicitly asks for that change.',
+      );
+      lines.push(
+        "- Memory/session/history retrieval may help resume missing artifact state, but it must never override the current task's explicit universe, canon mode, protagonist, or seed constraints.",
+      );
+    }
+
+    return lines.join("\n");
+  }
+
+  private rewriteNovelistPlanDescription(
+    description: string,
+    context: ReturnType<TaskExecutor["getNovelistConstraintContext"]>,
+  ): string {
+    const trimmed = String(description || "").trim();
+    if (!trimmed || !context.preserveEstablishedUniverse) return trimmed;
+    if (!/\b(?:original universe|legally distinct|rather than using .* canon|reframe .* original)\b/i.test(trimmed)) {
+      return trimmed;
+    }
+
+    return `Draft and package the requested${context.franchiseLabel ? ` ${context.franchiseLabel}` : ""} universe novel with the novelist workflow, preserving the requested setting and canon mode.`;
+  }
+
+  private rewriteNovelistPlanStepDescription(
+    description: string,
+    context: ReturnType<TaskExecutor["getNovelistConstraintContext"]>,
+  ): string {
+    let next = String(description || "").trim();
+    if (!next) return next;
+
+    if (context.artifactDir) {
+      const artifactDir = context.artifactDir.replace(/\/+$/, "");
+      next = next.replace(
+        /\bartifacts\/(seed\.txt|brief\.md|world\.md|characters\.md|outline\.md|voice\.md|canon\.md|progress\.json|revision-notes\.md|manuscript_complete\.md|manifest\.md)\b/g,
+        `${artifactDir}/$1`,
+      );
+      next = next.replace(/\bartifacts\/chapters\//g, `${artifactDir}/chapters/`);
+    }
+
+    if (!context.preserveEstablishedUniverse) {
+      return next;
+    }
+
+    if (
+      /\b(?:reframe .* original universe|original universe|legally distinct|rather than using .* canon|remove all dependence on .* canon|wholly original universe)\b/i.test(
+        next,
+      )
+    ) {
+      const franchisePhrase = context.franchiseLabel
+        ? `${context.franchiseLabel} universe`
+        : "requested franchise universe";
+      const artifactPhrase = context.artifactDir
+        ? ` under \`${context.artifactDir}\``
+        : "";
+      return `Create the canon continuity notes and world bible for the ${franchisePhrase}${artifactPhrase} without changing the setting to original IP.`;
+    }
+
+    return next;
   }
 
   private applySkillApplication(application: SkillApplication): boolean {
@@ -10867,6 +11243,96 @@ ${transcript}
     );
   }
 
+  private getUnavailableToolAlternatives(
+    toolName: string,
+    input: Any,
+    availableToolNames: Set<string>,
+  ): string[] {
+    const canonicalToolName = canonicalizeToolNameUtil(toolName);
+    const availableCanonical = new Set(
+      Array.from(availableToolNames || []).map((name) => canonicalizeToolNameUtil(name)),
+    );
+    const suggestions = new Set<string>();
+    const addSuggestion = (candidate: string): void => {
+      const canonicalCandidate = canonicalizeToolNameUtil(candidate);
+      if (!canonicalCandidate || canonicalCandidate === canonicalToolName) return;
+      if (!availableCanonical.has(canonicalCandidate)) return;
+      suggestions.add(canonicalCandidate);
+    };
+
+    const rawPathCandidate =
+      typeof input?.path === "string"
+        ? input.path
+        : typeof input?.filename === "string"
+          ? input.filename
+          : "";
+    const normalizedExtension = String(path.extname(rawPathCandidate || "")).trim().toLowerCase();
+    const normalizedFormat = String(input?.format || "").trim().toLowerCase();
+    const docLikeOutput =
+      normalizedExtension === ".pdf" ||
+      normalizedExtension === ".docx" ||
+      normalizedFormat === "pdf" ||
+      normalizedFormat === "docx";
+
+    switch (canonicalToolName) {
+      case "create_document":
+      case "generate_document":
+        addSuggestion(canonicalToolName === "create_document" ? "generate_document" : "create_document");
+        if (!docLikeOutput) {
+          addSuggestion("write_file");
+          addSuggestion("edit_file");
+        }
+        break;
+      case "write_file":
+      case "edit_file":
+        if (docLikeOutput) {
+          addSuggestion("create_document");
+          addSuggestion("generate_document");
+        }
+        addSuggestion(canonicalToolName === "write_file" ? "edit_file" : "write_file");
+        addSuggestion("run_command");
+        break;
+      case "run_command":
+        addSuggestion("run_applescript");
+        addSuggestion("write_file");
+        break;
+      case "create_presentation":
+      case "generate_presentation":
+        addSuggestion(
+          canonicalToolName === "create_presentation"
+            ? "generate_presentation"
+            : "create_presentation",
+        );
+        break;
+      case "create_spreadsheet":
+      case "generate_spreadsheet":
+        addSuggestion(
+          canonicalToolName === "create_spreadsheet"
+            ? "generate_spreadsheet"
+            : "create_spreadsheet",
+        );
+        break;
+      case "browser_navigate":
+        addSuggestion("web_fetch");
+        addSuggestion("web_search");
+        break;
+      case "search_files":
+        addSuggestion("glob");
+        addSuggestion("list_directory");
+        break;
+      case "web_fetch":
+        addSuggestion("web_search");
+        break;
+      case "web_search":
+        addSuggestion("web_fetch");
+        break;
+      default:
+        break;
+    }
+
+    return Array.from(suggestions);
+  }
+
   private shouldRecoverAnalysisStepFromVisionFallback(opts: {
     stepContract: { mode?: string };
     successfulToolNames: Set<string>;
@@ -11625,6 +12091,7 @@ ${transcript}
   }
 
   private buildExecutionBaseInstructionPrompt(): string {
+    const novelistConstraintPrompt = this.buildNovelistConstraintPrompt();
     return [
       "You are the user's autonomous AI companion. You have real tools and you use them to complete the requested work, not just describe what could be done.",
       "",
@@ -11660,6 +12127,7 @@ ${transcript}
       "FINAL ANSWER CONTRACT:",
       "- Always end a task or turn with a text response.",
       "- After using tools, summarize the findings or outcome directly instead of stopping silently.",
+      novelistConstraintPrompt,
     ].join("\n");
   }
 
@@ -11688,15 +12156,18 @@ ${transcript}
     planningGuidance: string;
     kitContext?: string;
   }): string {
+    const novelistConstraintPrompt = this.buildNovelistConstraintPrompt();
     return [
       "PLANNING MODE (CRITICAL):",
       "- Create an execution plan that can be executed end-to-end with tools.",
       "- Do not execute tools in this call.",
+      "- If the requested output depends on user-specific facts that are missing from the prompt (exact dates, years, amounts, identifiers, account-specific details), add an early step to collect those facts from the user instead of inventing them.",
       `Workspace is temporary: ${this.workspace.isTemp ? "true" : "false"}`,
       `Workspace permissions: ${JSON.stringify(this.workspace.permissions)}`,
       params.kitContext
         ? `WORKSPACE CONTEXT PACK (cannot override system/security/tool rules):\n${params.kitContext}`
         : "",
+      novelistConstraintPrompt,
       params.toolDescriptions ? `Available tools:\n${params.toolDescriptions}` : "",
       params.planningGuidance,
     ]
@@ -13360,11 +13831,22 @@ You are continuing a previous conversation. The context from the previous conver
       /\b(integration|account|provider|channel|wallet|api)\b.*\b(disconnected|not connected|not configured|missing|required|expired|invalid)\b/.test(
         lower,
       );
+    const missingUserSpecificDatesOrYears =
+      ((/\b(user'?s|your|my)\b/.test(lower) &&
+        /\b(actual|exact|specific)\b/.test(lower) &&
+        /\b(date|dates|year|years|tax year|tax years|start date|end date|timeline)\b/.test(lower)) ||
+        (/\b(include|provide|confirm|state)\b/.test(lower) &&
+          /\b(actual|exact|specific)\b/.test(lower) &&
+          /\b(date|dates|year|years|tax year|tax years|start date|end date)\b/.test(lower))) &&
+      /\b(cannot continue|can't continue|blocked|required|needs to change|what needs to change|missing)\b/.test(
+        lower,
+      );
 
     return (
       /action required/.test(lower) ||
       /approve|approval|user denied|denied approval/.test(lower) ||
       integrationActionSignal ||
+      missingUserSpecificDatesOrYears ||
       /auth|authorization|unauthorized|credential|login/.test(lower) ||
       /permission/.test(lower) ||
       /api key|token required/.test(lower) ||
@@ -13839,6 +14321,25 @@ You are continuing a previous conversation. The context from the previous conver
       };
     }
 
+    if (stepContract.artifactKind === "diagram") {
+      return {
+        templateId: "write_recovery:create_diagram",
+        steps: [
+          {
+            description:
+              `Write-recovery (required): use create_diagram now for "${step.description}". ` +
+              "Create a minimal valid Mermaid diagram first, then refine it to satisfy the original step.",
+            kind: "recovery",
+          },
+          {
+            description:
+              "After the first successful diagram mutation, continue refining the same inline diagram and complete the original step requirements.",
+            kind: "recovery",
+          },
+        ],
+      };
+    }
+
     return {
       templateId: "write_recovery:file_write",
       steps: [
@@ -13946,6 +14447,43 @@ You are continuing a previous conversation. The context from the previous conver
       return false;
     }
     return this.handlePlanRevision(newSteps, reason, clearRemaining);
+  }
+
+  private pruneSatisfiedGenericRecoverySteps(completedStep: PlanStep): void {
+    if (!this.plan || completedStep.kind !== "recovery") {
+      return;
+    }
+    if (
+      !/^Try an alternative toolchain or different input strategy for:/i.test(
+        completedStep.description,
+      )
+    ) {
+      return;
+    }
+
+    const completedIndex = this.plan.steps.findIndex((step) => step.id === completedStep.id);
+    if (completedIndex < 0) return;
+
+    let removedCount = 0;
+    while (true) {
+      const nextStep = this.plan.steps[completedIndex + 1];
+      if (
+        !nextStep ||
+        nextStep.status !== "pending" ||
+        nextStep.kind !== "recovery" ||
+        !/^If normal tools are blocked,/i.test(nextStep.description)
+      ) {
+        break;
+      }
+      this.plan.steps.splice(completedIndex + 1, 1);
+      removedCount += 1;
+    }
+
+    if (removedCount > 0) {
+      logger.info(
+        `${this.logTag} Pruned ${removedCount} redundant generic recovery step(s) after successful alternative recovery`,
+      );
+    }
   }
 
   /**
@@ -18190,7 +18728,7 @@ You are continuing a previous conversation. The context from the previous conver
     args: string,
     invocationLabel: string,
     trigger: SkillApplicationTrigger,
-  ): Promise<void> {
+  ): Promise<"applied" | "pending"> {
     const input = {
       skill: skillId,
       args,
@@ -18208,10 +18746,15 @@ You are continuing a previous conversation. The context from the previous conver
           : `Failed to execute ${invocationLabel}.`;
       throw new Error(reason);
     }
+    if (result?.pending_skill_parameter_collection) {
+      this.startPendingSkillParameterCollection(result.pending_skill_parameter_collection);
+      return "pending";
+    }
     const applied = this.consumeResolvedSkillInvocationResult(result, skillId, trigger);
     if (!applied) {
       throw new Error(`Failed to apply hidden skill context for ${invocationLabel}.`);
     }
+    return "applied";
   }
 
   private async runUseSkillFromSlash(command: ParsedSkillSlashCommand): Promise<void> {
@@ -18222,6 +18765,42 @@ You are continuing a previous conversation. The context from the previous conver
         : tail;
 
     await this.executeSkillInvocation(command.command, args, `/${command.command}`, "slash");
+  }
+
+  private shouldCollectNaturalLlmWikiObjective(
+    parsed: ReturnType<typeof parseNaturalLlmWikiPrompt>,
+  ): boolean {
+    return (
+      parsed.matched &&
+      !String(parsed.objective || "").trim() &&
+      parsed.mode !== "init" &&
+      parsed.mode !== "lint" &&
+      parsed.mode !== "refresh"
+    );
+  }
+
+  private startNaturalLlmWikiObjectiveCollection(
+    parsed: ReturnType<typeof parseNaturalLlmWikiPrompt>,
+  ): void {
+    const skill = getCustomSkillLoader().getSkill("llm-wiki");
+    const parameters: Record<string, unknown> = {};
+
+    if (parsed.mode && parsed.mode !== "auto") {
+      parameters.mode = parsed.mode;
+    }
+    if (parsed.obsidian && parsed.obsidian !== "auto") {
+      parameters.obsidian = parsed.obsidian;
+    }
+
+    this.startPendingSkillParameterCollection({
+      skillId: "llm-wiki",
+      skillName: skill?.name || "LLM Wiki",
+      trigger: "explicit_hint",
+      parameters,
+      requiredParameterNames: ["objective"],
+      currentParameterIndex: 0,
+      startedAt: Date.now(),
+    });
   }
 
   private async maybeHandleNaturalLlmWikiPrompt(): Promise<boolean> {
@@ -18244,6 +18823,18 @@ You are continuing a previous conversation. The context from the previous conver
       return false;
     }
     const parsed = parseNaturalLlmWikiPrompt(query);
+
+    if (this.shouldCollectNaturalLlmWikiObjective(parsed)) {
+      this.startNaturalLlmWikiObjectiveCollection(parsed);
+      this.emitEvent("log", {
+        message:
+          "[skill-routing] paused llm-wiki from a natural research-vault prompt to collect the missing objective.",
+        taskId: this.task.id,
+        mode: parsed.mode,
+        obsidian: parsed.obsidian,
+      });
+      return true;
+    }
 
     await this.executeSkillInvocation(
       "llm-wiki",
@@ -18269,6 +18860,258 @@ You are continuing a previous conversation. The context from the previous conver
     return (this.appliedSkills || []).some(
       (application) => String(application.skillId || "").trim() === normalizedSkillId,
     );
+  }
+
+  private getPendingSkillParameterCollection(): PendingSkillParameterCollection | null {
+    return this.getSessionRuntime().getPendingSkillParameterCollection();
+  }
+
+  private setPendingSkillParameterCollection(
+    pending: PendingSkillParameterCollection | null,
+  ): PendingSkillParameterCollection | null {
+    return this.getSessionRuntime().setPendingSkillParameterCollection(pending);
+  }
+
+  private markPrimarySlashCommandHandled(): void {
+    this.getSessionRuntime().markPrimarySlashCommandHandled();
+  }
+
+  private hasHandledPrimarySlashCommand(): boolean {
+    return this.getSessionRuntime().hasHandledPrimarySlashCommand();
+  }
+
+  private getPendingSkillParameterDefinition(
+    pending: PendingSkillParameterCollection,
+  ): { skill: CustomSkill; parameter: SkillParameter } | null {
+    const skill = getCustomSkillLoader().getSkill(pending.skillId);
+    if (!skill) return null;
+    const parameterName = pending.requiredParameterNames[pending.currentParameterIndex];
+    if (!parameterName) return null;
+    const parameter = (skill.parameters || []).find((candidate) => candidate.name === parameterName);
+    if (!parameter) return null;
+    return { skill, parameter };
+  }
+
+  private buildPendingSkillParameterPrompt(
+    pending: PendingSkillParameterCollection,
+    opts?: { invalidReason?: string },
+  ): string {
+    const definition = this.getPendingSkillParameterDefinition(pending);
+    if (!definition) {
+      return `I still need one more required value for ${pending.skillName}. Reply with the missing detail so I can continue.`;
+    }
+    const { parameter } = definition;
+    const description = String(parameter.description || "").trim();
+    const label = parameter.name;
+    const prefix = opts?.invalidReason
+      ? `I couldn't use that answer for ${label}. ${opts.invalidReason}`
+      : `I need one more detail for ${pending.skillName}.`;
+
+    if (parameter.type === "select") {
+      const options = (parameter.options || []).join(", ");
+      return `${prefix} Reply with ${label}${description ? ` (${description})` : ""}. Choose one of: ${options}.`;
+    }
+    if (parameter.type === "boolean") {
+      return `${prefix} Reply with ${label}${description ? ` (${description})` : ""}. Answer yes or no.`;
+    }
+    if (parameter.type === "number") {
+      return `${prefix} Reply with a number for ${label}${description ? ` (${description})` : ""}.`;
+    }
+    return `${prefix} Reply with ${label}${description ? ` (${description})` : ""}.`;
+  }
+
+  private parsePendingSkillParameterAnswer(
+    parameter: SkillParameter,
+    answer: string,
+  ): { ok: true; value: unknown } | { ok: false; reason: string } {
+    const trimmed = String(answer || "").trim();
+    if (!trimmed) {
+      return { ok: false, reason: "The reply was empty." };
+    }
+
+    if (parameter.type === "number") {
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed)) {
+        return { ok: false, reason: "Please reply with a valid number." };
+      }
+      return { ok: true, value: parsed };
+    }
+
+    if (parameter.type === "boolean") {
+      const normalized = trimmed.toLowerCase();
+      if (["true", "yes", "y", "1", "on"].includes(normalized)) {
+        return { ok: true, value: true };
+      }
+      if (["false", "no", "n", "0", "off"].includes(normalized)) {
+        return { ok: true, value: false };
+      }
+      return { ok: false, reason: "Please answer yes or no." };
+    }
+
+    if (parameter.type === "select") {
+      const options = Array.isArray(parameter.options) ? parameter.options : [];
+      const normalized = trimmed.toLowerCase();
+      const exactMatch = options.find((option) => option.toLowerCase() === normalized);
+      if (exactMatch) {
+        return { ok: true, value: exactMatch };
+      }
+      const numericIndex = Number.parseInt(normalized, 10);
+      if (Number.isFinite(numericIndex) && numericIndex >= 1 && numericIndex <= options.length) {
+        return { ok: true, value: options[numericIndex - 1] };
+      }
+      const prefixMatches = options.filter((option) => option.toLowerCase().startsWith(normalized));
+      if (prefixMatches.length === 1) {
+        return { ok: true, value: prefixMatches[0] };
+      }
+      return {
+        ok: false,
+        reason: `Please choose one of: ${options.join(", ")}.`,
+      };
+    }
+
+    return { ok: true, value: trimmed };
+  }
+
+  private pauseForSkillParameterInput(
+    message: string,
+    reason: "initial_prompt" | "invalid_answer" | "next_prompt",
+  ): void {
+    this.waitingForUserInput = true;
+    this.lastPauseReason = "skill_parameters";
+    this.lastAwaitingUserInputReasonCode = "skill_parameters";
+    this.task.awaitingUserInputReasonCode = "skill_parameters";
+    this.daemon.updateTask(this.task.id, {
+      status: "paused",
+      terminalStatus: "needs_user_action",
+      failureClass: undefined,
+      awaitingUserInputReasonCode: "skill_parameters",
+    });
+    this.emitEvent("awaiting_user_input", {
+      reasonCode: "skill_parameters",
+      source: "skill_parameters",
+      reason,
+    });
+    this.emitEvent("assistant_message", { message });
+    this.emitEvent("task_paused", {
+      message,
+      reason: "skill_parameters",
+    });
+    this.emitEvent("progress_update", {
+      phase: "execution",
+      completedSteps: this.plan?.steps.filter((s) => s.status === "completed").length ?? 0,
+      totalSteps: this.plan?.steps.length ?? 0,
+      progress: 0,
+      message: "Paused - awaiting skill parameter",
+    });
+    this.appendConversationHistory({
+      role: "assistant",
+      content: [{ type: "text", text: message }],
+    });
+    this.saveConversationSnapshot();
+  }
+
+  private startPendingSkillParameterCollection(pending: PendingSkillParameterCollection): void {
+    const nextPending = this.setPendingSkillParameterCollection(pending);
+    this.markPrimarySlashCommandHandled();
+    if (!nextPending) {
+      throw new Error(`Failed to initialize pending parameter collection for ${pending.skillName}.`);
+    }
+    this.emitEvent("skill_parameter_collection_started", {
+      pending: nextPending,
+    });
+    this.pauseForSkillParameterInput(
+      this.buildPendingSkillParameterPrompt(nextPending),
+      "initial_prompt",
+    );
+  }
+
+  private finishPendingSkillParameterCollection(
+    status: "applied" | "abandoned",
+    pendingOverride?: PendingSkillParameterCollection | null,
+  ): void {
+    const pending = pendingOverride || this.getPendingSkillParameterCollection();
+    if (!pending) return;
+    this.emitEvent("skill_parameter_collection_finished", {
+      status,
+      pending,
+    });
+    this.setPendingSkillParameterCollection(null);
+  }
+
+  private async handlePendingSkillParameterReply(
+    message: string,
+  ): Promise<"not_pending" | "paused" | "continue"> {
+    const pending = this.getPendingSkillParameterCollection();
+    if (!pending) return "not_pending";
+
+    const definition = this.getPendingSkillParameterDefinition(pending);
+    if (!definition) {
+      this.finishPendingSkillParameterCollection("abandoned", pending);
+      this.pauseForSkillParameterInput(
+        `I couldn't resume ${pending.skillName} because its parameter definition is no longer available. Please rerun /${pending.skillId}.`,
+        "invalid_answer",
+      );
+      return "paused";
+    }
+
+    const parsed = this.parsePendingSkillParameterAnswer(definition.parameter, message);
+    if (!parsed.ok) {
+      this.pauseForSkillParameterInput(
+        this.buildPendingSkillParameterPrompt(pending, { invalidReason: parsed.reason }),
+        "invalid_answer",
+      );
+      return "paused";
+    }
+
+    const nextPending: PendingSkillParameterCollection = {
+      ...pending,
+      parameters: {
+        ...pending.parameters,
+        [definition.parameter.name]: parsed.value,
+      },
+      currentParameterIndex: pending.currentParameterIndex + 1,
+    };
+    this.emitEvent("skill_parameter_answered", {
+      skillId: pending.skillId,
+      parameterName: definition.parameter.name,
+      pending: nextPending,
+    });
+
+    if (nextPending.currentParameterIndex < nextPending.requiredParameterNames.length) {
+      this.setPendingSkillParameterCollection(nextPending);
+      this.pauseForSkillParameterInput(
+        this.buildPendingSkillParameterPrompt(nextPending),
+        "next_prompt",
+      );
+      return "paused";
+    }
+
+    this.daemon.updateTask(this.task.id, {
+      status: "executing",
+      terminalStatus: undefined,
+      failureClass: undefined,
+      awaitingUserInputReasonCode: undefined,
+    });
+    this.waitingForUserInput = false;
+    this.lastPauseReason = null;
+    this.lastAwaitingUserInputReasonCode = null;
+    this.task.awaitingUserInputReasonCode = undefined;
+    await this.executeSkillInvocation(
+      pending.skillId,
+      JSON.stringify(nextPending.parameters),
+      `/${pending.skillId}`,
+      pending.trigger,
+    );
+    this.emitEvent("assistant_message", {
+      message: `Collected the remaining details for ${pending.skillName}. Continuing now.`,
+    });
+    this.appendConversationHistory({
+      role: "assistant",
+      content: [{ type: "text", text: `Collected the remaining details for ${pending.skillName}. Continuing now.` }],
+    });
+    this.finishPendingSkillParameterCollection("applied", nextPending);
+    this.saveConversationSnapshot();
+    return "continue";
   }
 
   private normalizeSkillInvocationQuery(query: string): string {
@@ -18788,6 +19631,9 @@ You are continuing a previous conversation. The context from the previous conver
 
     const direct = parseLeadingSkillSlashCommand(raw);
     if (direct.matched) {
+      if (this.hasHandledPrimarySlashCommand()) {
+        return false;
+      }
       if (direct.error || !direct.parsed) {
         throw new Error(
           `${direct.error || "Invalid slash command."}\n\n` +
@@ -18800,6 +19646,7 @@ You are continuing a previous conversation. The context from the previous conver
 
       this.configureBatchExternalPolicyFromSlash(direct.parsed);
       await this.runUseSkillFromSlash(direct.parsed);
+      this.markPrimarySlashCommandHandled();
       this.emitEvent("log", {
         message: `Applied /${direct.parsed.command} as additive skill context.`,
       });
@@ -18808,6 +19655,9 @@ You are continuing a previous conversation. The context from the previous conver
 
     const genericDirect = this.tryParseGenericSkillSlashCommand(raw);
     if (genericDirect.matched) {
+      if (this.hasHandledPrimarySlashCommand()) {
+        return false;
+      }
       if (genericDirect.error || !genericDirect.skillId) {
         throw new Error(genericDirect.error || "Invalid skill slash command.");
       }
@@ -18818,6 +19668,7 @@ You are continuing a previous conversation. The context from the previous conver
         `/${genericDirect.skillId}`,
         "slash",
       );
+      this.markPrimarySlashCommandHandled();
       this.emitEvent("log", {
         message: `Applied /${genericDirect.skillId} as hidden skill context.`,
       });
@@ -19689,6 +20540,9 @@ You are continuing a previous conversation. The context from the previous conver
           "the explicitly requested task skill",
         );
         await this.maybeHandleHighConfidenceSkillRouting();
+      }
+      if (this.waitingForUserInput || this.paused) {
+        return;
       }
 
       // Phase 0: Pre-task Analysis (like Cowork's AskUserQuestion)
@@ -20566,6 +21420,7 @@ Return ONLY a JSON object:
   }
 
   private getStepIntentAlignmentPolicy(): "off" | "balanced" | "strict" {
+    if (this.shouldForceStrictStepIntentAlignment()) return "strict";
     const c = this.task.agentConfig?.stepIntentAlignmentPolicy;
     if (c === "off" || c === "balanced" || c === "strict") return c;
     return this.task.agentConfig?.deepWorkMode ? "balanced" : "off";
@@ -20739,6 +21594,36 @@ Return ONLY a JSON object:
     );
   }
 
+  private isVerificationLeadInDescription(description: string): boolean {
+    const normalized = String(description || "").trim();
+    if (!normalized) return false;
+    if (!/[:：]\s*$/.test(normalized)) return false;
+    return (
+      this.descriptionIndicatesVerification(normalized) ||
+      /\b(?:verify|confirm|check|ensure|validate)\b/i.test(normalized)
+    );
+  }
+
+  private shouldAttachVerificationContinuation(
+    leadDescription: string,
+    continuationDescription: string,
+  ): boolean {
+    const lead = String(leadDescription || "").trim();
+    const continuation = String(continuationDescription || "").trim();
+    if (!lead || !continuation) return false;
+    if (!this.isVerificationLeadInDescription(lead)) return false;
+    if (this.hasBroadImplementationIntent(continuation)) return false;
+    if (/\b(?:create|build|implement|write|edit|modify|search|inspect|research|run)\b/i.test(continuation)) {
+      return false;
+    }
+    return (
+      /^(?:output|standard output|stdout|stderr|error output|exit (?:code|status)|command|result|response|message|text|content|file|path|artifact|document|section|keyword|link|status|log|test|build|lint|app|ui|page|canvas|diagram|image|screenshot|the command)\b/i.test(
+        continuation,
+      ) ||
+      continuation.split(/\s+/).filter(Boolean).length <= 12
+    );
+  }
+
   private extractPlanStepsFromText(text: string): Array<{ id: string; description: string }> {
     const rawLines = String(text || "")
       .split(/\r?\n/)
@@ -20800,8 +21685,23 @@ Return ONLY a JSON object:
 
       const numbered = isStepLineWithDescription(line);
       if (numbered.match) {
-        pushStep(numbered.id, numbered.desc);
-        idx += 1;
+        const collected = [numbered.desc];
+        let cursor = idx + 1;
+        while (cursor < rawLines.length) {
+          const nextLine = rawLines[cursor];
+          if (isStepHeaderOnly(nextLine).isHeader || isStepLineWithDescription(nextLine).match) {
+            break;
+          }
+          const bulletCandidate = isBulletStepLine(nextLine);
+          const continuation = bulletCandidate || nextLine;
+          if (!this.shouldAttachVerificationContinuation(numbered.desc, continuation)) {
+            break;
+          }
+          collected.push(continuation);
+          cursor += 1;
+        }
+        pushStep(numbered.id, collected.join(" ").trim());
+        idx = cursor;
         continue;
       }
 
@@ -21011,6 +21911,13 @@ Return ONLY a JSON object:
 
         // If step was aborted due to timeout or cancellation
         if (this.isAbortLikeError(error)) {
+          if (this.cancelled && this.cancelReason !== "timeout") {
+            step.error = undefined;
+            logger.info(
+              `${this.logTag} Step "${step.description}" aborted due to task cancellation (${this.cancelReason || "unknown"})`,
+            );
+            return;
+          }
           step.status = "failed";
           step.error = stepSoftTimedOut
             ? `Step soft-deadline reached after ${Math.round(softStepTimeoutMs / 1000)}s`
@@ -22028,6 +22935,7 @@ Return ONLY a JSON object:
       let hadToolError = false;
       let hadToolSuccessAfterError = false;
       let hadRecoverableVisionFallback = false;
+      let hadRecoverableUnavailableAlternative = false;
       let hadAnyToolSuccess = false;
       let allToolErrorsInputDependent = true;
       const toolErrors = new Set<string>();
@@ -22714,6 +23622,7 @@ Return ONLY a JSON object:
         let hasDuplicateToolAttempt = false;
         let hasUnavailableToolAttempt = false;
         let hasHardToolFailureAttempt = false;
+        let hadRecoverableUnavailableAlternative = false;
         const toolUseCount = (response.content || []).filter(
           (content: Any) => content?.type === "tool_use",
         ).length;
@@ -23027,6 +23936,11 @@ Return ONLY a JSON object:
                 if (!availableToolNames.has(content.name)) {
                   logger.info(`${this.logTag} Tool not available in this context: ${content.name}`);
                   const expectedRestriction = this.isToolRestrictedByPolicy(content.name);
+                  const alternatives = this.getUnavailableToolAlternatives(
+                    content.name,
+                    content.input,
+                    availableToolNames,
+                  );
                   hadToolError = true;
                   allToolErrorsInputDependent = false;
                   toolErrors.add(content.name);
@@ -23057,6 +23971,7 @@ Return ONLY a JSON object:
                         toolName: content.name,
                         toolUseId: content.id,
                         hint: runCommandShellHint,
+                        alternatives,
                       }),
                     },
                   };
@@ -23582,7 +24497,7 @@ Return ONLY a JSON object:
                             stepId: step.id,
                           });
                           if (!recovery.recovered) {
-                            throw toolError;
+                            throw (recovery.failureHint ? new Error(recovery.failureHint) : toolError);
                           }
                           result = recovery.result;
                           content.input = recovery.input ?? content.input;
@@ -23633,6 +24548,11 @@ Return ONLY a JSON object:
                         if (boundaryRecovery.recovered) {
                           result = boundaryRecovery.result;
                           content.input = boundaryRecovery.input ?? content.input;
+                        } else if (boundaryRecovery.failureHint) {
+                          result =
+                            result && typeof result === "object"
+                              ? { ...result, success: false, error: boundaryRecovery.failureHint }
+                              : { success: false, error: boundaryRecovery.failureHint };
                         }
 
                         const resultStr = JSON.stringify(result);
@@ -23696,6 +24616,11 @@ Return ONLY a JSON object:
                       if (rawOutcome.error) {
                         const failureMessage =
                           (rawOutcome.error as Any)?.message || "Tool execution failed";
+                        this.releaseBatchCreatedPathReservation(
+                          batchCreatedPaths,
+                          content.name,
+                          content.input,
+                        );
                         if (isExecutionToolCall) {
                           this.executionToolLastError = failureMessage;
                         }
@@ -23868,6 +24793,7 @@ Return ONLY a JSON object:
 
                       if (toolSucceeded) {
                         hadAnyToolSuccess = true;
+                        this.taskHadAnyToolSuccess = true;
                         successfulToolNames.add(canonicalContentName);
                         this.recordToolResult(content.name, result, content.input);
                         if (
@@ -24118,6 +25044,11 @@ Return ONLY a JSON object:
                       }
 
                       if (result && result.success === false) {
+                        this.releaseBatchCreatedPathReservation(
+                          batchCreatedPaths,
+                          content.name,
+                          content.input,
+                        );
                         const reason = this.getToolFailureReason(result, "unknown error");
                         const advisoryFailure = isAdvisoryToolFailureResultUtil(result);
                         if (advisoryFailure) {
@@ -24340,6 +25271,9 @@ Return ONLY a JSON object:
             skippedToolCallsByPolicy += parallelBatchResult.skippedToolCallsByPolicy;
             hasHardToolFailureAttempt =
               hasHardToolFailureAttempt || parallelBatchResult.hasHardToolFailureAttempt;
+            if (parallelBatchResult.hadRecoverableUnavailableAlternative) {
+              hadRecoverableUnavailableAlternative = true;
+            }
             hadToolError = hadToolError || parallelBatchResult.hadToolError;
             if (parallelBatchResult.hadToolSuccessAfterError) {
               hadToolSuccessAfterError = true;
@@ -24349,6 +25283,7 @@ Return ONLY a JSON object:
             }
             if (parallelBatchResult.hadAnyToolSuccess) {
               hadAnyToolSuccess = true;
+              this.taskHadAnyToolSuccess = true;
             }
             if (!parallelBatchResult.allToolErrorsInputDependent) {
               allToolErrorsInputDependent = false;
@@ -24612,6 +25547,14 @@ Return ONLY a JSON object:
             if (!availableToolNames.has(content.name)) {
               logger.info(`${this.logTag} Tool not available in this context: ${content.name}`);
               const expectedRestriction = this.isToolRestrictedByPolicy(content.name);
+              const alternatives = this.getUnavailableToolAlternatives(
+                content.name,
+                content.input,
+                availableToolNames,
+              );
+              if (alternatives.length > 0) {
+                hadRecoverableUnavailableAlternative = true;
+              }
               hadToolError = true;
               allToolErrorsInputDependent = false;
               toolErrors.add(content.name);
@@ -24631,10 +25574,11 @@ Return ONLY a JSON object:
                   toolName: content.name,
                   toolUseId: content.id,
                   hint: runCommandShellHint,
+                  alternatives,
                 }),
               );
               hasUnavailableToolAttempt = true;
-              if (!expectedRestriction) {
+              if (!expectedRestriction && alternatives.length === 0) {
                 hasHardToolFailureAttempt = true;
               }
               if (isExecutionToolCall) {
@@ -25065,7 +26009,7 @@ Return ONLY a JSON object:
                   stepId: step.id,
                 });
                 if (!recovery.recovered) {
-                  throw toolError;
+                  throw (recovery.failureHint ? new Error(recovery.failureHint) : toolError);
                 }
                 result = recovery.result;
                 content.input = recovery.input ?? content.input;
@@ -25116,6 +26060,11 @@ Return ONLY a JSON object:
               if (boundaryRecovery.recovered) {
                 result = boundaryRecovery.result;
                 content.input = boundaryRecovery.input ?? content.input;
+              } else if (boundaryRecovery.failureHint) {
+                result =
+                  result && typeof result === "object"
+                    ? { ...result, success: false, error: boundaryRecovery.failureHint }
+                    : { success: false, error: boundaryRecovery.failureHint };
               }
 
               // Tool succeeded - reset failure counter
@@ -25367,6 +26316,11 @@ Return ONLY a JSON object:
 
               // Check if the result indicates an error (some tools return error in result)
               if (result && result.success === false) {
+                this.releaseBatchCreatedPathReservation(
+                  batchCreatedPaths,
+                  content.name,
+                  content.input,
+                );
                 const reason = this.getToolFailureReason(result, "unknown error");
                 const advisoryFailure = isAdvisoryToolFailureResultUtil(result);
                 if (advisoryFailure) {
@@ -25506,6 +26460,11 @@ Return ONLY a JSON object:
 	                }),
 	              );
 	            } catch (error: Any) {
+              this.releaseBatchCreatedPathReservation(
+                batchCreatedPaths,
+                content.name,
+                content.input,
+              );
               const toolExecDuration = ((Date.now() - toolExecStart) / 1000).toFixed(1);
               logger.error(
                 `${this.logTag}   │ ⚙ Tool #${stepToolCallCount} "${content.name}" EXCEPTION | ` +
@@ -26212,6 +27171,13 @@ Return ONLY a JSON object:
         return;
       }
 
+      if (hadRecoverableUnavailableAlternative && (hadToolSuccessAfterError || hadAnyToolSuccess)) {
+        stepFailed = false;
+        if (/Tool .* failed: Tool not available/i.test(String(lastFailureReason || ""))) {
+          lastFailureReason = "";
+        }
+      }
+
       // If the model repeatedly returned empty content, treat this as a hard failure.
       // Otherwise we risk marking steps "completed" without doing any work.
       if (emptyResponseCount >= maxEmptyResponses) {
@@ -26302,6 +27268,7 @@ Return ONLY a JSON object:
         !stepFailed &&
         !this.isVerificationStep(step) &&
         stepContract.mode === "analysis_only" &&
+        this.shouldEnforceAnalysisOnlyMutationGuard(step) &&
         (stepSucceededWithFileMutation || stepSucceededWithCanvasMutation || bootstrapMutationSucceeded)
       ) {
         stepFailed = true;
@@ -26387,6 +27354,8 @@ Return ONLY a JSON object:
 
       const currentStepBrowserVerificationObserved =
         stepContract.verificationMode === "browser_session" && browserSessionEvidenceSatisfied;
+      const currentStepArtifactPresenceObserved =
+        artifactPresenceSatisfied || currentStepTargetVerificationObserved;
       const priorMutationReuse = this.trySatisfyMutationContractByPriorMutation({
         step,
         stepContract,
@@ -26465,7 +27434,7 @@ Return ONLY a JSON object:
         const artifactMissing =
           artifactContractMode === "artifact_write_required"
             ? !mutationSatisfiedForFinal && !satisfiedByPriorMutation && !createdFileDetected
-            : !mutationSatisfiedForFinal && !createdFileDetected && !artifactPresenceSatisfied;
+            : !mutationSatisfiedForFinal && !createdFileDetected && !currentStepArtifactPresenceObserved;
         if (artifactMissing) {
           stepFailed = true;
           if (!lastFailureReason) {
@@ -26504,6 +27473,9 @@ Return ONLY a JSON object:
         isLastStep,
         assistantText: finalAssistantText,
         hadAnyToolSuccess,
+        hadPriorToolSuccess: this.taskHadAnyToolSuccess && !hadAnyToolSuccess,
+        taskIntent: `${this.task.title || ""}\n${this.getExecutionTaskPrompt()}`,
+        stepDescription: step.description,
       });
       if (
         !stepFailed &&
@@ -26655,6 +27627,29 @@ Return ONLY a JSON object:
           reason: "awaiting_user_input",
         });
         throw new AwaitingUserInputError(awaitingUserInputReason || "Awaiting user input");
+      }
+
+      const shouldPauseForFailureDerivedUserInput =
+        stepFailed &&
+        !awaitingUserInput &&
+        this.isUserActionRequiredFailure(lastFailureReason || "") &&
+        (this.shouldPauseForQuestions || this.shouldPauseForRequiredDecision);
+      if (shouldPauseForFailureDerivedUserInput) {
+        awaitingUserInput = true;
+        awaitingUserInputReason = "user_action_required_failure";
+        this.emitEvent("awaiting_user_input", {
+          stepId: step.id,
+          stepDescription: step.description,
+          reasonCode: "user_action_required_failure",
+          reason: lastFailureReason,
+        });
+        this.stepStopReasons.add("awaiting_user_input");
+        this.emitEvent("log", {
+          metric: "step_stop_reason",
+          stepId: step.id,
+          reason: "awaiting_user_input",
+        });
+        throw new AwaitingUserInputError(awaitingUserInputReason);
       }
 
       if (stepHadWebSearchCall) {
@@ -27007,6 +28002,7 @@ Return ONLY a JSON object:
         step.status = "completed";
         step.error = undefined;
         step.completedAt = Date.now();
+        this.pruneSatisfiedGenericRecoverySteps(step);
         this.persistBestKnownOutcome();
         delete (step as Any).__verificationRewindAttempted;
         this.getSessionRuntime().clearVerificationFailedStep(step.id);
@@ -28323,6 +29319,7 @@ Return ONLY a JSON object:
     quotedAssistantMessage?: QuotedAssistantMessage,
     opts?: { recoveredFromTurnLimit?: boolean },
   ): Promise<void> {
+    let executionMessage = message;
     const recoveredFromTurnLimit = opts?.recoveredFromTurnLimit === true;
     if (!recoveredFromTurnLimit) {
       this.followUpRecoveryAttemptsInCurrentMessage = 0;
@@ -28335,10 +29332,19 @@ Return ONLY a JSON object:
         ...persistedTask,
       };
     }
+    this.lastAwaitingUserInputReasonCode =
+      typeof this.task.awaitingUserInputReasonCode === "string" &&
+      this.task.awaitingUserInputReasonCode.trim().length > 0
+        ? this.task.awaitingUserInputReasonCode
+        : this.lastAwaitingUserInputReasonCode;
     this.refreshProviderIfSettingsChanged();
     this.ensureProviderFailoverSelectionsContext(this.hasImageAttachments(images));
     const previousStatus = persistedTask?.status || this.task.status;
-    const shouldResumeAfterFollowup = previousStatus === "paused" || this.waitingForUserInput;
+    const pendingSkillParameterCollection = this.getPendingSkillParameterCollection();
+    const hasPendingSkillParameterCollection = pendingSkillParameterCollection !== null;
+    let handledPendingSkillReply = false;
+    const shouldResumeAfterFollowup =
+      (previousStatus === "paused" || this.waitingForUserInput) && !hasPendingSkillParameterCollection;
     const shouldStartNewCanvasSession = ["completed", "failed", "cancelled"].includes(
       previousStatus,
     );
@@ -28397,7 +29403,7 @@ Return ONLY a JSON object:
     const suppressUserMessageEvent = this._suppressNextUserMessageEvent;
     this._suppressNextUserMessageEvent = false;
 
-    if (this.preflightShellExecutionCheck()) {
+    if (hasPendingSkillParameterCollection) {
       if (!suppressUserMessageEvent && !recoveredFromTurnLimit) {
         this.emitEvent("user_message", {
           message,
@@ -28405,6 +29411,27 @@ Return ONLY a JSON object:
         });
       }
       if (!recoveredFromTurnLimit) {
+        this.appendConversationHistory({
+          role: "user",
+          content: await this.buildUserContent(followUpConversationMessage, images),
+        });
+      }
+      const pendingOutcome = await this.handlePendingSkillParameterReply(message);
+      if (pendingOutcome === "paused") {
+        return;
+      }
+      handledPendingSkillReply = true;
+      executionMessage = `Continue the task using the collected details for ${pendingSkillParameterCollection.skillName}.`;
+    }
+
+    if (this.preflightShellExecutionCheck()) {
+      if (!handledPendingSkillReply && !suppressUserMessageEvent && !recoveredFromTurnLimit) {
+        this.emitEvent("user_message", {
+          message,
+          ...(quotedAssistantMessage ? { quotedAssistantMessage } : {}),
+        });
+      }
+      if (!recoveredFromTurnLimit && !handledPendingSkillReply) {
         this.appendConversationHistory({
           role: "user",
           content: await this.buildUserContent(followUpConversationMessage, images),
@@ -28419,14 +29446,14 @@ Return ONLY a JSON object:
       if (this.lastPauseReason?.startsWith("workspace_")) {
         this.workspacePreflightAcknowledged = true;
       }
-      this.task.prompt = `${this.task.prompt}\n\nUSER UPDATE:\n${message}`;
+      this.task.prompt = `${this.task.prompt}\n\nUSER UPDATE:\n${executionMessage}`;
     }
     this.toolRegistry.setCanvasSessionCutoff(shouldStartNewCanvasSession ? Date.now() : null);
     // Reset deduplicator so follow-up messages can re-invoke tools used in the previous run
     this.toolCallDeduplicator.reset();
     this.daemon.updateTaskStatus(this.task.id, "executing");
     this.emitEvent("executing", { message: "Processing follow-up message" });
-    if (!suppressUserMessageEvent && !recoveredFromTurnLimit) {
+    if (!handledPendingSkillReply && !suppressUserMessageEvent && !recoveredFromTurnLimit) {
       this.emitEvent("user_message", {
         message,
         ...(quotedAssistantMessage ? { quotedAssistantMessage } : {}),
@@ -28437,7 +29464,7 @@ Return ONLY a JSON object:
       !shouldResumeAfterFollowup &&
       this.isExplicitChatExecutionMode()
     ) {
-      await this.respondInChatMode(message, previousStatus);
+      await this.respondInChatMode(executionMessage, previousStatus);
       return;
     }
 
@@ -28456,7 +29483,7 @@ Return ONLY a JSON object:
 
     // Get personality and identity prompts
     const contextMode = detectContextMode(
-      message || this.task.prompt,
+      executionMessage || this.task.prompt,
       this.task.agentConfig?.conversationMode,
       undefined,
     );
@@ -28483,7 +29510,7 @@ Return ONLY a JSON object:
       }
     }
     const externalProfileContext = allowMemoryInjection
-      ? await this.buildSupermemoryProfileBlock(message)
+      ? await this.buildSupermemoryProfileBlock(executionMessage)
       : "";
     const roleContext = this.getRoleContextPrompt();
     const infraContext = this.getInfraContextPrompt();
@@ -28507,17 +29534,17 @@ Return ONLY a JSON object:
     }
     const effectiveFollowUpExecutionMode = this.getEffectiveExecutionMode();
     const effectiveFollowUpDomain = this.getEffectiveTaskDomain();
-    const adaptiveRecoveryGuidance = await this.buildAdaptiveRecoveryTurnGuidance(message, {
+    const adaptiveRecoveryGuidance = await this.buildAdaptiveRecoveryTurnGuidance(executionMessage, {
       includePlaybook: false,
     });
     const followUpTurnGuidance = [
-      this.buildFollowUpTurnGuidancePrompt(message, quotedAssistantMessage),
+      this.buildFollowUpTurnGuidancePrompt(executionMessage, quotedAssistantMessage),
       adaptiveRecoveryGuidance,
     ]
       .filter(Boolean)
       .join("\n\n");
     const builtPrompt = await this.buildExecutionSystemPrompt({
-      taskPrompt: message,
+      taskPrompt: executionMessage,
       identityPrompt,
       roleContext,
       memoryContext: externalProfileContext,
@@ -28566,7 +29593,9 @@ Return ONLY a JSON object:
     let messageWithContext = message;
     const knowledgeSummary = this.fileOperationTracker.getKnowledgeSummary();
     if (knowledgeSummary) {
-      messageWithContext = `${message}\n\nKNOWLEDGE FROM PREVIOUS STEPS (use this context):\n${knowledgeSummary}`;
+      messageWithContext = `${executionMessage}\n\nKNOWLEDGE FROM PREVIOUS STEPS (use this context):\n${knowledgeSummary}`;
+    } else {
+      messageWithContext = executionMessage;
     }
     if (this.getEffectiveTaskPathRootPolicy() === "pin_and_rewrite" && this.taskPinnedRoot !== ".") {
       messageWithContext +=
@@ -28592,6 +29621,7 @@ Return ONLY a JSON object:
     let emptyResponseCount = 0;
     let hasProvidedTextResponse = false; // Track if agent has given a text answer
     let hadToolCalls = false; // Track if any tool calls were made
+    let hadSuccessfulToolCall = false; // Track if any follow-up tool call succeeded
     let capabilityRefusalCount = 0;
     const maxIterations = 32; // Allow enough iterations for multi-tool follow-up messages and productive coding sessions
     const maxEmptyResponses = 3;
@@ -28610,10 +29640,18 @@ Return ONLY a JSON object:
     let consecutiveToolUseStops = 0;
     let consecutiveMaxTokenStops = 0;
     let followUpToolCallsLocked = false;
+    let followUpToolLockReason:
+      | "persistent_tool_use_streak"
+      | "remaining_turn_budget_low"
+      | "repeated_identical_packaging_failure"
+      | null = null;
     let consecutiveSkippedToolOnlyTurns = 0;
     let lastInjectedPreFinalizationReminder: string | null = null;
     // Varied failure detection: non-resetting per-tool failure counter (not reset on success)
     const persistentToolFailures = new Map<string, number>();
+    const packagingFailureFingerprints = new Map<string, number>();
+    let repeatedPackagingFailureCount = 0;
+    let repeatedPackagingFailureSummary = "";
     let variedFailureNudgeInjected = false;
     const VARIED_FAILURE_THRESHOLD = 5;
     const requiresExecutionToolProgress =
@@ -28860,6 +29898,7 @@ Return ONLY a JSON object:
             consecutiveToolUseStops,
             followUpToolCallCount,
             stopReasonNudgeInjected,
+            repeatedPackagingFailureCount,
             remainingTurns: remainingTurnsAfterResponse,
             immediateTurnBudgetThreshold: 2,
             allowImmediateTurnBudgetLock,
@@ -28870,7 +29909,10 @@ Return ONLY a JSON object:
           followUpToolCallsLocked = true;
           const lockReason = immediateTurnBudgetLock
             ? "remaining_turn_budget_low"
+            : repeatedPackagingFailureCount >= 2
+              ? "repeated_identical_packaging_failure"
             : "persistent_tool_use_streak";
+          followUpToolLockReason = lockReason;
           this.emitEvent("tool_use_lock_enabled", {
             followUp: true,
             consecutiveToolUseStops,
@@ -28951,6 +29993,7 @@ Return ONLY a JSON object:
         let hasDuplicateToolAttempt = false;
         let hasUnavailableToolAttempt = false;
         let hasHardToolFailureAttempt = false;
+        let hadRecoverableUnavailableAlternative = false;
         const batchCreatedPaths = new Set<string>();
         const followUpToolUseCount = (response.content || []).filter(
           (content: Any) => content?.type === "tool_use",
@@ -28990,6 +30033,11 @@ Return ONLY a JSON object:
 
                   if (forceFinalizeWithoutTools) {
                     skippedToolCallsByPolicy += 1;
+                    const followUpToolLockError =
+                      followUpToolCallsLocked &&
+                      followUpToolLockReason === "repeated_identical_packaging_failure"
+                        ? "Tool call skipped: follow-up tool calls are locked because the same packaging/export failure repeated and more retries are unlikely to help in this cycle."
+                        : "Tool call skipped: follow-up tool calls are locked due to repeated tool-use looping.";
                     return {
                       status: "immediate" as const,
                       call: scheduledCall,
@@ -29000,11 +30048,13 @@ Return ONLY a JSON object:
                           tool_use_id: content.id,
                           content: JSON.stringify({
                             error: followUpToolCallsLocked
-                              ? "Tool call skipped: follow-up tool calls are locked due to repeated tool-use looping."
+                              ? followUpToolLockError
                               : "Tool call skipped: turn budget reserved for final response.",
                             blocked: true,
                             reason: followUpToolCallsLocked
-                              ? "follow_up_tool_use_lock"
+                              ? followUpToolLockReason === "repeated_identical_packaging_failure"
+                                ? "follow_up_packaging_failure_lock"
+                                : "follow_up_tool_use_lock"
                               : "turn_budget_soft_landing",
                           }),
                           is_error: true,
@@ -29200,7 +30250,15 @@ Return ONLY a JSON object:
                   if (!availableToolNames.has(content.name)) {
                     logger.info(`${this.logTag} Tool not available in this context: ${content.name}`);
                     const expectedRestriction = this.isToolRestrictedByPolicy(content.name);
-                    if (!expectedRestriction) {
+                    const alternatives = this.getUnavailableToolAlternatives(
+                      content.name,
+                      content.input,
+                      availableToolNames,
+                    );
+                    if (alternatives.length > 0) {
+                      hadRecoverableUnavailableAlternative = true;
+                    }
+                    if (!expectedRestriction && alternatives.length === 0) {
                       hasHardToolFailureAttempt = true;
                     }
                     this.emitEvent("tool_error", {
@@ -29231,6 +30289,7 @@ Return ONLY a JSON object:
                           toolName: content.name,
                           toolUseId: content.id,
                           hint: runCommandShellHint,
+                          alternatives,
                         }),
                       },
                     };
@@ -29496,7 +30555,7 @@ Return ONLY a JSON object:
                               followUp: true,
                             });
                             if (!recovery.recovered) {
-                              throw toolError;
+                              throw (recovery.failureHint ? new Error(recovery.failureHint) : toolError);
                             }
                             result = recovery.result;
                             content.input = recovery.input ?? content.input;
@@ -29513,6 +30572,11 @@ Return ONLY a JSON object:
                           if (boundaryRecovery.recovered) {
                             result = boundaryRecovery.result;
                             content.input = boundaryRecovery.input ?? content.input;
+                          } else if (boundaryRecovery.failureHint) {
+                            result =
+                              result && typeof result === "object"
+                                ? { ...result, success: false, error: boundaryRecovery.failureHint }
+                                : { success: false, error: boundaryRecovery.failureHint };
                           }
 
                           const resultStr = JSON.stringify(result);
@@ -29653,6 +30717,19 @@ Return ONLY a JSON object:
                             "failed",
                             failureMessage,
                           );
+                          const packagingFailure = recordPackagingFailureFingerprintUtil({
+                            toolName: content.name,
+                            input: content.input,
+                            error: failureMessage,
+                            counts: packagingFailureFingerprints,
+                          });
+                          repeatedPackagingFailureCount = Math.max(
+                            repeatedPackagingFailureCount,
+                            packagingFailure.count,
+                          );
+                          if (packagingFailure.thresholdReached) {
+                            repeatedPackagingFailureSummary = failureMessage;
+                          }
 
                           return {
                             toolResult: {
@@ -29685,6 +30762,8 @@ Return ONLY a JSON object:
 
                         const toolSucceeded = !(result && result.success === false);
                         if (toolSucceeded) {
+                          hadSuccessfulToolCall = true;
+                          this.taskHadAnyToolSuccess = true;
                           this.recordToolUsage(content.name);
                           if (content.name === "Skill") {
                             this.consumeResolvedSkillInvocationResult(
@@ -29792,6 +30871,19 @@ Return ONLY a JSON object:
                                 ),
                               });
                             }
+                            const packagingFailure = recordPackagingFailureFingerprintUtil({
+                              toolName: content.name,
+                              input: content.input,
+                              error: reason,
+                              counts: packagingFailureFingerprints,
+                            });
+                            repeatedPackagingFailureCount = Math.max(
+                              repeatedPackagingFailureCount,
+                              packagingFailure.count,
+                            );
+                            if (packagingFailure.thresholdReached) {
+                              repeatedPackagingFailureSummary = reason;
+                            }
                           }
                         } else {
                           if (isExecutionToolCall) {
@@ -29882,23 +30974,71 @@ Return ONLY a JSON object:
               : undefined,
           );
 
+          if (
+            !followUpToolCallsLocked &&
+            repeatedPackagingFailureCount >= 2 &&
+            toolResults.some((result) => result.is_error)
+          ) {
+            followUpToolCallsLocked = true;
+            followUpToolLockReason = "repeated_identical_packaging_failure";
+            this.emitEvent("tool_use_lock_enabled", {
+              followUp: true,
+              consecutiveToolUseStops,
+              followUpToolCallCount,
+              reason: "repeated_identical_packaging_failure",
+            });
+            this.emitEvent("follow_up_tool_lock_forced_finalization", {
+              taskId: this.task.id,
+              stepId: this.currentStepId || "follow_up",
+              reason: "repeated_identical_packaging_failure",
+              remainingTurns: remainingTurnsAfterResponse,
+              consecutiveToolUseStops,
+              followUpToolCallCount,
+              repeatedPackagingFailureCount,
+              failureSummary: repeatedPackagingFailureSummary,
+            });
+            messages.push({
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: this.sanitizeFallbackInstruction(
+                    "The same packaging/export attempt has failed repeatedly. " +
+                      "Do not call packaging tools again in this follow-up. " +
+                      "Use the evidence you already have, report the exact blocker, and finish with the best deliverable that is already available.",
+                  ),
+                },
+              ],
+            });
+            continueLoop = true;
+            state.messages = messages;
+            return { continueLoop, emptyResponseCount };
+          }
+
           if (skippedToolCallsByPolicy > 0) {
             consecutiveSkippedToolOnlyTurns = updateSkippedToolOnlyTurnStreakUtil({
               skippedToolCalls: skippedToolCallsByPolicy,
               hasTextInThisResponse,
               previousStreak: consecutiveSkippedToolOnlyTurns,
             });
+            const skippedToolOnlyStopThreshold =
+              followUpToolLockReason === "repeated_identical_packaging_failure"
+                ? 1
+                : loopGuardrail.skippedToolOnlyTurnThreshold;
 
             if (
               shouldForceStopAfterSkippedToolOnlyTurnsUtil(
                 consecutiveSkippedToolOnlyTurns,
-                loopGuardrail.skippedToolOnlyTurnThreshold,
+                skippedToolOnlyStopThreshold,
               ) &&
               !hasTextInThisResponse
             ) {
               const forcedStopMessage =
-                "I stopped this follow-up to prevent repeated tool-only looping. " +
-                "No additional reliable evidence could be gathered in this cycle.";
+                followUpToolLockReason === "repeated_identical_packaging_failure"
+                  ? "I stopped this follow-up after repeated identical packaging/export failures. " +
+                    "More tool retries were unlikely to help in this cycle."
+                  : "I stopped this follow-up to prevent repeated tool-only looping. " +
+                    "No additional reliable evidence could be gathered in this cycle.";
               this.emitEvent("assistant_message", {
                 message: forcedStopMessage,
               });
@@ -30178,7 +31318,10 @@ Return ONLY a JSON object:
             domain: this.getEffectiveTaskDomain(),
             isLastStep: true,
             assistantText: latestText,
-            hadAnyToolSuccess: hadToolCalls,
+            hadAnyToolSuccess: hadSuccessfulToolCall,
+            hadPriorToolSuccess: this.taskHadAnyToolSuccess && !hadSuccessfulToolCall,
+            taskIntent: `${this.task.title || ""}\n${this.task.prompt || ""}\n${message}`,
+            stepDescription: message,
           });
           if (domainCompletion.failed) {
             messages.push({

@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type {
   ImageAttachment,
   LlmProfile,
+  PendingSkillParameterCollection,
   PermissionMode,
   PermissionPromptDetails,
   PermissionRule,
@@ -208,6 +209,10 @@ export interface SessionRuntimeSnapshotV2 {
         }
       | null;
   };
+  skills: {
+    pendingParameterCollection: PendingSkillParameterCollection | null;
+    primarySlashCommandHandled: boolean;
+  };
   worker: {
     dispatchedMentionedAgents: boolean;
     verificationAgentState: Record<string, unknown>;
@@ -330,6 +335,10 @@ export interface SessionRuntimeState {
           message?: string;
         }
       | null;
+  };
+  skills: {
+    pendingParameterCollection: PendingSkillParameterCollection | null;
+    primarySlashCommandHandled: boolean;
   };
   worker: {
     dispatchedMentionedAgents: boolean;
@@ -501,7 +510,24 @@ export class SessionRuntime {
 
   createTaskList(items: SessionChecklistToolItemInput[]): SessionChecklistState {
     if (this.state.checklist.items.length > 0) {
-      throw new Error("task_list_create failed: a session checklist already exists.");
+      const existingBySignature = new Map(
+        this.state.checklist.items.map((item) => [
+          `${item.title.toLowerCase()}\u0000${item.kind}`,
+          item.id,
+        ] as const),
+      );
+      const mergedItems = (Array.isArray(items) ? items : []).map((item) => {
+        const explicitId = String(item?.id || "").trim();
+        if (explicitId) return item;
+        const title = String(item?.title || "").trim().toLowerCase();
+        const kind: SessionChecklistItem["kind"] =
+          item?.kind === "verification" || item?.kind === "other" || item?.kind === "implementation"
+            ? item.kind
+            : "implementation";
+        const existingId = existingBySignature.get(`${title}\u0000${kind}`);
+        return existingId ? { ...item, id: existingId } : item;
+      });
+      return this.applyTaskListState(mergedItems, "task_list_updated");
     }
     return this.applyTaskListState(items, "task_list_created");
   }
@@ -991,6 +1017,27 @@ export class SessionRuntime {
     const drained = [...this.state.queues.pendingFollowUps];
     this.state.queues.pendingFollowUps = [];
     return drained;
+  }
+
+  getPendingSkillParameterCollection(): PendingSkillParameterCollection | null {
+    return this.state.skills.pendingParameterCollection
+      ? { ...this.state.skills.pendingParameterCollection }
+      : null;
+  }
+
+  setPendingSkillParameterCollection(
+    pending: PendingSkillParameterCollection | null,
+  ): PendingSkillParameterCollection | null {
+    this.state.skills.pendingParameterCollection = pending ? { ...pending } : null;
+    return this.getPendingSkillParameterCollection();
+  }
+
+  markPrimarySlashCommandHandled(): void {
+    this.state.skills.primarySlashCommandHandled = true;
+  }
+
+  hasHandledPrimarySlashCommand(): boolean {
+    return this.state.skills.primarySlashCommandHandled === true;
   }
 
   private invalidateToolAvailabilityCache(): void {
@@ -1987,6 +2034,12 @@ export class SessionRuntime {
           pendingFollowUps: [...this.state.queues.pendingFollowUps],
           stepFeedbackSignal: this.state.queues.stepFeedbackSignal,
         },
+        skills: {
+          pendingParameterCollection: this.state.skills.pendingParameterCollection
+            ? { ...this.state.skills.pendingParameterCollection }
+            : null,
+          primarySlashCommandHandled: this.state.skills.primarySlashCommandHandled,
+        },
         worker: {
           dispatchedMentionedAgents: this.state.worker.dispatchedMentionedAgents,
           verificationAgentState: { ...this.state.worker.verificationAgentState },
@@ -2109,6 +2162,7 @@ export class SessionRuntime {
     }
     for (const candidate of v2Candidates) {
       if (this.restoreConversationFromPayload(candidate.payload, candidate.sourceLabel)) {
+        this.restorePendingSkillStateFromEvents(events);
         this.restoreTaskListStateFromEvents(events);
         return;
       }
@@ -2123,6 +2177,7 @@ export class SessionRuntime {
     }
     for (const candidate of legacyCandidates) {
       if (this.restoreConversationFromPayload(candidate.payload, candidate.sourceLabel)) {
+        this.restorePendingSkillStateFromEvents(events);
         if (this.state.usage.totalInputTokens === 0 && this.state.usage.totalOutputTokens === 0) {
           this.restoreUsageTotalsFromEvents(events);
         }
@@ -2222,6 +2277,7 @@ export class SessionRuntime {
       ]);
     }
 
+    this.restorePendingSkillStateFromEvents(events);
     this.restoreTaskListStateFromEvents(events);
   }
 
@@ -2362,6 +2418,11 @@ export class SessionRuntime {
     };
     this.state.queues.pendingFollowUps = payload.queues.pendingFollowUps || [];
     this.state.queues.stepFeedbackSignal = payload.queues.stepFeedbackSignal;
+    this.state.skills.pendingParameterCollection = payload.skills?.pendingParameterCollection
+      ? { ...payload.skills.pendingParameterCollection }
+      : null;
+    this.state.skills.primarySlashCommandHandled =
+      payload.skills?.primarySlashCommandHandled === true;
     this.state.worker.dispatchedMentionedAgents = payload.worker.dispatchedMentionedAgents;
     this.state.worker.verificationAgentState = payload.worker.verificationAgentState || {};
     this.state.permissions.mode = payload.permissions?.mode || this.state.permissions.mode;
@@ -2391,6 +2452,36 @@ export class SessionRuntime {
     this.state.promptCache.promptCacheInvalidationReason =
       payload.promptCache?.promptCacheInvalidationReason || null;
     this.restoreTaskListState(this.getTaskListStateFromPayload(payload));
+  }
+
+  private restorePendingSkillStateFromEvents(events: TaskEvent[]): void {
+    let pending: PendingSkillParameterCollection | null = this.state.skills.pendingParameterCollection;
+    let handled = this.state.skills.primarySlashCommandHandled;
+    for (const event of events) {
+      const type = this.deps.getReplayEventType(event);
+      if (type === "skill_parameter_collection_started") {
+        pending =
+          event.payload?.pending && typeof event.payload.pending === "object"
+            ? ({ ...event.payload.pending } as PendingSkillParameterCollection)
+            : pending;
+        handled = true;
+        continue;
+      }
+      if (type === "skill_parameter_answered") {
+        pending =
+          event.payload?.pending && typeof event.payload.pending === "object"
+            ? ({ ...event.payload.pending } as PendingSkillParameterCollection)
+            : pending;
+        handled = true;
+        continue;
+      }
+      if (type === "skill_parameter_collection_finished") {
+        pending = null;
+        handled = true;
+      }
+    }
+    this.state.skills.pendingParameterCollection = pending;
+    this.state.skills.primarySlashCommandHandled = handled;
   }
 
   private restoreUsageTotalsFromEvents(events: TaskEvent[]): void {

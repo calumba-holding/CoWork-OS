@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const rankModelInvocableSkillsForQuery = vi.fn();
 const listSkills = vi.fn();
+const getSkill = vi.fn();
 
 vi.mock("../custom-skill-loader", () => ({
   getCustomSkillLoader: () => ({
     rankModelInvocableSkillsForQuery,
     listSkills,
+    getSkill,
   }),
 }));
 
@@ -16,6 +18,22 @@ describe("TaskExecutor skill shortlist routing", () => {
   function createExecutor(prompt: string, taskOverrides: Any = {}) {
     const executor = Object.create(TaskExecutor.prototype) as Any;
     const resolvedInvocations = new Map<string, Any>();
+    let pending: Any = null;
+    let primaryHandled = false;
+    const runtime = {
+      getPendingSkillParameterCollection: vi.fn(() => (pending ? { ...pending } : null)),
+      setPendingSkillParameterCollection: vi.fn((next: Any) => {
+        pending = next ? { ...next } : null;
+        return pending ? { ...pending } : null;
+      }),
+      markPrimarySlashCommandHandled: vi.fn(() => {
+        primaryHandled = true;
+      }),
+      hasHandledPrimarySlashCommand: vi.fn(() => primaryHandled),
+      get pending() {
+        return pending;
+      },
+    };
 
     executor.task = {
       id: "task-skill-route-1",
@@ -29,6 +47,12 @@ describe("TaskExecutor skill shortlist routing", () => {
     executor.appliedSkills = [];
     executor.taskContextNotes = [];
     executor.emitEvent = vi.fn();
+    executor.appendConversationHistory = vi.fn();
+    executor.saveConversationSnapshot = vi.fn();
+    executor.daemon = {
+      updateTask: vi.fn(),
+    };
+    executor.getSessionRuntime = vi.fn(() => runtime);
     executor.getAvailableTools = vi.fn(() => [{ name: "Skill" }]);
     executor.toolRegistry = {
       executeTool: vi.fn(async (_name: string, _input: Any) => {
@@ -41,22 +65,32 @@ describe("TaskExecutor skill shortlist routing", () => {
       }),
     };
     executor.__resolvedInvocations = resolvedInvocations;
+    executor.__runtime = runtime;
 
     return executor as TaskExecutor & {
       emitEvent: ReturnType<typeof vi.fn>;
+      appendConversationHistory: ReturnType<typeof vi.fn>;
+      saveConversationSnapshot: ReturnType<typeof vi.fn>;
+      daemon: {
+        updateTask: ReturnType<typeof vi.fn>;
+      };
+      getSessionRuntime: ReturnType<typeof vi.fn>;
       getAvailableTools: ReturnType<typeof vi.fn>;
       toolRegistry: {
         executeTool: ReturnType<typeof vi.fn>;
         takeResolvedSkillInvocation: ReturnType<typeof vi.fn>;
       };
       __resolvedInvocations: Map<string, Any>;
+      __runtime: typeof runtime;
     };
   }
 
   beforeEach(() => {
     rankModelInvocableSkillsForQuery.mockReset();
     listSkills.mockReset();
+    getSkill.mockReset();
     listSkills.mockReturnValue([]);
+    getSkill.mockReturnValue(undefined);
   });
 
   it("ranks candidate skills for planning but does not auto-apply them", async () => {
@@ -346,52 +380,55 @@ describe("TaskExecutor skill shortlist routing", () => {
         ],
       },
     ]);
+    getSkill.mockReturnValue({
+      id: "llm-wiki",
+      name: "LLM Wiki",
+      description: "Build and maintain a persistent research vault.",
+      parameters: [
+        {
+          name: "objective",
+          type: "string",
+          description: "The topic, question, or research objective for the wiki run",
+          required: false,
+        },
+      ],
+    });
 
     const prompt =
       "Build a persistent Obsidian-friendly research vault in this workspace. If I have not given the topic yet, ask me for it first.";
     const executor = createExecutor(prompt);
-    executor.toolRegistry.executeTool.mockImplementation(async (name: string, input: Any) => {
-      expect(name).toBe("Skill");
-      expect(input).toEqual({
-        skill: "llm-wiki",
-        args: "--obsidian on",
-        trigger: "explicit_hint",
-      });
-      const invocationId = "skill-invocation-llm-wiki-starter";
-      executor.__resolvedInvocations.set(invocationId, {
-        skillId: "llm-wiki",
-        skillName: "LLM Wiki",
-        trigger: "explicit_hint",
-        args: "--obsidian on",
-        parameters: {
-          objective: "",
-          obsidian: "on",
-        },
-        content: "Expanded llm-wiki instructions",
-        reason: "Applied as additive skill context while preserving the original task.",
-        appliedAt: Date.now(),
-      });
-      return {
-        success: true,
-        skill: "llm-wiki",
-        skill_name: "LLM Wiki",
-        skill_invocation_id: invocationId,
-        message: "Loaded skill 'LLM Wiki' for this task.",
-      };
-    });
 
     const handled = await (
       TaskExecutor as Any
     ).prototype.maybeHandleNaturalLlmWikiPrompt.call(executor);
 
     expect(handled).toBe(true);
-    expect(executor.appliedSkills).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          skillId: "llm-wiki",
-          trigger: "explicit_hint",
-        }),
-      ]),
+    expect(executor.toolRegistry.executeTool).not.toHaveBeenCalled();
+    expect(executor.appliedSkills).toEqual([]);
+    expect(executor.__runtime.pending).toEqual(
+      expect.objectContaining({
+        skillId: "llm-wiki",
+        skillName: "LLM Wiki",
+        trigger: "explicit_hint",
+        parameters: {
+          obsidian: "on",
+        },
+        requiredParameterNames: ["objective"],
+        currentParameterIndex: 0,
+      }),
+    );
+    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
+      "task-skill-route-1",
+      expect.objectContaining({
+        status: "paused",
+        awaitingUserInputReasonCode: "skill_parameters",
+      }),
+    );
+    expect(executor.emitEvent).toHaveBeenCalledWith(
+      "assistant_message",
+      expect.objectContaining({
+        message: expect.stringContaining("Reply with objective"),
+      }),
     );
   });
 

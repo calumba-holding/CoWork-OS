@@ -304,9 +304,7 @@ function isLowValueVerboseLifecycleEvent(event: TaskEvent): boolean {
   }
 
   if (event.type === "timeline_group_started") {
-    const payload = asObject(event.payload);
-    const stage = typeof payload.stage === "string" ? payload.stage.trim().toUpperCase() : "";
-    if (stage === "DELIVER") {
+    if (isStageBoundaryTimelineGroupEvent(event)) {
       return true;
     }
   }
@@ -391,6 +389,17 @@ export function shouldShowTaskEventInSummaryMode(
   if (isStageBoundaryTimelineGroupEvent(event)) {
     if (event.type === "timeline_group_finished") return false;
     if (taskStatus === "completed") return false;
+    return isSubStageTimelineGroupEvent(event);
+  }
+
+  return true;
+}
+
+export function shouldShowTaskEventInStepFeed(event: TaskEvent): boolean {
+  if (isToolBatchTimelineGroupEvent(event)) return false;
+  if (isToolBatchLaneEvent(event)) return false;
+
+  if (isStageBoundaryTimelineGroupEvent(event)) {
     return isSubStageTimelineGroupEvent(event);
   }
 

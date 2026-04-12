@@ -518,6 +518,16 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     expect(requiredTools.has("web_search")).toBe(true);
   });
 
+  it("requires run_command for generic command execution steps with stdout-style success criteria", () => {
+    const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
+    const requiredTools = (TaskExecutor as Any).prototype.extractRequiredToolsFromStepDescription.call(
+      fakeThis,
+      "You want the command run in the current session context, and success means it prints `hello world`.",
+    ) as Set<string>;
+
+    expect(requiredTools.has("run_command")).toBe(true);
+  });
+
   it("infers required tools from explicit call-tool directives in plan steps", () => {
     const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
     fakeThis.toolRegistry = {
@@ -899,6 +909,46 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     expect(
       fakeThis.emitEvent.mock.calls.some(
         (call: Any[]) => call[0] === "task_path_recovery_attempted",
+      ),
+    ).toBe(true);
+  });
+
+  it("returns a discovery hint when relative path drift recovery budget is exhausted", async () => {
+    const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
+    fakeThis.workspace = { path: process.cwd() };
+    fakeThis.task = { id: "task-v6-budget" };
+    fakeThis.emitEvent = vi.fn();
+    fakeThis.executeToolWithHeartbeat = vi.fn();
+    fakeThis.reliabilityTaskRootPinningV6Enabled = true;
+    fakeThis.reliabilityPathDriftRewriteV6Enabled = true;
+    fakeThis.reliabilityPathDriftRetryV6Enabled = true;
+    fakeThis.taskPathRootPolicy = "pin_and_rewrite";
+    fakeThis.taskPinnedRoot = "influencer-chat";
+    fakeThis.taskPinnedRootSource = "plan";
+    fakeThis.pathDriftRetryBudget = 1;
+    fakeThis.pathDriftRecoveryAttemptsByStep = { "s-v6-budget": 1 };
+    fakeThis.pathDriftRecoverySignatureAttempts = Object.create(null);
+    fakeThis.reliabilityAliasRecoveryRetryV5Enabled = false;
+
+    const recovered = await (TaskExecutor as Any).prototype.tryWorkspaceBoundaryRecovery.call(
+      fakeThis,
+      {
+        toolName: "read_file",
+        input: { path: "data/influencers.json" },
+        errorMessage: "Failed to read file: ENOENT: no such file or directory",
+        toolTimeoutMs: 1_000,
+        stepId: "s-v6-budget",
+      },
+    );
+
+    expect(recovered.recovered).toBe(false);
+    expect(String(recovered.failureHint || "")).toContain("Do not retry the same missing path");
+    expect(String(recovered.failureHint || "")).toContain("glob, list_directory, or search_files");
+    expect(
+      fakeThis.emitEvent.mock.calls.some(
+        (call: Any[]) =>
+          call[0] === "task_path_recovery_failed" &&
+          call[1]?.reason === "retry_budget_exhausted",
       ),
     ).toBe(true);
   });

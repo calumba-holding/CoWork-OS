@@ -170,7 +170,7 @@ describe("TaskStrategyService applyToAgentConfig", () => {
     expect(strategy.executionMode).toBe("execute");
   });
 
-  it("promotes mixed intent maxTurns to 60 with concrete execution signals", () => {
+  it("does not inject maxTurns for mixed execution signals", () => {
     const route = makeRoute({
       intent: "mixed",
       complexity: "medium",
@@ -182,10 +182,10 @@ describe("TaskStrategyService applyToAgentConfig", () => {
       prompt: "Open src/main.ts and update the config.",
     });
 
-    expect(strategy.maxTurns).toBe(60);
+    expect(strategy.maxTurns).toBeUndefined();
   });
 
-  it("promotes high-complexity workflow-like mixed prompts to 80 turns", () => {
+  it("does not inject maxTurns for workflow-like mixed prompts", () => {
     const route = makeRoute({
       intent: "mixed",
       complexity: "high",
@@ -198,7 +198,7 @@ describe("TaskStrategyService applyToAgentConfig", () => {
         "Run tests, then update configuration, and then deploy the worker. Finally summarize the rollout.",
     });
 
-    expect(strategy.maxTurns).toBe(80);
+    expect(strategy.maxTurns).toBeUndefined();
   });
 
   it("marks strategy-derived execution mode source when no override is provided", () => {
@@ -209,11 +209,12 @@ describe("TaskStrategyService applyToAgentConfig", () => {
     expect(config.executionModeSource).toBe("strategy");
   });
 
-  it("defaults execution tasks to adaptive unbounded turn policy with follow-up recovery", () => {
+  it("leaves turn budget unset by default while keeping recovery defaults", () => {
     const route = makeRoute({ intent: "execution" });
     const strategy = TaskStrategyService.derive(route);
     const config = TaskStrategyService.applyToAgentConfig({}, strategy);
-    expect(config.turnBudgetPolicy).toBe("adaptive_unbounded");
+    expect(config.maxTurns).toBeUndefined();
+    expect(config.turnBudgetPolicy).toBeUndefined();
     expect(config.followUpAutoRecovery).toBe(true);
     expect(config.workspacePathAliasPolicy).toBe("rewrite_and_retry");
     expect(config.taskPathRootPolicy).toBe("pin_and_rewrite");
@@ -230,7 +231,7 @@ describe("TaskStrategyService applyToAgentConfig", () => {
     expect(strategy.answerFirst).toBe(false);
   });
 
-  it("forces execute mode and at least 80 turns for build+verify+render artifact prompts", () => {
+  it("forces execute mode for build+verify+render artifact prompts without injecting maxTurns", () => {
     const route = makeRoute({
       intent: "mixed",
       complexity: "medium",
@@ -244,11 +245,11 @@ describe("TaskStrategyService applyToAgentConfig", () => {
     });
 
     expect(strategy.executionMode).toBe("execute");
-    expect(strategy.maxTurns).toBe(80);
+    expect(strategy.maxTurns).toBeUndefined();
     expect(strategy.llmProfileHint).toBe("strong");
   });
 
-  it("forces execute mode, strong profile, and >=80 turns for build+render artifact prompts without explicit verify", () => {
+  it("forces execute mode and strong profile for build+render artifact prompts without explicit verify", () => {
     const route = makeRoute({
       intent: "execution",
       complexity: "medium",
@@ -261,8 +262,24 @@ describe("TaskStrategyService applyToAgentConfig", () => {
     });
 
     expect(strategy.executionMode).toBe("execute");
-    expect(strategy.maxTurns).toBeGreaterThanOrEqual(80);
+    expect(strategy.maxTurns).toBeUndefined();
     expect(strategy.llmProfileHint).toBe("strong");
+  });
+
+  it("preserves explicit maxTurns and hard-window policy", () => {
+    const route = makeRoute({ intent: "advice" });
+    const strategy = TaskStrategyService.derive(route, {
+      maxTurns: 25,
+      turnBudgetPolicy: "hard_window",
+    });
+    const config = TaskStrategyService.applyToAgentConfig(
+      { maxTurns: 25, turnBudgetPolicy: "hard_window" },
+      strategy,
+    );
+
+    expect(strategy.maxTurns).toBeUndefined();
+    expect(config.maxTurns).toBe(25);
+    expect(config.turnBudgetPolicy).toBe("hard_window");
   });
 
   it("escalates llm profile from cheap to strong for low-progress mutation-heavy artifact retries", () => {

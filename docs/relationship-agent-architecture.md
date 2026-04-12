@@ -22,10 +22,11 @@ CoWork OS should behave as a persistent personal agent that can:
 ### B. Strategy Layer (Execution Brain)
 - `TaskStrategyService` maps intent to execution strategy:
   - `conversationMode` (`chat` / `hybrid` / `task`)
-  - `maxTurns`
   - `qualityPasses`
   - answer-first behavior
   - bounded research + timeout-finalize bias
+- Strategy no longer injects default `maxTurns` for ordinary user-facing tasks.
+- Explicit turn-budget controls (`maxTurns`, `windowTurnCap`, `turnBudgetPolicy`) are preserved when a caller or helper flow sets them intentionally.
 - Strategy is embedded into prompt contract so execution is completion-oriented.
 
 ### C. Relationship Memory Layer (Memory Brain)
@@ -45,7 +46,7 @@ CoWork OS should behave as a persistent personal agent that can:
   - default agent settings to fit intent
 - On execution start:
   - re-apply strategy for legacy/queued tasks
-  - persist strategy defaults when needed
+  - persist strategy defaults when needed, without inventing an implicit turn cap
 - On completion:
   - record successful outcomes into relationship memory (top-level tasks).
 

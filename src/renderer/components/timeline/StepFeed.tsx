@@ -1,8 +1,9 @@
-import type React from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { TimelineIndicatorSpec } from "./timeline-indicators";
 
 interface StepFeedProps {
-  title: React.ReactNode;
+  title: ReactNode;
+  titleTooltip?: string;
   timeLabel: string;
   indicator: TimelineIndicatorSpec;
   showConnectorAbove?: boolean;
@@ -11,11 +12,12 @@ interface StepFeedProps {
   expandable: boolean;
   expanded: boolean;
   onToggle?: () => void;
-  details?: React.ReactNode;
+  details?: ReactNode;
 }
 
 export function StepFeed({
   title,
+  titleTooltip,
   timeLabel,
   indicator,
   showConnectorAbove = false,
@@ -26,6 +28,25 @@ export function StepFeed({
   onToggle,
   details,
 }: StepFeedProps) {
+  const [optimisticExpanded, setOptimisticExpanded] = useState(expanded);
+
+  useEffect(() => {
+    if (expanded) {
+      setOptimisticExpanded(true);
+      return;
+    }
+    setOptimisticExpanded(false);
+  }, [expanded]);
+
+  const visibleExpanded = expanded || optimisticExpanded;
+
+  const handleToggle = useCallback(() => {
+    if (!visibleExpanded) {
+      setOptimisticExpanded(true);
+    }
+    onToggle?.();
+  }, [onToggle, visibleExpanded]);
+
   const IndicatorIcon = indicator.icon;
   return (
     <div className="timeline-event step-feed-card">
@@ -43,8 +64,8 @@ export function StepFeed({
       </div>
       <div className="event-content">
         <div
-          className={`event-header ${expandable ? "expandable" : ""} ${expanded ? "expanded" : ""}`}
-          onClick={expandable ? onToggle : undefined}
+          className={`event-header ${expandable ? "expandable" : ""} ${visibleExpanded ? "expanded" : ""}`}
+          onClick={expandable ? handleToggle : undefined}
         >
           <div className="event-header-left">
             {expandable && (
@@ -60,11 +81,13 @@ export function StepFeed({
                 <path d="M9 18l6-6-6-6" />
               </svg>
             )}
-            <div className="event-title">{title}</div>
+            <div className="event-title" title={titleTooltip}>
+              {title}
+            </div>
           </div>
           <div className="event-time">{timeLabel}</div>
         </div>
-        {expanded && details}
+        {visibleExpanded && details}
       </div>
     </div>
   );

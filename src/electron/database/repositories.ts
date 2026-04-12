@@ -923,6 +923,52 @@ export class TaskRepository {
     return rows.map((row) => this.mapRowToTask(row));
   }
 
+  pruneByTargetNodeIds(nodeIds: string[], keepTaskIds: string[], createdAtGte?: number): number {
+    const normalizedNodeIds = Array.from(
+      new Set(
+        nodeIds
+          .map((value) => (typeof value === "string" ? value.trim() : ""))
+          .filter((value) => value.length > 0),
+      ),
+    );
+    if (normalizedNodeIds.length === 0) return 0;
+
+    const normalizedKeepTaskIds = Array.from(
+      new Set(
+        keepTaskIds
+          .map((value) => (typeof value === "string" ? value.trim() : ""))
+          .filter((value) => value.length > 0),
+      ),
+    );
+
+    const where: string[] = [
+      `target_node_id IN (${normalizedNodeIds.map(() => "?").join(", ")})`,
+    ];
+    const args: Any[] = [...normalizedNodeIds];
+
+    if (typeof createdAtGte === "number" && Number.isFinite(createdAtGte)) {
+      where.push("created_at >= ?");
+      args.push(createdAtGte);
+    }
+
+    if (normalizedKeepTaskIds.length > 0) {
+      where.push(`id NOT IN (${normalizedKeepTaskIds.map(() => "?").join(", ")})`);
+      args.push(...normalizedKeepTaskIds);
+    }
+
+    const rows = this.db
+      .prepare(`SELECT id FROM tasks WHERE ${where.join(" AND ")}`)
+      .all(...args) as Array<{ id?: string }>;
+
+    for (const row of rows) {
+      if (typeof row?.id === "string" && row.id.trim()) {
+        this.delete(row.id);
+      }
+    }
+
+    return rows.length;
+  }
+
   /**
    * Find tasks by parent task ID
    */

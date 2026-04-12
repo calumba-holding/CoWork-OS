@@ -59,4 +59,53 @@ describe("TaskExecutor getToolTimeoutMs", () => {
     expect(timeoutMs).toBe(86_400_000);
     timeoutSpy.mockRestore();
   });
+
+  it("uses a longer default timeout for run_command", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = { agentConfig: { deepWorkMode: false } };
+
+    const timeoutSpy = vi
+      .spyOn(BuiltinToolsSettingsManager, "getToolTimeoutMs")
+      .mockReturnValue(null);
+
+    const timeoutMs = executor.getToolTimeoutMs("run_command", {
+      command: "git status",
+    });
+
+    expect(timeoutMs).toBe(120_000);
+    timeoutSpy.mockRestore();
+  });
+
+  it("uses the heavy run_command timeout for build and test commands", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = { agentConfig: { deepWorkMode: false } };
+
+    const timeoutSpy = vi
+      .spyOn(BuiltinToolsSettingsManager, "getToolTimeoutMs")
+      .mockReturnValue(null);
+
+    const timeoutMs = executor.getToolTimeoutMs("run_command", {
+      command: "npm test",
+    });
+
+    expect(timeoutMs).toBe(300_000);
+    timeoutSpy.mockRestore();
+  });
+
+  it("accepts timeout_seconds aliases for run_command and clamps to shell max", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = { agentConfig: { deepWorkMode: false } };
+
+    const timeoutSpy = vi
+      .spyOn(BuiltinToolsSettingsManager, "getToolTimeoutMs")
+      .mockReturnValue(null);
+
+    const timeoutMs = executor.getToolTimeoutMs("run_command", {
+      command: "node scripts/build.js",
+      timeout_seconds: 480,
+    });
+
+    expect(timeoutMs).toBe(300_000);
+    timeoutSpy.mockRestore();
+  });
 });

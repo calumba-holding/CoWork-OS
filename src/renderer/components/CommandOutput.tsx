@@ -1,5 +1,4 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import type { ShellSessionInfo, ShellSessionLifecycleEvent } from "../../shared/types";
 
 const DIR_NAME_MAX_LEN = 12;
 
@@ -20,7 +19,6 @@ interface CommandOutputProps {
   exitCode?: number | null;
   cwd?: string;
   taskId?: string;
-  workspaceId?: string;
   onClose?: () => void;
 }
 
@@ -31,7 +29,6 @@ export function CommandOutput({
   exitCode,
   cwd,
   taskId,
-  workspaceId,
   onClose,
 }: CommandOutputProps) {
   const outputRef = useRef<HTMLDivElement>(null);
@@ -39,8 +36,6 @@ export function CommandOutput({
   const [autoScroll, setAutoScroll] = useState(true);
   const [stdinInput, setStdinInput] = useState("");
   const [stopClicked, setStopClicked] = useState(false);
-  const [shellSession, setShellSession] = useState<ShellSessionInfo | null>(null);
-  const [shellSessionLoading, setShellSessionLoading] = useState(false);
 
   // Auto-scroll to bottom when new output arrives
   useEffect(() => {
@@ -101,58 +96,6 @@ export function CommandOutput({
       setStopClicked(false);
     }
   }, [isRunning]);
-
-  const refreshShellSession = useCallback(async () => {
-    if (!taskId || !workspaceId || !window.electronAPI?.getShellSessionInfo) {
-      setShellSession(null);
-      return;
-    }
-
-    setShellSessionLoading(true);
-    try {
-      const session = await window.electronAPI.getShellSessionInfo(taskId, workspaceId);
-      setShellSession(session);
-    } catch (error) {
-      console.error("Failed to load shell session:", error);
-    } finally {
-      setShellSessionLoading(false);
-    }
-  }, [taskId, workspaceId]);
-
-  useEffect(() => {
-    void refreshShellSession();
-  }, [refreshShellSession, isRunning]);
-
-  useEffect(() => {
-    if (!window.electronAPI?.onShellSessionEvent || !taskId || !workspaceId) return;
-
-    const unsubscribe = window.electronAPI.onShellSessionEvent((event: ShellSessionLifecycleEvent) => {
-      if (event.taskId !== taskId || event.workspaceId !== workspaceId) return;
-      setShellSession(event.session);
-    });
-
-    return unsubscribe;
-  }, [taskId, workspaceId]);
-
-  const handleResetSession = useCallback(async () => {
-    if (!taskId || !workspaceId || !window.electronAPI?.resetShellSession) return;
-    try {
-      const session = await window.electronAPI.resetShellSession(taskId, workspaceId);
-      setShellSession(session);
-    } catch (error) {
-      console.error("Failed to reset shell session:", error);
-    }
-  }, [taskId, workspaceId]);
-
-  const handleCloseSession = useCallback(async () => {
-    if (!taskId || !workspaceId || !window.electronAPI?.closeShellSession) return;
-    try {
-      const session = await window.electronAPI.closeShellSession(taskId, workspaceId);
-      setShellSession(session);
-    } catch (error) {
-      console.error("Failed to close shell session:", error);
-    }
-  }, [taskId, workspaceId]);
 
   // Handle Enter key in input field
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -254,32 +197,6 @@ export function CommandOutput({
             </>
           )}
           {getStatusIndicator()}
-          {shellSession && (
-            <span
-              className={`command-shell-session command-shell-session-${shellSession.status}`}
-              title={`Shell session ${shellSession.id}`}
-            >
-              {shellSessionLoading ? "Loading session..." : `Session: ${shellSession.status}`}
-            </span>
-          )}
-          {shellSession && !isRunning && taskId && workspaceId && shellSession.status !== "ended" && (
-            <>
-              <button
-                className="command-session-action"
-                onClick={handleResetSession}
-                title="Reset persistent shell state"
-              >
-                Reset session
-              </button>
-              <button
-                className="command-session-action"
-                onClick={handleCloseSession}
-                title="Close persistent shell session"
-              >
-                End session
-              </button>
-            </>
-          )}
           {/* Close button - only show when not running */}
           {!isRunning && onClose && (
             <button className="command-close-btn" onClick={onClose} title="Close output">

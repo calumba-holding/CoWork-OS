@@ -6,6 +6,7 @@ import {
   filterVerboseTimelineNoise,
   IMPORTANT_EVENT_TYPES,
   isImportantTaskEvent,
+  shouldShowTaskEventInStepFeed,
   shouldShowTaskEventInSummaryMode,
 } from "../task-event-visibility";
 
@@ -135,6 +136,28 @@ describe("task event visibility helpers", () => {
     ).toBe(false);
   });
 
+  it("hides generic stage-boundary cards in the step feed", () => {
+    expect(
+      shouldShowTaskEventInStepFeed(makeEvent("timeline_group_started", { stage: "DISCOVER" })),
+    ).toBe(false);
+    expect(
+      shouldShowTaskEventInStepFeed(makeEvent("timeline_group_finished", { stage: "BUILD" })),
+    ).toBe(false);
+  });
+
+  it("keeps sub-stage and custom group cards in the step feed", () => {
+    expect(
+      shouldShowTaskEventInStepFeed(
+        makeEvent("timeline_group_started", { stage: "FIX", groupLabel: "Preparing workspace" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldShowTaskEventInStepFeed(
+        makeEvent("timeline_group_started", { stage: "CUSTOM", groupId: "custom:group" }),
+      ),
+    ).toBe(true);
+  });
+
   it("hides tool batch lane events in summary mode", () => {
     expect(
       shouldShowTaskEventInSummaryMode(
@@ -256,8 +279,16 @@ describe("task event visibility helpers", () => {
 
   it("deduplicates exact repeated event ids in verbose mode", () => {
     const filtered = filterVerboseTimelineNoise([
-      makeEvent("timeline_group_started", { stage: "DISCOVER" }, { id: "dup", timestamp: 1000 }),
-      makeEvent("timeline_group_started", { stage: "DISCOVER" }, { id: "dup", timestamp: 1001 }),
+      makeEvent(
+        "timeline_group_started",
+        { groupLabel: "Custom group" },
+        { id: "dup", timestamp: 1000, groupId: "custom:group" },
+      ),
+      makeEvent(
+        "timeline_group_started",
+        { groupLabel: "Custom group" },
+        { id: "dup", timestamp: 1001, groupId: "custom:group" },
+      ),
     ]);
     expect(filtered.map((e) => e.id)).toEqual(["dup"]);
   });
@@ -266,13 +297,13 @@ describe("task event visibility helpers", () => {
     const filtered = filterVerboseTimelineNoise([
       makeEvent(
         "timeline_group_started",
-        { stage: "FIX", groupLabel: "Preparing workspace" },
-        { id: "a", timestamp: 1000, groupId: "stage:fix" },
+        { groupLabel: "Custom group" },
+        { id: "a", timestamp: 1000, groupId: "custom:group" },
       ),
       makeEvent(
         "timeline_group_started",
-        { stage: "FIX", groupLabel: "Preparing workspace" },
-        { id: "b", timestamp: 1005, groupId: "stage:fix" },
+        { groupLabel: "Custom group" },
+        { id: "b", timestamp: 1005, groupId: "custom:group" },
       ),
       makeEvent(
         "tool_result",
@@ -291,6 +322,32 @@ describe("task event visibility helpers", () => {
       ),
     ]);
     expect(filtered.map((e) => e.id)).toEqual(["a", "c", "e"]);
+  });
+
+  it("hides stage-boundary group starts in verbose mode but keeps custom groups", () => {
+    const filtered = filterVerboseTimelineNoise([
+      makeEvent(
+        "timeline_group_started",
+        { stage: "FIX", groupLabel: "Adapting to changes" },
+        { id: "fix-start", timestamp: 1000, groupId: "stage:fix" },
+      ),
+      makeEvent(
+        "timeline_group_started",
+        { stage: "BUILD", message: "Starting BUILD" },
+        { id: "build-start", timestamp: 1100, groupId: "stage:build" },
+      ),
+      makeEvent(
+        "timeline_group_started",
+        { stage: "DELIVER", message: "Starting DELIVER" },
+        { id: "deliver-start", timestamp: 1200, groupId: "stage:deliver" },
+      ),
+      makeEvent(
+        "timeline_group_started",
+        { groupLabel: "Custom group" },
+        { id: "custom-start", timestamp: 1300, groupId: "custom:group" },
+      ),
+    ]);
+    expect(filtered.map((e) => e.id)).toEqual(["custom-start"]);
   });
 
   it("does not hide custom non-stage group events for completed tasks", () => {

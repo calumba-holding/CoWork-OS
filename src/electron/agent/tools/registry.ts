@@ -88,6 +88,7 @@ import {
   PERSONALITY_DEFINITIONS,
   PERSONA_DEFINITIONS,
   CustomSkill,
+  PendingSkillParameterCollection,
   SkillApplication,
   SkillApplicationTrigger,
   SkillContextDirectives,
@@ -1958,20 +1959,19 @@ export class ToolRegistry {
       if (!diagram.trim()) {
         return { success: false, error: "diagram is required and must be non-empty Mermaid syntax" };
       }
-      try {
-        ToolRegistry.initializeMermaidValidation();
-        await mermaid.parse(diagram, { suppressErrors: false });
-      } catch (error) {
+      const validation = await ToolRegistry.validateMermaidDiagram(diagram);
+      if (!validation.success) {
         return {
           success: false,
-          error:
-            error instanceof Error && error.message
-              ? `invalid Mermaid syntax: ${error.message}`
-              : "invalid Mermaid syntax",
+          error: validation.error,
         };
       }
       this.daemon.logEvent(this.taskId, "diagram_created", { title, diagram });
-      return { success: true, message: `Diagram "${title}" is now displayed in the UI.` };
+      return {
+        success: true,
+        message: `Diagram "${title}" is now displayed in the UI.`,
+        ...(validation.warning ? { warning: validation.warning } : {}),
+      };
     });
     register("task_history", async ({ request }) => this.taskHistory(request.input));
     register("task_events", async ({ request }) => this.taskEvents(request.input));
@@ -3437,20 +3437,19 @@ ${skillDescriptions}`;
       if (!diagram.trim()) {
         return { success: false, error: "diagram is required and must be non-empty Mermaid syntax" };
       }
-      try {
-        ToolRegistry.initializeMermaidValidation();
-        await mermaid.parse(diagram, { suppressErrors: false });
-      } catch (error) {
+      const validation = await ToolRegistry.validateMermaidDiagram(diagram);
+      if (!validation.success) {
         return {
           success: false,
-          error:
-            error instanceof Error && error.message
-              ? `invalid Mermaid syntax: ${error.message}`
-              : "invalid Mermaid syntax",
+          error: validation.error,
         };
       }
       this.daemon.logEvent(this.taskId, "diagram_created", { title, diagram });
-      return { success: true, message: `Diagram "${title}" is now displayed in the UI.` };
+      return {
+        success: true,
+        message: `Diagram "${title}" is now displayed in the UI.`,
+        ...(validation.warning ? { warning: validation.warning } : {}),
+      };
     }
 
     // Meta tools
@@ -4105,6 +4104,19 @@ ${skillDescriptions}`;
     return { success: true, parameters };
   }
 
+  private applySkillParameterDefaults(
+    skill: CustomSkill,
+    parameters: Record<string, Any>,
+  ): Record<string, Any> {
+    const resolved = { ...(parameters || {}) };
+    for (const param of skill.parameters || []) {
+      if (!(param.name in resolved) && param.default !== undefined) {
+        resolved[param.name] = param.default;
+      }
+    }
+    return resolved;
+  }
+
   /**
    * Execute the Skill tool - invokes a skill by ID and stores its expanded runtime context
    * for the executor to inject on the next turn.
@@ -4257,7 +4269,10 @@ ${skillDescriptions}`;
       };
     }
 
-    const parameters = parameterResolution.parameters || {};
+    const parameters = this.applySkillParameterDefaults(
+      skill,
+      parameterResolution.parameters || {},
+    );
 
     // Check for required parameters
     const artifactDir = path.join(
@@ -4286,6 +4301,24 @@ ${skillDescriptions}`;
     }
 
     if (missingParams.length > 0) {
+      if (trigger === "slash") {
+        const pendingCollection: PendingSkillParameterCollection = {
+          skillId: skill_id,
+          skillName: skill.name,
+          trigger,
+          parameters,
+          requiredParameterNames: missingParams,
+          currentParameterIndex: 0,
+          startedAt: Date.now(),
+        };
+        return {
+          success: true,
+          skill: skill_id,
+          skill_name: skill.name,
+          message: `Collecting missing parameters for '${skill.name}'.`,
+          pending_skill_parameter_collection: pendingCollection,
+        };
+      }
       return {
         success: false,
         error: `Missing required parameters: ${missingParams.join(", ")}`,
@@ -7156,7 +7189,8 @@ ${skillDescriptions}`;
             },
             timeout: {
               type: "number",
-              description: "Timeout in milliseconds (optional, default: 60000, max: 300000)",
+              description:
+                "Timeout in milliseconds (optional, default: 120000; build/test/install commands may infer longer timeouts automatically; max: 300000)",
             },
           },
           required: ["command"],
@@ -10223,6 +10257,41 @@ ${skillDescriptions}`;
       theme: "default",
     });
     ToolRegistry.mermaidValidationInitialized = true;
+  }
+
+  private static async validateMermaidDiagram(diagram: string): Promise<{
+    success: boolean;
+    error?: string;
+    warning?: string;
+  }> {
+    try {
+      ToolRegistry.initializeMermaidValidation();
+      await mermaid.parse(diagram, { suppressErrors: false });
+      return { success: true };
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message ? error.message : "invalid Mermaid syntax";
+      if (ToolRegistry.isRecoverableMermaidValidationRuntimeError(message)) {
+        return {
+          success: true,
+          warning:
+            "Mermaid pre-validation is unavailable in this runtime; accepted without parser validation.",
+        };
+      }
+      return {
+        success: false,
+        error: `invalid Mermaid syntax: ${message}`,
+      };
+    }
+  }
+
+  private static isRecoverableMermaidValidationRuntimeError(message: string): boolean {
+    const lower = String(message || "").toLowerCase();
+    return (
+      lower.includes("dompurify.addhook is not a function") ||
+      lower.includes("window is not defined") ||
+      lower.includes("document is not defined")
+    );
   }
 
   /**

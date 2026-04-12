@@ -524,11 +524,19 @@ function buildSummary(events: NormalizerInputEvent[], kind: CanonicalActionKind)
     case "task.complete": return "Task completed";
 
     case "step.update": {
-      const message =
-        safeStr(payload.message) ||
-        safeStr(payload.groupLabel) ||
+      const isTimelineGroup =
+        events[0]?.type === "timeline_group_started" || events[0]?.type === "timeline_group_finished";
+      const groupLabel = safeStr(payload.groupLabel);
+      const message = safeStr(payload.message);
+      const preferredMessage =
+        isTimelineGroup && groupLabel
+          ? groupLabel
+          : message.replace(/:\s*\d+\s+succeeded(?:,\s*\d+\s+failed)?$/i, "").trim();
+      const summary =
+        preferredMessage ||
+        groupLabel ||
         safeStr(asObject(payload.step).description);
-      if (message) return truncate(message, 80);
+      if (summary) return truncate(summary, 80);
       return "Step in progress";
     }
 

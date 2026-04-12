@@ -206,6 +206,54 @@ export class FileTools {
     return aliasMatch.normalizedAbsolutePath;
   }
 
+  private getWorkspaceReadRecoveryCandidates(
+    absolutePath: string,
+    normalizedWorkspace: string,
+  ): string[] {
+    const candidates = new Set<string>();
+    const pushCandidate = (candidate: string | null): void => {
+      if (!candidate) return;
+      const relative = path.relative(normalizedWorkspace, candidate);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) return;
+      candidates.add(candidate);
+    };
+
+    pushCandidate(this.remapStaleAbsolutePathToWorkspace(absolutePath, normalizedWorkspace));
+    pushCandidate(
+      this.remapWorkspaceAliasAbsolutePathToWorkspace(absolutePath, normalizedWorkspace, "read"),
+    );
+
+    const normalizedAbsolute = path.normalize(absolutePath);
+    const parts = normalizedAbsolute.split(path.sep).filter(Boolean);
+    for (let suffixLength = Math.min(parts.length, 6); suffixLength >= 1; suffixLength--) {
+      pushCandidate(path.join(normalizedWorkspace, ...parts.slice(parts.length - suffixLength)));
+    }
+
+    return Array.from(candidates);
+  }
+
+  private resolveExistingWorkspaceReadRecoveryPath(
+    absolutePath: string,
+    normalizedWorkspace: string,
+  ): string | null {
+    for (const candidate of this.getWorkspaceReadRecoveryCandidates(absolutePath, normalizedWorkspace)) {
+      try {
+        if (fsSync.statSync(candidate).isFile()) {
+          this.daemon.logEvent(this.taskId, "log", {
+            message: `Recovered stale absolute read path to workspace: ${absolutePath} -> ${candidate}`,
+            originalPath: absolutePath,
+            recoveredPath: candidate,
+          });
+          return candidate;
+        }
+      } catch {
+        // Try the next candidate.
+      }
+    }
+
+    return null;
+  }
+
   /**
    * Resolve path, supporting both workspace-relative and absolute paths
    * When unrestrictedFileAccess is enabled, allows absolute paths anywhere (except protected locations)
@@ -244,6 +292,16 @@ export class FileTools {
       );
       if (aliasRemappedPath) {
         return aliasRemappedPath;
+      }
+
+      if (operation === "read" && !fsSync.existsSync(absolutePath)) {
+        const recoveredReadPath = this.resolveExistingWorkspaceReadRecoveryPath(
+          absolutePath,
+          normalizedWorkspace,
+        );
+        if (recoveredReadPath) {
+          return recoveredReadPath;
+        }
       }
 
       // Outside workspace - check permissions
@@ -653,19 +711,21 @@ export class FileTools {
       try {
         stats = await fs.stat(fullPath);
       } catch (error: Any) {
-        if (this.isNotFoundError(error) && !path.isAbsolute(relativePath)) {
-          const fallbackPath = await this.resolveCaseInsensitivePath(relativePath);
-          if (fallbackPath && fallbackPath !== fullPath) {
-            fullPath = fallbackPath;
-            ext = path.extname(fullPath).toLowerCase();
-            await this.enforceProjectAccess(fullPath);
-            stats = await fs.stat(fullPath);
-          } else {
-            throw error;
-          }
-        } else {
+        if (!this.isNotFoundError(error)) {
           throw error;
         }
+
+        const fallbackPath = path.isAbsolute(relativePath)
+          ? await this.resolveStaleAbsoluteReadPath(relativePath, fullPath)
+          : await this.resolveCaseInsensitivePath(relativePath);
+        if (!fallbackPath || fallbackPath === fullPath) {
+          throw error;
+        }
+
+        fullPath = fallbackPath;
+        ext = path.extname(fullPath).toLowerCase();
+        await this.enforceProjectAccess(fullPath);
+        stats = await fs.stat(fullPath);
       }
       await this.enforceSymlinkSafeAccess(fullPath, "read");
       let canonicalPath = fullPath;
@@ -817,6 +877,36 @@ export class FileTools {
     }
 
     return current;
+  }
+
+  private async pathLooksLikeReadableFile(candidatePath: string): Promise<boolean> {
+    try {
+      const stats = await fs.stat(candidatePath);
+      return stats.isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  private async resolveStaleAbsoluteReadPath(
+    absolutePath: string,
+    currentResolvedPath: string,
+  ): Promise<string | null> {
+    if (!path.isAbsolute(absolutePath)) return null;
+
+    const normalizedWorkspace = path.resolve(this.workspace.path);
+    for (const candidate of this.getWorkspaceReadRecoveryCandidates(absolutePath, normalizedWorkspace)) {
+      if (!(await this.pathLooksLikeReadableFile(candidate))) continue;
+      this.daemon.logEvent(this.taskId, "log", {
+        message: `Recovered stale absolute read path to workspace: ${absolutePath} -> ${candidate}`,
+        originalPath: absolutePath,
+        resolvedPath: currentResolvedPath,
+        recoveredPath: candidate,
+      });
+      return candidate;
+    }
+
+    return null;
   }
 
   private normalizeReadWindowOptions(options?: {

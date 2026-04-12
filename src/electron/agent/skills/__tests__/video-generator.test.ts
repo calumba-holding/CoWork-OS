@@ -127,4 +127,25 @@ describe("VideoGenerator", () => {
     expect(status.error).toContain("job ID is required");
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("does not log during provider availability checks", () => {
+    const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue({
+      providerType: "azure",
+      modelKey: "gpt-4o-mini",
+      openai: {},
+      gemini: {},
+      azure: {
+        apiKey: "azure-key",
+        endpoint: "https://example.openai.azure.com/openai/v1/videos",
+      },
+      videoGeneration: {
+        defaultProvider: "azure",
+      },
+    } as Any);
+
+    expect(VideoGenerator.isAvailable()).toBe(true);
+    expect(consoleLogSpy).not.toHaveBeenCalled();
+  });
 });

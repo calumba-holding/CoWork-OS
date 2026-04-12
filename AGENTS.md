@@ -75,10 +75,18 @@ When a user reports a failure, error, or unexpected behavior:
 
 - Use `npm run kit:lint` to run workspace kit health checks from the CLI (human-readable by default, JSON export supported by the CLI).
 - Use `npm run skills:check` before test/merge when touching bundled skills; it runs routing/content/audit/eval quality gates.
+- Use `npm run skills:check:core` for faster local iteration when you only need routing/content/audit checks (without routing eval).
+- Use targeted skill QA commands when isolating failures:
+  - `npm run skills:validate-routing`
+  - `npm run skills:validate-content`
+  - `npm run skills:audit`
+  - `npm run skills:eval-routing`
 - Use `npm run qa:eval:build` to refresh the eval corpus when curating new reliability regressions.
 - Use `npm run qa:eval:run` to replay the eval suite, and `npm run qa:reliability` for the combined eval + battery loop.
 - Use `npm run qa:eval:enforce-regressions` to enforce production-fix-to-eval coverage policy.
+- Use `npm run qa:renderer-perf` to run the renderer performance fixture test (`src/renderer/utils/__tests__/renderer-perf-fixture.test.ts`) when validating virtualization/perf-sensitive renderer changes.
 - Use `npm run qa:timeline:backfill -- --db /absolute/path/to.db` then `npm run qa:timeline:enforce -- --db /absolute/path/to.db` when validating timeline completion telemetry changes.
+- `npm run test` and `npm run test:coverage` both run `npm run skills:check` before executing Vitest; use `npm run test:watch` for a faster local loop without the precheck gate.
 
 ## Setup Commands
 

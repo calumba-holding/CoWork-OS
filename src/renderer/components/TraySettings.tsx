@@ -228,6 +228,32 @@ export function TraySettings({ onStatusChange }: TraySettingsProps) {
               </label>
             </div>
           </div>
+
+          <div className="settings-form-group tray-settings-option">
+            <div className="tray-settings-option-inner">
+              <div className="tray-settings-option-text">
+                <span className="tray-settings-option-title">
+                  Approval saved notifications
+                </span>
+                <p className="tray-settings-option-desc">
+                  Show a banner when an approval decision is saved for reuse, such as after using
+                  allow once or approve all. Off by default.
+                </p>
+              </div>
+              <label className="settings-toggle tray-settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings?.showApprovalSavedNotifications ?? false}
+                  onChange={(e) =>
+                    void handleSave({ showApprovalSavedNotifications: e.target.checked })
+                  }
+                  disabled={saving}
+                  aria-label="Show approval saved notifications"
+                />
+                <span className="toggle-slider" />
+              </label>
+            </div>
+          </div>
         </div>
       </div>
 

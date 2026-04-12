@@ -184,6 +184,84 @@ describe("readFilesByPatterns", () => {
     expect(out.content).toContain(expectedContent);
   });
 
+  it("recovers stale absolute read paths by matching a nested suffix inside the workspace", async () => {
+    const workspaceRoot = path.join(tmpDir, "current-workspace");
+    const workspaceScoped: Workspace = {
+      ...workspace,
+      path: workspaceRoot,
+      isTemp: false,
+      permissions: {
+        ...workspace.permissions,
+        unrestrictedFileAccess: false,
+      } as Any,
+    };
+    const daemon = {
+      logEvent: vi.fn(),
+      requestApproval: vi.fn(),
+    } as Any;
+    const scopedFileTools = new FileTools(workspaceScoped, daemon, "task-3");
+
+    const relativePath = path.join(
+      "subconscious",
+      "targets",
+      "role-a",
+      "runs",
+      "run-1",
+      "winning-recommendation.md",
+    );
+    const expectedContent = "fresh workspace recommendation";
+    writeFile(path.join(workspaceRoot, relativePath), expectedContent);
+
+    const staleAbsolutePath = path.join(
+      path.sep,
+      "Users",
+      "almarion",
+      "Desktop",
+      "new",
+      "new2",
+      ...relativePath.split(path.sep),
+    );
+
+    const out = await scopedFileTools.readFile(staleAbsolutePath);
+    expect(out.content).toContain(expectedContent);
+    expect(out.path).toBe(relativePath.replace(/\\/g, "/"));
+  });
+
+  it("recovers stale absolute read paths by falling back to a workspace-root filename", async () => {
+    const workspaceRoot = path.join(tmpDir, "current-workspace-root");
+    const workspaceScoped: Workspace = {
+      ...workspace,
+      path: workspaceRoot,
+      isTemp: false,
+      permissions: {
+        ...workspace.permissions,
+        unrestrictedFileAccess: false,
+      } as Any,
+    };
+    const daemon = {
+      logEvent: vi.fn(),
+      requestApproval: vi.fn(),
+    } as Any;
+    const scopedFileTools = new FileTools(workspaceScoped, daemon, "task-4");
+
+    const filename = "project-manager-subconscious.md";
+    const expectedContent = "workspace root recovery";
+    writeFile(path.join(workspaceRoot, filename), expectedContent);
+
+    const staleAbsolutePath = path.join(
+      path.sep,
+      "Users",
+      "almarion",
+      "Desktop",
+      "old-root",
+      filename,
+    );
+
+    const out = await scopedFileTools.readFile(staleAbsolutePath);
+    expect(out.content).toContain(expectedContent);
+    expect(out.path).toBe(filename);
+  });
+
   it("remaps /workspace alias paths into the active workspace for writes", async () => {
     const out = await fileTools.writeFile("/workspace/influencer-chat-app/src/data/influencers.ts", "ok");
     expect(out.success).toBe(true);

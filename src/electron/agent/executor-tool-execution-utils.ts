@@ -320,15 +320,25 @@ export function buildUnavailableToolResult(opts: {
   toolName: string;
   toolUseId: string;
   hint?: string;
+  alternatives?: string[];
 }): LLMToolResult {
   const baseError = `Tool "${opts.toolName}" is not available in this context. Please choose a different tool or check permissions/integrations.`;
-  const error = opts.hint ? `${baseError} ${opts.hint}` : baseError;
+  const alternatives =
+    Array.isArray(opts.alternatives) && opts.alternatives.length > 0
+      ? Array.from(new Set(opts.alternatives.map((value) => String(value).trim()).filter(Boolean)))
+      : [];
+  const alternativesHint =
+    alternatives.length > 0
+      ? ` Try one of these available alternatives instead: ${alternatives.join(", ")}.`
+      : "";
+  const error = `${baseError}${alternativesHint}${opts.hint ? ` ${opts.hint}` : ""}`.trim();
   return {
     type: "tool_result",
     tool_use_id: opts.toolUseId,
     content: JSON.stringify({
       error,
       unavailable: true,
+      ...(alternatives.length > 0 ? { alternatives } : {}),
     }),
     is_error: true,
   };

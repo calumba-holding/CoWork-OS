@@ -2,7 +2,11 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { RightPanel } from "../RightPanel";
+import {
+  RightPanel,
+  getProgressSectionMaterialSignature,
+  getQueueSectionMaterialSignature,
+} from "../RightPanel";
 
 describe("RightPanel checklist rendering", () => {
   it("renders task feedback controls in the right panel for completed tasks", () => {
@@ -78,6 +82,124 @@ describe("RightPanel checklist rendering", () => {
     expect(markup).toContain("Add and run a verification checklist item before finishing.");
   });
 
+  it("keeps the checklist visible during live execution even when items are still pending", () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(RightPanel, {
+        task: {
+          id: "task-1",
+          status: "executing",
+          title: "Task",
+          prompt: "Prompt",
+        } as Any,
+        workspace: null,
+        events: [
+          {
+            id: "evt-1",
+            taskId: "task-1",
+            timestamp: 100,
+            schemaVersion: 2,
+            type: "task_list_created",
+            payload: {
+              checklist: {
+                items: [
+                  {
+                    id: "item-1",
+                    title: "Draft chapter outline",
+                    kind: "implementation",
+                    status: "pending",
+                    createdAt: 10,
+                    updatedAt: 20,
+                  },
+                ],
+                updatedAt: 20,
+                verificationNudgeNeeded: false,
+              },
+            },
+          },
+        ] as Any,
+      }),
+    );
+
+    expect(markup).toContain("Checklist");
+    expect(markup).toContain("Draft chapter outline");
+    expect(markup).toContain("Pending");
+  });
+
+  it("uses the live checklist item as fallback progress text when no plan exists", () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(RightPanel, {
+        task: {
+          id: "task-1",
+          status: "executing",
+          title: "Task",
+          prompt: "Prompt",
+        } as Any,
+        workspace: null,
+        events: [
+          {
+            id: "evt-1",
+            taskId: "task-1",
+            timestamp: 100,
+            schemaVersion: 2,
+            type: "task_list_updated",
+            payload: {
+              checklist: {
+                items: [
+                  {
+                    id: "item-1",
+                    title: "Update canonical target settings",
+                    kind: "implementation",
+                    status: "in_progress",
+                    createdAt: 10,
+                    updatedAt: 20,
+                  },
+                ],
+                updatedAt: 20,
+                verificationNudgeNeeded: false,
+              },
+            },
+          },
+        ] as Any,
+      }),
+    );
+
+    expect(markup).toContain("Working...");
+    expect(markup).toContain("Update canonical target settings");
+  });
+
+  it("shows created files while a task is still executing", () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(RightPanel, {
+        task: {
+          id: "task-1",
+          status: "executing",
+          title: "Write novel",
+          prompt: "Prompt",
+        } as Any,
+        workspace: {
+          id: "ws-1",
+          name: "workspace",
+          path: "/workspace",
+        } as Any,
+        events: [
+          {
+            id: "evt-1",
+            taskId: "task-1",
+            timestamp: 100,
+            schemaVersion: 2,
+            type: "artifact_created",
+            payload: {
+              path: "/workspace/artifacts/chapters/ch_01.md",
+            },
+          },
+        ] as Any,
+      }),
+    );
+
+    expect(markup).toContain("Files");
+    expect(markup).toContain("ch_01.md");
+  });
+
   it("strips inline markdown formatting from progress step labels", () => {
     const markup = renderToStaticMarkup(
       React.createElement(RightPanel, {
@@ -114,5 +236,104 @@ describe("RightPanel checklist rendering", () => {
 
     expect(markup).toContain("Genre: Science fiction (Dune universe)");
     expect(markup).not.toContain("**Genre**");
+  });
+
+  it("keeps the progress material signature stable when only array identity changes", () => {
+    const planSteps = [
+      { id: "step-1", description: "Inspect logs", status: "in_progress" },
+      { id: "step-2", description: "Apply fix", status: "pending" },
+    ] as Any;
+
+    const signatureA = getProgressSectionMaterialSignature({
+      expanded: true,
+      planSteps,
+      taskStatus: "executing",
+      taskTerminalStatus: undefined,
+      hasActiveChildren: false,
+      emptyHintText: "Standing by.",
+    });
+    const signatureB = getProgressSectionMaterialSignature({
+      expanded: true,
+      planSteps: [...planSteps] as Any,
+      taskStatus: "executing",
+      taskTerminalStatus: undefined,
+      hasActiveChildren: false,
+      emptyHintText: "Standing by.",
+    });
+
+    expect(signatureA).toBe(signatureB);
+  });
+
+  it("changes the queue material signature only when queue content changes", () => {
+    const runningTasks = [{ id: "task-1", status: "executing", title: "Build" }] as Any;
+    const queuedTasks = [{ id: "task-2", status: "queued", title: "Verify" }] as Any;
+
+    const signatureA = getQueueSectionMaterialSignature({
+      expanded: true,
+      runningTasks,
+      queuedTasks,
+      activeLabel: "ACTIVE",
+      nextLabel: "NEXT",
+    });
+    const signatureB = getQueueSectionMaterialSignature({
+      expanded: true,
+      runningTasks: [...runningTasks] as Any,
+      queuedTasks: [...queuedTasks] as Any,
+      activeLabel: "ACTIVE",
+      nextLabel: "NEXT",
+    });
+    const signatureC = getQueueSectionMaterialSignature({
+      expanded: true,
+      runningTasks,
+      queuedTasks: [{ id: "task-3", status: "queued", title: "Ship" }] as Any,
+      activeLabel: "ACTIVE",
+      nextLabel: "NEXT",
+    });
+
+    expect(signatureA).toBe(signatureB);
+    expect(signatureC).not.toBe(signatureA);
+  });
+
+  it("keeps the context section visible during live execution and shows skills/tools", () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(RightPanel, {
+        task: {
+          id: "task-1",
+          status: "executing",
+          title: "Task",
+          prompt: "Prompt",
+        } as Any,
+        workspace: null,
+        events: [
+          {
+            id: "evt-1",
+            taskId: "task-1",
+            timestamp: 50,
+            schemaVersion: 2,
+            type: "skill_applied",
+            payload: {
+              skillName: "Novelist",
+            },
+          },
+          {
+            id: "evt-2",
+            taskId: "task-1",
+            timestamp: 100,
+            schemaVersion: 2,
+            type: "tool_call",
+            payload: {
+              tool: "read_file",
+              input: { path: "src/index.ts" },
+            },
+          },
+        ] as Any,
+      }),
+    );
+
+    expect(markup).toContain("Context");
+    expect(markup).toContain("Skills used");
+    expect(markup).toContain("Novelist");
+    expect(markup).toContain("Tools used");
+    expect(markup).toContain("read_file");
   });
 });

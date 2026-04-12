@@ -304,6 +304,28 @@ If a legacy payload is restored, the runtime writes back a V2 snapshot on the ne
 
 This keeps the task row synchronized with the runtime without copying the rest of the session state into the database row itself.
 
+## Turn-Budget Ownership
+
+SessionRuntime and the executor now treat window turn caps as optional runtime state.
+
+- normal interactive tasks have no implicit strategy-derived window cap
+- explicit `agentConfig.maxTurns` or `agentConfig.windowTurnCap` opt a task into a bounded window
+- `turnBudgetPolicy` is only meaningful when one of those explicit caps exists
+
+Runtime telemetry reflects that distinction:
+
+- `turn_policy_selected` records whether a task is effectively uncapped or using an explicit window cap
+- `turn_window_soft_exhausted` only appears when an explicit adaptive window is actually configured
+- `Global turn limit exceeded: X/X` is now reserved for tasks that intentionally opted into capped behavior
+
+Uncapped tasks still project and enforce:
+
+- budget usage
+- continuation count and window
+- lifetime turns used
+- emergency fuse thresholds
+- loop and no-progress safety state
+
 ## Terminal Status Synchronization
 
 The runtime boundary is also responsible for keeping the task row and the event stream in the same terminal state.

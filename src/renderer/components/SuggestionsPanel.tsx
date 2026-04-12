@@ -1,16 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import type { Workspace } from "../../shared/types";
-
-interface Suggestion {
-  id: string;
-  type: string;
-  title: string;
-  description: string;
-  actionPrompt?: string;
-  confidence: number;
-  createdAt: number;
-  expiresAt: number;
-}
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ProactiveSuggestion, Workspace } from "../../shared/types";
 
 interface SuggestionsPanelProps {
   workspaceId?: string;
@@ -33,6 +22,8 @@ const TYPE_COLORS: Record<string, string> = {
   reverse_prompt: "#ec4899",
 };
 
+const ALL_WORKSPACES_ID = "__all__";
+
 function timeAgo(ts: number): string {
   const diff = Date.now() - ts;
   const mins = Math.floor(diff / 60000);
@@ -48,14 +39,15 @@ function isValidWorkspaceId(id: string | undefined): id is string {
 }
 
 export function SuggestionsPanel({
-  workspaceId: initialWorkspaceId,
+  workspaceId: _initialWorkspaceId,
   onCreateTask,
 }: SuggestionsPanelProps) {
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [suggestions, setSuggestions] = useState<ProactiveSuggestion[]>([]);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>(ALL_WORKSPACES_ID);
   const [workspacesLoading, setWorkspacesLoading] = useState(true);
 
   // Load workspaces on mount
@@ -66,60 +58,108 @@ export function SuggestionsPanel({
       const nonTemp = loaded.filter((w) => !w.id.startsWith("__temp_workspace__"));
       setWorkspaces(nonTemp);
       setSelectedWorkspaceId((prev) => {
+        if (prev === ALL_WORKSPACES_ID) return ALL_WORKSPACES_ID;
         if (prev && nonTemp.some((w) => w.id === prev)) return prev;
-        if (
-          isValidWorkspaceId(initialWorkspaceId) &&
-          nonTemp.some((w) => w.id === initialWorkspaceId)
-        ) {
-          return initialWorkspaceId;
-        }
-        return nonTemp[0]?.id || "";
+        return ALL_WORKSPACES_ID;
       });
     } catch {
       setWorkspaces([]);
     } finally {
       setWorkspacesLoading(false);
     }
-  }, [initialWorkspaceId]);
+  }, []);
 
   useEffect(() => {
     void loadWorkspaces();
   }, [loadWorkspaces]);
 
   const workspaceId = selectedWorkspaceId;
+  const isAllWorkspacesSelected = workspaceId === ALL_WORKSPACES_ID;
+  const workspaceNameById = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const workspace of workspaces) {
+      names.set(workspace.id, workspace.name);
+    }
+    return names;
+  }, [workspaces]);
 
-  const load = useCallback(async () => {
-    if (!isValidWorkspaceId(workspaceId)) return;
-    setLoading(true);
+  const load = useCallback(async (refresh = false) => {
+    if (!isAllWorkspacesSelected && !isValidWorkspaceId(workspaceId)) {
+      setSuggestions([]);
+      return;
+    }
+    if (refresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     try {
+      if (isAllWorkspacesSelected) {
+        if (workspaces.length === 0) {
+          setSuggestions([]);
+          return;
+        }
+        if (refresh) {
+          await window.electronAPI.refreshSuggestionsForWorkspaces(
+            workspaces.map((workspace) => workspace.id),
+          );
+        }
+        const result = await window.electronAPI.listSuggestionsForWorkspaces(
+          workspaces.map((workspace) => workspace.id),
+        );
+        const flattened = (result || [])
+          .flatMap((entry) =>
+            entry.suggestions.map((suggestion) => ({
+              ...suggestion,
+              workspaceId: suggestion.workspaceId || entry.workspaceId,
+            })),
+          )
+          .sort((a, b) => {
+            if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+            return b.createdAt - a.createdAt;
+          });
+        setSuggestions(flattened);
+        return;
+      }
+
+      if (refresh) {
+        await window.electronAPI.refreshSuggestions(workspaceId);
+      }
       const result = await window.electronAPI.listSuggestions(workspaceId);
       setSuggestions(result || []);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load suggestions");
     } finally {
-      setLoading(false);
+      if (refresh) {
+        setRefreshing(false);
+      } else {
+        setLoading(false);
+      }
     }
-  }, [workspaceId]);
+  }, [isAllWorkspacesSelected, workspaceId, workspaces]);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   const handleDismiss = async (id: string) => {
-    if (!isValidWorkspaceId(workspaceId)) return;
+    const targetWorkspaceId =
+      suggestions.find((suggestion) => suggestion.id === id)?.workspaceId || workspaceId;
+    if (!isValidWorkspaceId(targetWorkspaceId)) return;
     try {
-      await window.electronAPI.dismissSuggestion(workspaceId, id);
+      await window.electronAPI.dismissSuggestion(targetWorkspaceId, id);
       setSuggestions((prev) => prev.filter((s) => s.id !== id));
     } catch {
       // best-effort
     }
   };
 
-  const handleAct = async (suggestion: Suggestion) => {
-    if (!isValidWorkspaceId(workspaceId) || !suggestion.actionPrompt) return;
+  const handleAct = async (suggestion: ProactiveSuggestion) => {
+    const targetWorkspaceId = suggestion.workspaceId || workspaceId;
+    if (!isValidWorkspaceId(targetWorkspaceId) || !suggestion.actionPrompt) return;
     try {
-      const result = await window.electronAPI.actOnSuggestion(workspaceId, suggestion.id);
+      const result = await window.electronAPI.actOnSuggestion(targetWorkspaceId, suggestion.id);
       if (result.actionPrompt && onCreateTask) {
         onCreateTask(suggestion.title, result.actionPrompt);
       }
@@ -159,19 +199,49 @@ export function SuggestionsPanel({
         </div>
       ) : (
         <>
-          <div className="settings-form-group" style={{ marginBottom: 16, maxWidth: 260 }}>
-            <label className="settings-label">Workspace</label>
-            <select
-              value={selectedWorkspaceId}
-              onChange={(e) => setSelectedWorkspaceId(e.target.value)}
-              className="settings-select"
+          <div
+            style={{
+              display: "flex",
+              alignItems: "end",
+              gap: 12,
+              marginBottom: 16,
+              flexWrap: "wrap",
+            }}
+          >
+            <div className="settings-form-group" style={{ marginBottom: 0, maxWidth: 260 }}>
+              <label className="settings-label">Workspace</label>
+              <select
+                value={selectedWorkspaceId}
+                onChange={(e) => setSelectedWorkspaceId(e.target.value)}
+                className="settings-select"
+              >
+                <option value={ALL_WORKSPACES_ID}>All Workspaces</option>
+                {workspaces.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={() => void load(true)}
+              disabled={loading || refreshing}
+              style={{
+                height: 38,
+                padding: "0 14px",
+                borderRadius: 999,
+                border: "1px solid var(--border-color, #e5e7eb)",
+                background: "var(--card-bg, #fff)",
+                color: "var(--text-primary)",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: loading || refreshing ? "not-allowed" : "pointer",
+                opacity: loading || refreshing ? 0.65 : 1,
+              }}
             >
-              {workspaces.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-            </select>
+              {refreshing ? "Refreshing..." : "Refresh"}
+            </button>
           </div>
 
           {loading && (
@@ -205,25 +275,12 @@ export function SuggestionsPanel({
                 borderRadius: 8,
               }}
             >
-              <div style={{ fontWeight: 600, color: "var(--text-primary)", marginBottom: 12 }}>
-                No suggestions yet
+              <div style={{ fontWeight: 600, color: "var(--text-primary)", marginBottom: 8 }}>
+                No active suggestions
               </div>
-              <div style={{ lineHeight: 1.6 }}>Suggestions are generated in two ways:</div>
-              <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.8 }}>
-                <li>
-                  <strong>After completing a task</strong> — follow-up suggestions appear
-                  automatically (e.g. "write tests", "add docs")
-                </li>
-                <li>
-                  <strong>During daily briefings</strong> — batch suggestions are generated based
-                  on:
-                </li>
-              </ul>
-              <ul style={{ margin: "4px 0 0", paddingLeft: 36, lineHeight: 1.8 }}>
-                <li>Recurring task patterns (3+ similar tasks trigger automation suggestions)</li>
-                <li>Goals set in your user profile</li>
-                <li>Problem observations in your knowledge graph</li>
-              </ul>
+              <div style={{ lineHeight: 1.6 }}>
+                Nothing is queued for this workspace scope right now.
+              </div>
             </div>
           )}
 
@@ -264,6 +321,16 @@ export function SuggestionsPanel({
                       >
                         {label}
                       </span>
+                      {isAllWorkspacesSelected && s.workspaceId && (
+                        <span
+                          style={{
+                            fontSize: 11,
+                            color: "var(--text-tertiary, #9ca3af)",
+                          }}
+                        >
+                          {workspaceNameById.get(s.workspaceId) || "Workspace"}
+                        </span>
+                      )}
                       <span
                         style={{
                           fontSize: 11,

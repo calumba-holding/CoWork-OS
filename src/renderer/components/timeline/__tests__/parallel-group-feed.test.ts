@@ -64,7 +64,7 @@ describe("ParallelGroupFeed", () => {
             {
               laneKey: "use-1",
               toolName: "web_fetch",
-              title: "Fetching a web page",
+              title: "Fetched ccunpacked.dev",
               status: "completed",
               startedAt: 1001,
             },
@@ -75,8 +75,12 @@ describe("ParallelGroupFeed", () => {
       }),
     );
 
-    expect(markup).toContain("Fetched 1 page");
-    expect(markup).not.toContain("Fetching a web page");
+    expect(markup).toContain("Fetched ccunpacked.dev");
+    expect(markup).toContain("parallel-group-feed-single");
+    expect(markup).toContain("parallel-group-feed-single-lane");
+    expect(markup).not.toContain("event-expand-icon");
+    expect(markup).not.toContain("event-title-meta");
+    expect(markup).not.toContain('class="parallel-group-feed-details"');
   });
 
   it("renders completed groups expanded when the parent block is active", () => {
@@ -88,7 +92,7 @@ describe("ParallelGroupFeed", () => {
             {
               laneKey: "use-1",
               toolName: "web_fetch",
-              title: "Fetching a web page",
+              title: "Fetched ccunpacked.dev",
               status: "completed",
               startedAt: 1001,
             },
@@ -100,8 +104,11 @@ describe("ParallelGroupFeed", () => {
       }),
     );
 
-    expect(markup).toContain("Fetched 1 page");
-    expect(markup).toContain("Fetching a web page");
+    expect(markup).toContain("Fetched ccunpacked.dev");
+    expect(markup).toContain("parallel-group-feed-single");
+    expect(markup).not.toContain("event-expand-icon");
+    expect(markup).not.toContain("event-title-meta");
+    expect(markup).not.toContain('class="parallel-group-feed-details"');
   });
 
   it("prefers semantic group labels when available", () => {
@@ -118,6 +125,13 @@ describe("ParallelGroupFeed", () => {
               status: "completed",
               startedAt: 1001,
             },
+            {
+              laneKey: "use-2",
+              toolName: "web_search",
+              title: "Searched: Claude Code docs",
+              status: "completed",
+              startedAt: 1002,
+            },
           ],
         }),
         timeLabel: "12:03",
@@ -126,6 +140,35 @@ describe("ParallelGroupFeed", () => {
     );
 
     expect(markup).toContain("Read Claude Code docs");
-    expect(markup).not.toContain("Fetched 1 page");
+    expect(markup).not.toContain("2 parallel tasks completed");
+  });
+
+  it("uses the single lane title instead of a stored semantic label", () => {
+    const markup = render(
+      React.createElement(ParallelGroupFeed, {
+        group: makeGroup({
+          label: "Exit Status Is 0",
+          status: "completed",
+          lanes: [
+            {
+              laneKey: "use-1",
+              toolName: "task_history",
+              title: "Loaded task history",
+              status: "completed",
+              startedAt: 1001,
+            },
+          ],
+        }),
+        timeLabel: "12:03",
+        formatTime: () => "12:03",
+      }),
+    );
+
+    expect(markup).toContain("Loaded task history");
+    expect(markup).toContain("parallel-group-feed-single");
+    expect(markup).not.toContain("event-expand-icon");
+    expect(markup).not.toContain("event-title-meta");
+    expect(markup).not.toContain('class="parallel-group-feed-details"');
+    expect(markup).not.toContain("Exit Status Is 0");
   });
 });

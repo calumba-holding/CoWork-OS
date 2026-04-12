@@ -200,6 +200,33 @@ describe("TaskExecutor plan parsing", () => {
     expect(executor.plan.steps[2].kind).toBe("verification");
   });
 
+  it("keeps verification bullet checks attached to the same numbered step", async () => {
+    const response = {
+      usage: { inputTokens: 10, outputTokens: 20 },
+      content: [
+        {
+          type: "text",
+          text: [
+            "1. Run the command `echo hello world`.",
+            "2. Verify success by confirming:",
+            "- output is exactly `hello world`",
+            "- exit status is `0`",
+            "3. Report the command result clearly.",
+          ].join("\n"),
+        },
+      ],
+    };
+    const executor = createPlanExecutor(response);
+
+    await executor.createPlan();
+
+    expect(executor.plan?.steps?.length).toBe(3);
+    expect(executor.plan?.steps?.[1]?.description).toContain("Verify success by confirming:");
+    expect(executor.plan?.steps?.[1]?.description).toContain("output is exactly `hello world`");
+    expect(executor.plan?.steps?.[1]?.description).toContain("exit status is `0`");
+    expect(executor.plan?.steps?.[1]?.kind).toBe("verification");
+  });
+
   it("parses JSON plans split across multiple text blocks", async () => {
     const response = {
       usage: { inputTokens: 10, outputTokens: 20 },
@@ -362,5 +389,104 @@ describe("TaskExecutor plan parsing", () => {
     expect(executor.plan?.steps?.some((step: Any) => /visual qa with playwright/i.test(step.description))).toBe(
       false,
     );
+  });
+
+  it("sanitizes contradictory novelist franchise plans instead of reframing to original IP", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.workspace = { path: "/tmp/workspace" };
+    executor.task = {
+      id: "task-novelist",
+      title: "Write a very interesting novel in Dune universe",
+      prompt: "write a very interesting novel in Dune universe, use novelist skill",
+      agentConfig: {},
+    };
+    executor.appliedSkills = [
+      {
+        skillId: "novelist",
+        skillName: "Novelist",
+        trigger: "slash",
+        parameters: {
+          canon_mode: "fanfiction",
+          seed: "Write a very interesting novel in Dune universe.",
+        },
+        content: "novelist prompt",
+        reason: "Applied via /novelist",
+        appliedAt: Date.now(),
+        contextDirectives: {
+          artifactDirectories: [
+            "/tmp/workspace/artifacts/skills/task-novelist/novelist",
+            "/tmp/workspace/artifacts",
+          ],
+        },
+      },
+    ];
+    executor.getContractPrompt = vi
+      .fn()
+      .mockReturnValue("write a very interesting novel in Dune universe, use novelist skill");
+    executor.emitEvent = vi.fn();
+    executor.getEffectiveTaskPathRootPolicy = vi.fn().mockReturnValue("disabled");
+    executor.taskPinnedRootSource = "unset";
+    executor.normalizeOverlappingPlanSteps = vi.fn((steps: Any[]) => steps);
+    executor.normalizeWorkspaceAliasPathsInPlanSteps = vi.fn((steps: Any[]) => steps);
+    executor.normalizeTaskPinnedRootPathsInPlanSteps = vi.fn((steps: Any[]) => steps);
+    executor.ensureRequiredPlanSteps = vi.fn((plan: Any) => plan);
+    executor.inferScaffoldRootFromPlanSteps = vi.fn().mockReturnValue(null);
+
+    const sanitized = executor.sanitizePlan({
+      description: "Build a legally distinct setting rather than using Dune canon.",
+      steps: [
+        {
+          id: "1",
+          description: "Reframe the project into an original universe.",
+          kind: "primary",
+          status: "pending",
+        },
+        {
+          id: "2",
+          description: "Write artifacts/world.md and artifacts/canon.md.",
+          kind: "primary",
+          status: "pending",
+        },
+      ],
+    });
+
+    expect(sanitized.description).toContain("Dune");
+    expect(sanitized.description).not.toMatch(/legally distinct|original IP/i);
+    expect(sanitized.steps[0].description).toContain("Dune universe");
+    expect(sanitized.steps[0].description).not.toMatch(/original universe|legally distinct/i);
+    expect(sanitized.steps[1].description).toContain("/tmp/workspace/artifacts/skills/task-novelist/novelist/world.md");
+    expect(sanitized.steps[1].description).toContain("/tmp/workspace/artifacts/skills/task-novelist/novelist/canon.md");
+  });
+
+  it("forces strict step-intent alignment for novelist franchise runs", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      id: "task-novelist",
+      title: "Write a very interesting novel in Dune universe",
+      prompt: "write a very interesting novel in Dune universe, use novelist skill",
+      agentConfig: {},
+    };
+    executor.appliedSkills = [
+      {
+        skillId: "novelist",
+        skillName: "Novelist",
+        trigger: "slash",
+        parameters: {
+          canon_mode: "fanfiction",
+          seed: "Write a very interesting novel in Dune universe.",
+        },
+        content: "novelist prompt",
+        reason: "Applied via /novelist",
+        appliedAt: Date.now(),
+        contextDirectives: {
+          artifactDirectories: ["/tmp/workspace/artifacts/skills/task-novelist/novelist"],
+        },
+      },
+    ];
+    executor.getContractPrompt = vi
+      .fn()
+      .mockReturnValue("write a very interesting novel in Dune universe, use novelist skill");
+
+    expect(executor.getStepIntentAlignmentPolicy()).toBe("strict");
   });
 });

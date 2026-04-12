@@ -40,6 +40,7 @@ export interface TraySettings {
   startMinimized: boolean;
   closeToTray: boolean;
   showNotifications: boolean;
+  showApprovalSavedNotifications: boolean;
 }
 
 // Global memory feature toggles (applies across workspaces)
@@ -627,6 +628,9 @@ export type EventType =
   | "input_request_created"
   | "input_request_resolved"
   | "input_request_dismissed"
+  | "skill_parameter_collection_started"
+  | "skill_parameter_answered"
+  | "skill_parameter_collection_finished"
   | "file_created"
   | "file_modified"
   | "file_deleted"
@@ -1813,9 +1817,9 @@ export interface AgentConfig {
   allowedTools?: string[];
   /** Optional origin channel that created the task (used for channel-aware gating) */
   originChannel?: ChannelType;
-  /** Maximum number of LLM turns before forcing completion (for sub-agents) */
+  /** Explicit maximum number of LLM turns before forcing completion. Unset means no window cap for normal main-task routing. */
   maxTurns?: number;
-  /** Turn-window policy: strict hard cap or adaptive unbounded mode with safety stops. */
+  /** Turn-window policy for explicit window caps. Ignored when no explicit maxTurns/windowTurnCap is set. */
   turnBudgetPolicy?: TurnBudgetPolicy;
   /** Verification-path artifact policy for checklist/report outputs. */
   verificationArtifactPathPolicy?: VerificationArtifactPathPolicy;
@@ -1829,7 +1833,7 @@ export interface AgentConfig {
   suppressToolDisableOnRecoverablePathDrift?: boolean;
   /** Guarded retry budget for mutation checkpoints after recoverable path failures. */
   mutationCheckpointRetryBudget?: number;
-  /** Optional explicit turn-window cap. `null` disables hard per-window cap enforcement. */
+  /** Optional explicit turn-window cap. Leave unset for default-unbounded main tasks; set `null` to clear an inherited cap. */
   windowTurnCap?: number | null;
   /** Auto-recover follow-up loops when the turn window is exhausted. */
   followUpAutoRecovery?: boolean;
@@ -2181,6 +2185,16 @@ export type SkillApplicationTrigger =
   | "planner"
   | "model"
   | "explicit_hint";
+
+export interface PendingSkillParameterCollection {
+  skillId: string;
+  skillName: string;
+  trigger: SkillApplicationTrigger;
+  parameters: Record<string, unknown>;
+  requiredParameterNames: string[];
+  currentParameterIndex: number;
+  startedAt: number;
+}
 
 export interface SkillContextDirectives {
   allowedTools?: string[];
@@ -4458,6 +4472,7 @@ export interface ManagedAgentRuntimeDefaults {
   allowUserInput?: boolean;
   allowedTools?: string[];
   toolRestrictions?: string[];
+  /** Optional explicit turn cap for managed sessions created from this agent version. */
   maxTurns?: number;
   webSearchMode?: string;
 }
@@ -5759,6 +5774,7 @@ export const IPC_CHANNELS = {
   WINDOW_MAXIMIZE: "window:maximize",
   WINDOW_CLOSE: "window:close",
   WINDOW_IS_MAXIMIZED: "window:isMaximized",
+  RENDERER_PERF_LOG: "renderer:perfLog",
   FILE_OPEN: "file:open",
   FILE_SHOW_IN_FINDER: "file:showInFinder",
   FILE_READ_FOR_VIEWER: "file:readForViewer",
@@ -6604,6 +6620,8 @@ export const IPC_CHANNELS = {
   // Proactive Suggestions
   SUGGESTIONS_LIST: "suggestions:list",
   SUGGESTIONS_LIST_FOR_WORKSPACES: "suggestions:listForWorkspaces",
+  SUGGESTIONS_REFRESH: "suggestions:refresh",
+  SUGGESTIONS_REFRESH_FOR_WORKSPACES: "suggestions:refreshForWorkspaces",
   SUGGESTIONS_DISMISS: "suggestions:dismiss",
   SUGGESTIONS_ACT: "suggestions:act",
 

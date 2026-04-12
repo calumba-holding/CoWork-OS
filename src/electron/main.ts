@@ -3097,7 +3097,6 @@ if (!gotTheLock) {
   ipcMain.handle(IPC_CHANNELS.WINDOW_IS_MAXIMIZED, () => {
     return BrowserWindow.getFocusedWindow()?.isMaximized() ?? false;
   });
-
   const resolveDialogDefaultPath = async (candidate?: string | null) => {
     const requested = typeof candidate === "string" ? candidate.trim() : "";
     const tempWorkspaceRoot = path.resolve(os.tmpdir(), TEMP_WORKSPACE_ROOT_DIR_NAME);

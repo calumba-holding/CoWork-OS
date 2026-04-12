@@ -422,6 +422,42 @@ describe("TaskExecutor executeStep failure handling", () => {
     expect(step.error).toBeUndefined();
   });
 
+  it("suggests write_file as the fallback when create_document is unavailable for html output", () => {
+    executor = createExecutorWithStubs([], {});
+
+    const alternatives = (executor as Any).getUnavailableToolAlternatives(
+      "create_document",
+      { filename: "index.html" },
+      new Set(["write_file", "read_file"]),
+    );
+
+    expect(alternatives).toEqual(["write_file"]);
+  });
+
+  it("allows a short direct-result final step after a prior successful run_command step", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("run_command", { command: "echo hello world" }),
+        textResponse("Captured stdout."),
+        textResponse("hello world"),
+      ],
+      {
+        run_command: { success: true, stdout: "hello world\n", stderr: "", exitCode: 0 },
+      },
+    );
+
+    const step1: Any = { id: "cmd-1", description: "Execute `echo hello world`.", status: "pending" };
+    const step2: Any = { id: "cmd-2", description: "Return the result directly.", status: "pending" };
+    (executor as Any).plan = { description: "Plan", steps: [step1, step2] };
+
+    await (executor as Any).executeStep(step1);
+    await (executor as Any).executeStep(step2);
+
+    expect(step1.status).toBe("completed");
+    expect(step2.status).toBe("completed");
+    expect(String(step2.error || "")).toBe("");
+  });
+
   it("allows one duplicate-bypass mutation attempt for mutation-required steps", async () => {
     executor = createExecutorWithStubs(
       [
@@ -668,6 +704,19 @@ describe("TaskExecutor executeStep failure handling", () => {
     );
   });
 
+  it("does not infer browser_session for file verification steps that only mention browser names", () => {
+    executor = createExecutorWithStubs([], {});
+
+    const step: Any = {
+      id: "verify-markdown-browser-names",
+      description:
+        "Verify: confirm the target markdown file exists and contains the strings Browser and Microsoft Edge in the recommendations section.",
+      status: "pending",
+    };
+
+    expect((executor as Any).resolveVerificationModeForStep(step)).toBe("artifact_file");
+  });
+
   it("accepts artifact verification evidence from file inspection tools when step text is generic", async () => {
     executor = createExecutorWithStubs(
       [
@@ -869,6 +918,47 @@ relationship_memory:
       id: "diagram-verify",
       kind: "verification",
       description: "Verify the Mermaid flowchart is displayed inline and includes the main CI/CD stages.",
+      status: "pending",
+    };
+
+    expect((executor as Any).resolveVerificationModeForStep(step)).toBe("none");
+  });
+
+  it("does not classify command stdout and exit-code verification as artifact-file verification", () => {
+    executor = createExecutorWithStubs([textResponse("OK")], {});
+    (executor as Any).task.prompt = 'run command "echo hello world"';
+
+    const step: Any = {
+      id: "verify-command-output",
+      kind: "verification",
+      description: 'Verify the output is exactly `hello world` and the exit code is `0`.',
+      status: "pending",
+    };
+
+    expect((executor as Any).resolveVerificationModeForStep(step)).toBe("none");
+  });
+
+  it("does not classify standard-output verification as artifact-file verification", () => {
+    executor = createExecutorWithStubs([textResponse("OK")], {});
+    (executor as Any).task.prompt = 'run command "echo hello world"';
+
+    const step: Any = {
+      id: "verify-stdout-output",
+      kind: "verification",
+      description: 'Verify that standard output is exactly `hello world`.',
+      status: "pending",
+    };
+
+    expect((executor as Any).resolveVerificationModeForStep(step)).toBe("none");
+  });
+
+  it("does not classify heartbeat evidence review steps as artifact-file verification", () => {
+    executor = createExecutorWithStubs([textResponse("OK")], {});
+
+    const step: Any = {
+      id: "verify-heartbeat-review",
+      kind: "verification",
+      description: "Review the most recent heartbeat evidence for Project Manager.",
       status: "pending",
     };
 
@@ -1110,6 +1200,49 @@ relationship_memory:
     );
   });
 
+  it("returns from executePlan without emitting a timeout when the task was cancelled by the user", async () => {
+    executor = createExecutorWithStubs([textResponse("done")], {});
+    const step: Any = { id: "plan-cancel-1", description: "Keep working", status: "pending" };
+    (executor as Any).plan = { description: "Plan", steps: [step] };
+    (executor as Any).executeStep = vi.fn(async () => {
+      (executor as Any).cancelled = true;
+      (executor as Any).cancelReason = "user";
+      throw new Error("Request cancelled");
+    });
+
+    await expect((executor as Any).executePlan()).resolves.toBeUndefined();
+
+    expect(step.status).not.toBe("failed");
+    expect((executor as Any).daemon.logEvent).not.toHaveBeenCalledWith(
+      "task-1",
+      "step_timeout",
+      expect.anything(),
+    );
+  });
+
+  it("still emits step_timeout when the abort came from an execution timeout", async () => {
+    executor = createExecutorWithStubs([textResponse("done")], {});
+    const step: Any = { id: "plan-timeout-1", description: "Keep working", status: "pending" };
+    (executor as Any).plan = { description: "Plan", steps: [step] };
+    (executor as Any).executeStep = vi.fn(async () => {
+      (executor as Any).cancelled = true;
+      (executor as Any).cancelReason = "timeout";
+      throw new Error("Request cancelled");
+    });
+
+    await expect((executor as Any).executePlan()).rejects.toThrow("Task failed");
+
+    expect(step.status).toBe("failed");
+    expect((executor as Any).daemon.logEvent).toHaveBeenCalledWith(
+      "task-1",
+      "step_timeout",
+      expect.objectContaining({
+        timeout: 900000,
+        message: "Step timed out after 900s",
+      }),
+    );
+  });
+
   it("requires a direct answer when prompt asks for a decision and summary is artifact-only", () => {
     executor = createExecutorWithStubs([textResponse("done")], {});
     (executor as Any).task.title = "Review YouTube video";
@@ -1178,6 +1311,43 @@ relationship_memory:
     (executor as Any).shouldPauseForQuestions = true;
 
     const step: Any = { id: "3", description: "Clarify requirements", status: "pending" };
+
+    await expect((executor as Any).executeStep(step)).rejects.toMatchObject({
+      name: "AwaitingUserInputError",
+    });
+  });
+
+  it("planning guidance tells the model to collect missing user-specific facts", () => {
+    executor = createExecutorWithStubs([], {});
+
+    const prompt = (executor as Any).buildPlanningTurnGuidancePrompt({
+      toolDescriptions: "",
+      planningGuidance: "",
+    });
+
+    expect(prompt).toContain("user-specific facts");
+    expect(prompt).toContain("exact dates, years, amounts, identifiers");
+    expect(prompt).toContain("collect those facts from the user instead of inventing them");
+  });
+
+  it("pauses when verification feedback requires the user's exact dates", async () => {
+    executor = createExecutorWithStubs(
+      [
+        textResponse(
+          'This is not the requested deliverable.\n\nWhat needs to change:\n- Include the user’s actual dates or tax years, not "8+ years".\n- Keep it framed as the legal question, not the answer.',
+        ),
+      ],
+      {},
+    );
+    (executor as Any).shouldPauseForQuestions = true;
+    (executor as Any).shouldPauseForRequiredDecision = true;
+
+    const step: Any = {
+      id: "3-dates",
+      description: "Verification: one written problem statement with your dates.",
+      status: "pending",
+      kind: "verification",
+    };
 
     await expect((executor as Any).executeStep(step)).rejects.toMatchObject({
       name: "AwaitingUserInputError",
@@ -1733,6 +1903,65 @@ relationship_memory:
     }
   });
 
+  it("does not fail descriptive meta steps for mutation when they do not express read-only intent", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("write_file", { path: "report.md", content: "# Findings" }),
+        textResponse("Saved the markdown report."),
+      ],
+      {
+        write_file: { success: true, path: "report.md" },
+      },
+    );
+    const tempDir = fs.mkdtempSync("/tmp/cowork-meta-step-");
+    (executor as Any).workspace.path = tempDir;
+    fs.writeFileSync(path.join(tempDir, "report.md"), "# Findings");
+
+    const step: Any = {
+      id: "meta-output-step",
+      description: "Output should be a written Markdown report unless you want a different format later.",
+      status: "pending",
+    };
+
+    try {
+      expect((executor as Any).resolveStepExecutionContract(step).mode).toBe("analysis_only");
+      await (executor as Any).executeStep(step);
+      expect(step.status, String(step.error || "")).toBe("completed");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("still fails true inspection steps when they mutate the workspace", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("write_file", { path: "report.md", content: "# Findings" }),
+        textResponse("Saved the markdown report."),
+      ],
+      {
+        write_file: { success: true, path: "report.md" },
+      },
+    );
+    const tempDir = fs.mkdtempSync("/tmp/cowork-inspection-step-");
+    (executor as Any).workspace.path = tempDir;
+    fs.writeFileSync(path.join(tempDir, "report.md"), "# Findings");
+
+    const step: Any = {
+      id: "inspection-step",
+      description: "Inspect the current landing page structure and review the existing files before changing anything.",
+      status: "pending",
+    };
+
+    try {
+      expect((executor as Any).resolveStepExecutionContract(step).mode).toBe("analysis_only");
+      await (executor as Any).executeStep(step);
+      expect(step.status).toBe("failed");
+      expect(String(step.error || "")).toContain("Analysis/inspection step performed a workspace mutation");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reuses prior mutation evidence for refinement steps when current-step target verification is present", async () => {
     executor = createExecutorWithStubs(
       [
@@ -2057,6 +2286,32 @@ relationship_memory:
     expect(JSON.stringify(template.steps)).not.toContain('"server/src/chokepoints/"');
   });
 
+  it("uses create_diagram recovery for inline diagram mutation steps", () => {
+    executor = createExecutorWithStubs([textResponse("OK")], {});
+    const step: Any = {
+      id: "diagram-recovery-step",
+      description: "Build your personal tax timeline",
+      status: "pending",
+    };
+    const stepContract: Any = {
+      requiredTools: new Set(["create_diagram"]),
+      mode: "mutation_required",
+      requiresMutation: true,
+      requiresArtifactEvidence: true,
+      targetPaths: [],
+      requiredExtensions: [],
+      enforcementLevel: "strict",
+      contractReason: "step_requires_artifact_mutation",
+      verificationMode: "none",
+      artifactKind: "diagram",
+    };
+
+    const template = (executor as Any).buildWriteRecoveryTemplate(step, stepContract);
+    expect(template.templateId).toBe("write_recovery:create_diagram");
+    expect(JSON.stringify(template.steps)).toContain("create_diagram");
+    expect(JSON.stringify(template.steps)).not.toContain("write_file");
+  });
+
   it("treats generate_presentation as valid mutation evidence for write-required steps", async () => {
     executor = createExecutorWithStubs(
       [
@@ -2275,6 +2530,36 @@ relationship_memory:
 
     expect(step.status).toBe("failed");
     expect(step.error).toContain("artifact reference/presence");
+  });
+
+  it("accepts current-step target inspection evidence for compile/summary steps", async () => {
+    executor = createExecutorWithStubs(
+      [
+        toolUseResponse("read_file", { path: "deliverables/final-summary.md" }),
+        textResponse("Prepared final summary from the inspected artifact."),
+      ],
+      {
+        read_file: {
+          success: true,
+          path: "deliverables/final-summary.md",
+          content: "# Final summary\n",
+        },
+      },
+    );
+    (executor as Any).fileOperationTracker = {
+      getKnowledgeSummary: vi.fn().mockReturnValue(""),
+      getCreatedFiles: vi.fn().mockReturnValue(["earlier_artifact.md"]),
+    };
+
+    const step: Any = {
+      id: "artifact-presence-inspected",
+      description: "Prepare final summary document in deliverables/final-summary.md",
+      status: "pending",
+    };
+
+    await (executor as Any).executeStep(step);
+
+    expect(step.status, String(step.error || "")).toBe("completed");
   });
 
   it("does not require artifact evidence when step explicitly allows inline output", async () => {
@@ -3009,6 +3294,46 @@ relationship_memory:
     expect(planDescriptions.length).toBeGreaterThan(2);
     expect(planDescriptions).toContain("Validate output");
     expect(failedStep.status).toBe("failed");
+  });
+
+  it("prunes the generic blocked-tools fallback after alternative recovery succeeds", () => {
+    const executor: Any = Object.create(TaskExecutor.prototype);
+    executor.logTag = "[Executor:test]";
+    const completedRecovery = {
+      id: "recovery-1",
+      description: "Try an alternative toolchain or different input strategy for: Create the seed record",
+      kind: "recovery",
+      status: "completed",
+    };
+    executor.plan = {
+      description: "Plan",
+      steps: [
+        completedRecovery,
+        {
+          id: "recovery-2",
+          description:
+            "If normal tools are blocked, continue with a read-only fallback path and complete the goal from existing evidence and tool outputs.",
+          kind: "recovery",
+          status: "pending",
+        },
+        {
+          id: "next-primary",
+          description: "Continue drafting the novel foundation",
+          kind: "primary",
+          status: "pending",
+        },
+      ],
+    };
+
+    (TaskExecutor as Any).prototype.pruneSatisfiedGenericRecoverySteps.call(
+      executor,
+      completedRecovery,
+    );
+
+    expect(executor.plan.steps.map((step: Any) => step.id)).toEqual([
+      "recovery-1",
+      "next-primary",
+    ]);
   });
 
   it("requires artifact_write_required for summary/report steps with a concrete target path and write intent", () => {

@@ -648,6 +648,7 @@ interface TraySettings {
   startMinimized: boolean;
   closeToTray: boolean;
   showNotifications: boolean;
+  showApprovalSavedNotifications: boolean;
 }
 
 // Cron (Scheduled Tasks) Types (inlined for sandboxed preload)
@@ -3700,6 +3701,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.SUGGESTIONS_LIST, workspaceId),
   listSuggestionsForWorkspaces: (workspaceIds: string[]) =>
     ipcRenderer.invoke(IPC_CHANNELS.SUGGESTIONS_LIST_FOR_WORKSPACES, workspaceIds),
+  refreshSuggestions: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUGGESTIONS_REFRESH, workspaceId),
+  refreshSuggestionsForWorkspaces: (workspaceIds: string[]) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SUGGESTIONS_REFRESH_FOR_WORKSPACES, workspaceIds),
   dismissSuggestion: (workspaceId: string, suggestionId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.SUGGESTIONS_DISMISS, workspaceId, suggestionId),
   actOnSuggestion: (workspaceId: string, suggestionId: string) =>
@@ -4574,6 +4579,7 @@ export interface ElectronAPI {
   }>;
   getAppearanceRuntimeInfo: () => Promise<{
     prefersReducedTransparency: boolean;
+    devLogCaptureEnabled: boolean;
   }>;
   saveAppearanceSettings: (settings: {
     themeMode?: "light" | "dark" | "system";
@@ -6031,6 +6037,8 @@ export interface ElectronAPI {
   listSuggestionsForWorkspaces: (
     workspaceIds: string[],
   ) => Promise<Array<{ workspaceId: string; suggestions: Any[] }>>;
+  refreshSuggestions: (workspaceId: string) => Promise<{ success: boolean }>;
+  refreshSuggestionsForWorkspaces: (workspaceIds: string[]) => Promise<{ success: boolean }>;
   dismissSuggestion: (workspaceId: string, suggestionId: string) => Promise<{ success: boolean }>;
   actOnSuggestion: (
     workspaceId: string,

@@ -5272,6 +5272,7 @@ export class AgentDaemon extends EventEmitter {
    */
   private emitTaskEvent(event: TaskEvent): void {
     const timelineEnvelope = {
+      id: event.id,
       taskId: event.taskId,
       type: event.type,
       payload: event.payload,
@@ -6159,6 +6160,7 @@ export class AgentDaemon extends EventEmitter {
         | "completedAt"
         | "terminalStatus"
         | "failureClass"
+        | "awaitingUserInputReasonCode"
         | "budgetUsage"
         | "continuationCount"
         | "continuationWindow"
@@ -6646,16 +6648,49 @@ export class AgentDaemon extends EventEmitter {
   private extractKeyClaimSentences(summary: string): string[] {
     const trimmed = summary.trim();
     if (!trimmed) return [];
+    const normalizePiece = (piece: string): string =>
+      piece
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^\s*(?:[-*+]|\d+[.)])\s*/, "").trim())
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+    const isInstructionLike = (piece: string): boolean =>
+      /^(?:add|assign|audit|check|compare|confirm|create|extract|identify|label|make|queue|record|replace|report|review|run|score|set|state|track|update|use|validate|verify|write)\b/i.test(
+        piece,
+      );
+    const isStructuralListScaffold = (piece: string): boolean => {
+      const normalized = normalizePiece(piece);
+      if (!normalized) return true;
+      if (/^(?:\d+[.)]?|[ivxlcdm]+[.)]?)$/i.test(normalized)) return true;
+      if (isInstructionLike(normalized)) return true;
+      return /^(?:fascinations|useful tools|signals to watch|next experiment|definition of done|required action|completion gate|operating rule|done condition|file|files|result|results|rule|rules|priority|target|verification):?$/i.test(
+        normalized,
+      );
+    };
     const pieces = trimmed
       .split(/(?<=[.!?])\s+/)
       .map((piece) => piece.trim())
       .filter(Boolean);
-    const keyClaimRe =
-      /(\d{1,4}|\b(less|greater|higher|lower|faster|slower|increase|decrease|median|percentile|best|worst|before|after)\b)/i;
-    return pieces.filter((piece) => keyClaimRe.test(piece));
+    const comparativeSignalRe =
+      /\b(less|greater|higher|lower|faster|slower|increase|decrease|median|percentile|best|worst|before|after)\b/i;
+    const measurableSignalRe =
+      /(\b\d{4}-\d{2}-\d{2}\b|\b\d+(?:\.\d+)?%\b|\$?\d[\d,]*(?:\.\d+)?\s*(?:bytes?|kb|mb|gb|tasks?|files?|runs?|steps?|days?|hours?|minutes?|items?|sources?|errors?)\b)/i;
+    const declarativeSignalRe =
+      /\b(is|are|was|were|has|have|had|contains?|contained|includes?|included|shows?|reported|measured?|equals?|reached|remains?|exists?)\b/i;
+    return pieces.filter((piece) => {
+      if (isStructuralListScaffold(piece)) return false;
+      const normalized = normalizePiece(piece);
+      if (comparativeSignalRe.test(normalized)) return true;
+      return measurableSignalRe.test(normalized) && declarativeSignalRe.test(normalized);
+    });
   }
 
-  private hasEvidenceForKeyClaims(taskId: string, summary?: string): {
+  private hasEvidenceForKeyClaims(
+    taskId: string,
+    summary?: string,
+    verificationEvidenceBundle?: TaskVerificationEvidenceBundle,
+  ): {
     passed: boolean;
     keyClaims: string[];
   } {
@@ -6666,8 +6701,21 @@ export class AgentDaemon extends EventEmitter {
     const evidenceRefs = this.evidenceRefsByTask.get(taskId);
     if (evidenceRefs && evidenceRefs.size > 0) return { passed: true, keyClaims };
 
+    const hasSuccessfulVerificationEvidence =
+      verificationEvidenceBundle?.entries?.some((entry) => Boolean(entry?.ok)) ?? false;
+    if (hasSuccessfulVerificationEvidence) return { passed: true, keyClaims };
+
     const tokenEvidenceRe = /\[(?:evidence|source|cite):[^\]]+\]|\[[0-9]+\]|https?:\/\//i;
-    return { passed: tokenEvidenceRe.test(text), keyClaims };
+    const markdownLinkEvidenceRe = /\[[^\]]+\]\((?:https?:\/\/|\/)[^)]+\)/i;
+    const labeledEvidenceLineRe =
+      /(?:^|\n)\s*(?:sources?|references?|citations?|evidence)\s*:\s*.*(?:\[[^\]]+\]\((?:https?:\/\/|\/)[^)]+\)|https?:\/\/|(?:\/|\.{0,2}\/)[^\s,]+:\d+)/im;
+    return {
+      passed:
+        tokenEvidenceRe.test(text) ||
+        markdownLinkEvidenceRe.test(text) ||
+        labeledEvidenceLineRe.test(text),
+      keyClaims,
+    };
   }
 
   private async runPostCompletionVerification(
@@ -7430,7 +7478,11 @@ export class AgentDaemon extends EventEmitter {
       }
     }
 
-    const evidenceCheck = this.hasEvidenceForKeyClaims(taskId, trimmedSummary);
+    const evidenceCheck = this.hasEvidenceForKeyClaims(
+      taskId,
+      trimmedSummary,
+      metadata?.verificationEvidenceBundle,
+    );
     if (!evidenceCheck.passed) {
       this.timelineMetrics.evidenceGateFails += 1;
       terminalStatus = "partial_success";

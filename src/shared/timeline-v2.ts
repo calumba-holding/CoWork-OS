@@ -457,7 +457,6 @@ export function inferTimelineStageForLegacyType(type: EventType): TimelineStage 
     case "follow_up_turn_recovery_completed":
     case "follow_up_turn_recovery_blocked":
     case "safety_stop_triggered":
-    case "turn_policy_selected":
     case "verification_preflight_policy_applied":
     case "verification_artifact_output_downgraded":
     case "verification_missing_artifact_ignored":

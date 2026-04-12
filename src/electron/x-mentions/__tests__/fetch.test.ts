@@ -60,9 +60,14 @@ describe("fetchMentionsWithRetry", () => {
     );
   });
 
-  it("classifies persistent cookie and CLI failures for bridge backoff decisions", () => {
+  it("classifies concrete auth failures separately from generic bird CLI failures", () => {
+    expect(
+      classifyXMentionFailure(
+        new Error("Command failed: bird --cookie-source chrome: Missing auth_token"),
+      ),
+    ).toEqual(expect.objectContaining({ code: "auth" }));
     expect(classifyXMentionFailure(new Error("Command failed: bird --cookie-source chrome"))).toEqual(
-      expect.objectContaining({ code: "auth" }),
+      expect.objectContaining({ code: "cli" }),
     );
     expect(classifyXMentionFailure(new Error("spawn EBADF"))).toEqual(
       expect.objectContaining({ code: "cli" }),

@@ -137,20 +137,36 @@ export function useAgentContext(): AgentContext {
     [agentName, userName],
   );
 
-  return {
-    agentName,
-    userName,
-    personality,
-    persona,
-    emojiUsage,
-    quirks,
-    isLoading,
-    getMessage: getMessageFn,
-    getPlaceholder: getPlaceholderFn,
-    getUiCopy: getUiCopyFn,
-    formatWithNames,
-    refresh: loadSettings,
-  };
+  return useMemo(
+    () => ({
+      agentName,
+      userName,
+      personality,
+      persona,
+      emojiUsage,
+      quirks,
+      isLoading,
+      getMessage: getMessageFn,
+      getPlaceholder: getPlaceholderFn,
+      getUiCopy: getUiCopyFn,
+      formatWithNames,
+      refresh: loadSettings,
+    }),
+    [
+      agentName,
+      userName,
+      personality,
+      persona,
+      emojiUsage,
+      quirks,
+      isLoading,
+      getMessageFn,
+      getPlaceholderFn,
+      getUiCopyFn,
+      formatWithNames,
+      loadSettings,
+    ],
+  );
 }
 
 export default useAgentContext;

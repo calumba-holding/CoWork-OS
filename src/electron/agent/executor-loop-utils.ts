@@ -6,6 +6,98 @@ export interface ToolLoopCall {
   baseTarget?: string;
 }
 
+function stableStringify(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "object") return String(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((key) => `${key}:${stableStringify(obj[key])}`).join(",")}}`;
+}
+
+function isPackagingRelatedToolCall(toolName: string, input: unknown): boolean {
+  const normalizedToolName = String(toolName || "").trim().toLowerCase();
+  if (
+    /^(create_document|generate_document|generate_epub|nano-pdf|nano_pdf)$/i.test(
+      normalizedToolName,
+    )
+  ) {
+    return true;
+  }
+  if (!/^(run_command|execute_code|bash)$/i.test(normalizedToolName)) {
+    return false;
+  }
+  const serializedInput = stableStringify(input).toLowerCase();
+  return /\b(pdf|epub|docx|ebook|manuscript|cover|fpdf|pdfkit|pandoc)\b/.test(serializedInput);
+}
+
+function extractPackagingTarget(input: unknown): string {
+  if (!input || typeof input !== "object") {
+    return stableStringify(input).slice(0, 400);
+  }
+  const obj = input as Record<string, unknown>;
+  const prioritizedKeys = [
+    "filename",
+    "path",
+    "outputPath",
+    "output_path",
+    "file",
+    "format",
+    "command",
+    "cmd",
+    "script",
+  ];
+  const parts: string[] = [];
+  for (const key of prioritizedKeys) {
+    const value = obj[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      parts.push(`${key}:${value.trim()}`);
+    }
+  }
+  if (parts.length === 0) {
+    return stableStringify(input).slice(0, 400);
+  }
+  return parts.join("|").slice(0, 400);
+}
+
+function normalizePackagingFailureMessage(message: string): string {
+  return String(message || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\b\d+(?:\.\d+)?s\b/g, "<duration>")
+    .replace(/\bcall_[a-z0-9]+\b/g, "<call>")
+    .replace(/\bpid[:=]?\d+\b/g, "pid:<id>")
+    .trim()
+    .slice(0, 400);
+}
+
+export function recordPackagingFailureFingerprint(opts: {
+  toolName: string;
+  input: unknown;
+  error: string;
+  counts: Map<string, number>;
+  threshold?: number;
+}): { isPackagingFailure: boolean; fingerprint?: string; count: number; thresholdReached: boolean } {
+  if (!isPackagingRelatedToolCall(opts.toolName, opts.input)) {
+    return { isPackagingFailure: false, count: 0, thresholdReached: false };
+  }
+
+  const fingerprint = [
+    String(opts.toolName || "").trim().toLowerCase(),
+    extractPackagingTarget(opts.input),
+    normalizePackagingFailureMessage(opts.error),
+  ].join("::");
+  const count = (opts.counts.get(fingerprint) || 0) + 1;
+  opts.counts.set(fingerprint, count);
+  const threshold = opts.threshold ?? 2;
+  return {
+    isPackagingFailure: true,
+    fingerprint,
+    count,
+    thresholdReached: count >= threshold,
+  };
+}
+
 export function appendRecoveryAssistantMessage(
   messages: LLMMessage[],
   response: Any,
@@ -156,6 +248,21 @@ export function computeToolFailureDecision(opts: {
   shouldStopFromHardFailure: boolean;
   shouldInjectRecoveryHint: boolean;
 } {
+  const hasRecoverableUnavailableAlternative =
+    opts.hasUnavailableToolAttempt &&
+    opts.toolResults.some((result) => {
+      if (!result?.is_error || typeof result.content !== "string") return false;
+      try {
+        const parsed = JSON.parse(result.content);
+        return (
+          parsed?.unavailable === true &&
+          Array.isArray(parsed?.alternatives) &&
+          parsed.alternatives.length > 0
+        );
+      } catch {
+        return false;
+      }
+    });
   const allToolsFailed = opts.toolResults.every((r) => r.is_error);
   const duplicateOnlyFailure =
     opts.hasDuplicateToolAttempt &&
@@ -164,6 +271,7 @@ export function computeToolFailureDecision(opts: {
     !opts.hasHardToolFailureAttempt;
   const shouldStopFromFailures =
     allToolsFailed &&
+    !hasRecoverableUnavailableAlternative &&
     (opts.hasDisabledToolAttempt ||
       opts.hasUnavailableToolAttempt ||
       opts.hasHardToolFailureAttempt ||
@@ -179,7 +287,8 @@ export function computeToolFailureDecision(opts: {
     opts.allowRecoveryHint &&
     !opts.toolRecoveryHintInjected &&
     opts.iterationCount < opts.maxIterations &&
-    (opts.hasDisabledToolAttempt ||
+    (hasRecoverableUnavailableAlternative ||
+      opts.hasDisabledToolAttempt ||
       opts.hasDuplicateToolAttempt ||
       opts.hasUnavailableToolAttempt ||
       (opts.hasHardToolFailureAttempt && !onlyHardFailures));
@@ -542,6 +651,8 @@ export function shouldLockFollowUpToolCalls(opts: {
   consecutiveToolUseStops: number;
   followUpToolCallCount: number;
   stopReasonNudgeInjected: boolean;
+  repeatedPackagingFailureCount?: number;
+  repeatedPackagingFailureThreshold?: number;
   remainingTurns?: number;
   immediateTurnBudgetThreshold?: number;
   allowImmediateTurnBudgetLock?: boolean;
@@ -552,6 +663,7 @@ export function shouldLockFollowUpToolCalls(opts: {
   const minToolCalls = opts.minToolCalls ?? 10;
   const immediateTurnBudgetThreshold = opts.immediateTurnBudgetThreshold ?? 2;
   const allowImmediateTurnBudgetLock = opts.allowImmediateTurnBudgetLock ?? true;
+  const repeatedPackagingFailureThreshold = opts.repeatedPackagingFailureThreshold ?? 2;
   const forceByTurnBudget =
     allowImmediateTurnBudgetLock &&
     opts.stopReason === "tool_use" &&
@@ -559,6 +671,12 @@ export function shouldLockFollowUpToolCalls(opts: {
     opts.remainingTurns <= immediateTurnBudgetThreshold &&
     opts.followUpToolCallCount > 0;
   if (forceByTurnBudget) return true;
+  if (
+    opts.stopReason === "tool_use" &&
+    (opts.repeatedPackagingFailureCount || 0) >= repeatedPackagingFailureThreshold
+  ) {
+    return true;
+  }
   return (
     opts.stopReason === "tool_use" &&
     opts.stopReasonNudgeInjected &&

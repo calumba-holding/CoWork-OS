@@ -80,6 +80,7 @@ This note records the follow-up runtime refactor completed on 2026-04-02 so the 
 - Legacy tasks still resume successfully because the runtime falls back to older payload shapes and upgrades them on the next save.
 - The task row and persisted snapshot now stay aligned more reliably because both are driven from the same runtime projection.
 - Approval-driven resume paths no longer regress a completed task row back to `executing`.
+- Main interactive tasks no longer inherit an implicit strategy turn window; explicit `maxTurns` is now reserved for managed/helper flows or callers that intentionally request it.
 
 ## Validation
 

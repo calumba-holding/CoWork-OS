@@ -45,6 +45,24 @@ describe("Mission Control board helpers", () => {
     ).toBe("assigned");
   });
 
+  it("shows actively executing backlog tasks in the working lane", () => {
+    expect(
+      resolveMissionColumnForTask({
+        status: "executing",
+        boardColumn: "backlog",
+        assignedAgentRoleId: undefined,
+      }),
+    ).toBe("in_progress");
+
+    expect(
+      resolveMissionColumnForTask({
+        status: "planning",
+        boardColumn: "todo",
+        assignedAgentRoleId: "agent-1",
+      }),
+    ).toBe("in_progress");
+  });
+
   it("formats due dates as overdue or due soon", () => {
     const now = Date.UTC(2026, 2, 30, 12, 0, 0);
 

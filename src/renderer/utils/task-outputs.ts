@@ -46,6 +46,48 @@ function mapToSortedPaths(map: Map<string, number>): string[] {
     .map(([filePath]) => filePath);
 }
 
+function collectDirectoryPaths(events: TaskEvent[] | undefined): Set<string> {
+  const directoryPaths = new Set<string>();
+  if (!Array.isArray(events) || events.length === 0) return directoryPaths;
+
+  for (const event of events) {
+    if (event.type !== "file_created") continue;
+    if (event.payload?.type !== "directory") continue;
+    if (!isNonEmptyString(event.payload?.path)) continue;
+    directoryPaths.add(normalizePath(event.payload.path));
+  }
+
+  return directoryPaths;
+}
+
+function stripDirectoriesFromSummary(
+  summary: TaskOutputSummary | null,
+  directoryPaths: Set<string>,
+): TaskOutputSummary | null {
+  if (!summary || directoryPaths.size === 0) return summary;
+
+  const created = summary.created.filter((filePath) => !directoryPaths.has(normalizePath(filePath)));
+  const modifiedFallback = (summary.modifiedFallback || []).filter(
+    (filePath) => !directoryPaths.has(normalizePath(filePath)),
+  );
+  const effective = created.length > 0 ? created : modifiedFallback;
+  if (effective.length === 0) return null;
+
+  const normalizedPrimary = isNonEmptyString(summary.primaryOutputPath)
+    ? normalizePath(summary.primaryOutputPath)
+    : "";
+  const primaryOutputPath =
+    normalizedPrimary && effective.includes(normalizedPrimary) ? normalizedPrimary : effective[0];
+
+  return {
+    created,
+    ...(modifiedFallback.length > 0 ? { modifiedFallback } : {}),
+    primaryOutputPath,
+    outputCount: effective.length,
+    folders: deriveFolders(effective),
+  };
+}
+
 function buildSummary(created: string[], modifiedFallback: string[]): TaskOutputSummary | null {
   const effective = created.length > 0 ? created : modifiedFallback;
   if (effective.length === 0) return null;
@@ -144,11 +186,18 @@ export function resolveTaskOutputSummaryFromCompletionEvent(
   fallbackEvents?: TaskEvent[],
 ): TaskOutputSummary | null {
   if (event.type !== "task_completed") return null;
+  const directoryPaths = collectDirectoryPaths(fallbackEvents);
 
-  const fromPayload = sanitizeTaskOutputSummary(event.payload?.outputSummary);
+  const fromPayload = stripDirectoriesFromSummary(
+    sanitizeTaskOutputSummary(event.payload?.outputSummary),
+    directoryPaths,
+  );
   if (fromPayload) return fromPayload;
 
-  const fromBestKnownOutcome = sanitizeTaskOutputSummary(event.payload?.bestKnownOutcome?.outputSummary);
+  const fromBestKnownOutcome = stripDirectoriesFromSummary(
+    sanitizeTaskOutputSummary(event.payload?.bestKnownOutcome?.outputSummary),
+    directoryPaths,
+  );
   if (fromBestKnownOutcome) return fromBestKnownOutcome;
 
   if (Array.isArray(fallbackEvents) && fallbackEvents.length > 0) {
@@ -162,8 +211,14 @@ export function hasTaskOutputs(summary: TaskOutputSummary | null | undefined): s
   return !!summary && summary.outputCount > 0;
 }
 
-export function resolveTaskOutputSummaryFromTask(task?: Pick<Task, "bestKnownOutcome"> | null): TaskOutputSummary | null {
-  return sanitizeTaskOutputSummary(task?.bestKnownOutcome?.outputSummary);
+export function resolveTaskOutputSummaryFromTask(
+  task?: Pick<Task, "bestKnownOutcome"> | null,
+  fallbackEvents?: TaskEvent[],
+): TaskOutputSummary | null {
+  return stripDirectoriesFromSummary(
+    sanitizeTaskOutputSummary(task?.bestKnownOutcome?.outputSummary),
+    collectDirectoryPaths(fallbackEvents),
+  );
 }
 
 export function resolvePreferredTaskOutputSummary(params: {
@@ -178,7 +233,7 @@ export function resolvePreferredTaskOutputSummary(params: {
     );
     if (fromCompletion) return fromCompletion;
   }
-  return resolveTaskOutputSummaryFromTask(params.task);
+  return resolveTaskOutputSummaryFromTask(params.task, params.fallbackEvents);
 }
 
 export function getFileName(filePath: string): string {

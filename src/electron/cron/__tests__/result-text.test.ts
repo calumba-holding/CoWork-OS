@@ -43,7 +43,7 @@ describe("resolveTaskResultText", () => {
     const summary = "Final concise summary.";
     const events: TaskEvent[] = [
       makeEvent("timeline_step_updated", { actor: "agent", message: "Executing step 1/7: Collect data" }, 100),
-      makeEvent("timeline_group_finished", { actor: "tool", message: "Tool batch: 1 succeeded, 0 failed" }, 101),
+      makeEvent("timeline_group_finished", { actor: "tool", message: "Tool batch: 1 succeeded" }, 101),
     ];
 
     const result = resolveTaskResultText({ summary, events });

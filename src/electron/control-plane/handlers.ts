@@ -88,6 +88,10 @@ import {
   sanitizeTaskMessageParams,
 } from "./sanitize";
 import { AgentConfigSchema, validateInput } from "../utils/validation";
+import {
+  buildTaskEventHistoryForTransport,
+  serializeTaskEventForTransport,
+} from "./task-event-transport";
 
 // Server instance
 let controlPlaneServer: ControlPlaneServer | null = null;
@@ -693,6 +697,8 @@ function upsertRemoteShadowTask(db: Any, workspaceId: string, nodeId: string, ta
   );
 }
 
+const REMOTE_TASK_SYNC_LIMIT = 200;
+
 async function syncRemoteShadowTasksForNode(nodeId: string): Promise<void> {
   if (!controlPlaneDeps?.dbManager) return;
   const remoteDevice = await findManagedRemoteDeviceByNodeId(nodeId);
@@ -709,15 +715,28 @@ async function syncRemoteShadowTasksForNode(nodeId: string): Promise<void> {
 
   try {
     const [taskRes, workspaceRes] = await Promise.all([
-      remoteClient.request(Methods.TASK_LIST, { limit: 50, offset: 0 }),
+      remoteClient.request(Methods.TASK_LIST, { limit: REMOTE_TASK_SYNC_LIMIT, offset: 0 }),
       remoteClient.request(Methods.WORKSPACE_LIST, undefined, 5000),
     ]);
     const remoteTasks = Array.isArray((taskRes as Any)?.tasks) ? (taskRes as Any).tasks : [];
     const remoteWorkspaces = Array.isArray((workspaceRes as Any)?.workspaces)
       ? (workspaceRes as Any).workspaces
       : [];
+    const repo = new TaskRepository(db);
     const targetNodeId = remoteDevice.taskNodeId || `remote-gateway:${remoteDevice.id}`;
+    const targetNodeAliases = await getManagedRemoteNodeAliases(remoteDevice, nodeId);
+    const remoteTaskIds: string[] = [];
+    let oldestFetchedCreatedAt: number | undefined;
     for (const remoteTask of remoteTasks) {
+      if (typeof remoteTask?.id === "string" && remoteTask.id.trim()) {
+        remoteTaskIds.push(remoteTask.id.trim());
+      }
+      if (typeof remoteTask?.createdAt === "number" && Number.isFinite(remoteTask.createdAt)) {
+        oldestFetchedCreatedAt =
+          oldestFetchedCreatedAt === undefined
+            ? remoteTask.createdAt
+            : Math.min(oldestFetchedCreatedAt, remoteTask.createdAt);
+      }
       const workspaceId = resolveLocalWorkspaceIdForRemoteTask(
         db,
         remoteWorkspaces,
@@ -727,6 +746,13 @@ async function syncRemoteShadowTasksForNode(nodeId: string): Promise<void> {
       if (workspaceId) {
         upsertRemoteShadowTask(db, workspaceId, targetNodeId, remoteTask);
       }
+    }
+
+    // Only prune rows that are guaranteed to be covered by the first page of remote tasks.
+    if (remoteTasks.length === 0) {
+      repo.pruneByTargetNodeIds(targetNodeAliases, []);
+    } else if (oldestFetchedCreatedAt !== undefined) {
+      repo.pruneByTargetNodeIds(targetNodeAliases, remoteTaskIds, oldestFetchedCreatedAt);
     }
   } catch (error) {
     console.warn(`[ControlPlane] Failed to sync remote task list for ${remoteDevice.id}:`, error);
@@ -1308,8 +1334,12 @@ async function routeLocalDeviceProxyRequest(method: string, params?: unknown): P
     }
     case Methods.TASK_EVENTS: {
       const { taskId, limit } = sanitizeTaskEventsParams(params);
-      const allEvents = eventRepo.findByTaskId(taskId);
-      const events = allEvents.slice(Math.max(allEvents.length - limit, 0));
+      const events = buildTaskEventHistoryForTransport({
+        taskId,
+        limit,
+        taskRepo,
+        eventRepo,
+      }).map((event) => serializeTaskEventForTransport(event, sanitizeForBroadcast));
       return { events };
     }
     case Methods.TASK_CANCEL: {
@@ -2988,18 +3018,12 @@ function registerTaskAndWorkspaceMethods(
   server.registerMethod(Methods.TASK_EVENTS, async (client, params) => {
     requireScope(client, "admin");
     const { taskId, limit } = sanitizeTaskEventsParams(params);
-
-    // Note: This can be large for long tasks; we return only the most recent `limit`.
-    const all = eventRepo.findByTaskId(taskId);
-    const sliced = all.slice(Math.max(all.length - limit, 0));
-    const events = sliced.map((e) => ({
-      id: e.id,
-      taskId: e.taskId,
-      timestamp: e.timestamp,
-      type: e.type,
-      payload: sanitizeForBroadcast(e.payload),
-    }));
-
+    const events = buildTaskEventHistoryForTransport({
+      taskId,
+      limit,
+      taskRepo,
+      eventRepo,
+    }).map((event) => serializeTaskEventForTransport(event, sanitizeForBroadcast));
     return { events };
   });
 

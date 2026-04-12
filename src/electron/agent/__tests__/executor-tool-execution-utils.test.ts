@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildUnavailableToolResult,
   buildNormalizedToolResult,
   getToolFailureReason,
   getToolInputValidationError,
@@ -110,6 +111,18 @@ describe("preflightValidateAndRepairToolInput", () => {
 });
 
 describe("tool failure normalization", () => {
+  it("includes available fallback alternatives in unavailable tool results", () => {
+    const result = buildUnavailableToolResult({
+      toolName: "create_document",
+      toolUseId: "tool-1",
+      alternatives: ["write_file"],
+    });
+
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain('"alternatives":["write_file"]');
+    expect(result.content).toContain("Try one of these available alternatives instead: write_file.");
+  });
+
   it("extracts message from structured error objects", () => {
     const result = {
       success: false,

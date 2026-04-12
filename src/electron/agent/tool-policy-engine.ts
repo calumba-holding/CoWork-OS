@@ -103,6 +103,7 @@ const INTEGRATION_TOOLS = new Set([
 ]);
 
 const ARTIFACT_TOOLS = new Set([
+  "create_document",
   "generate_document",
   "create_spreadsheet",
   "generate_spreadsheet",

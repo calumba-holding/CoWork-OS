@@ -345,6 +345,92 @@ describe("AgentDaemon.completeTask", () => {
     );
   });
 
+  it("ignores numbered section scaffolding when extracting key claims", () => {
+    const daemonLike = createDaemonLike();
+
+    const keyClaims = (AgentDaemon.prototype as Any).extractKeyClaimSentences.call(
+      daemonLike,
+      [
+        "1. Fascinations",
+        "- Missing owner, next action, and deadline in routine status reports",
+        "2. Useful tools",
+        "- Tight update template: decision, owner, due date, next action",
+        "3. Signals to watch",
+        "- More pushback on status updates",
+        "4. Next experiment",
+        "- Score updates for state change vs. activity log for 7 days",
+      ].join("\n"),
+    );
+
+    expect(keyClaims).toEqual([]);
+  });
+
+  it("still extracts concrete dated or measured statements as key claims", () => {
+    const daemonLike = createDaemonLike();
+
+    const keyClaims = (AgentDaemon.prototype as Any).extractKeyClaimSentences.call(
+      daemonLike,
+      "The due date is 2026-04-13 and the exported file is 585 bytes.",
+    );
+
+    expect(keyClaims).toEqual([
+      "The due date is 2026-04-13 and the exported file is 585 bytes.",
+    ]);
+  });
+
+  it("treats successful structured verification evidence as satisfying the key-claim gate", () => {
+    const daemonLike = createDaemonLike();
+
+    const evidenceCheck = (AgentDaemon.prototype as Any).hasEvidenceForKeyClaims.call(
+      daemonLike,
+      "task-1",
+      "The exported file is 585 bytes.",
+      {
+        entries: [{ kind: "file_exists", ok: true, detail: "deliverables/report.md exists", capturedAt: Date.now() }],
+      },
+    );
+
+    expect(evidenceCheck).toEqual({
+      passed: true,
+      keyClaims: ["The exported file is 585 bytes."],
+    });
+  });
+
+  it("accepts markdown-linked source notes as inline evidence for key claims", () => {
+    const daemonLike = createDaemonLike();
+
+    const evidenceCheck = (AgentDaemon.prototype as Any).hasEvidenceForKeyClaims.call(
+      daemonLike,
+      "task-1",
+      [
+        "The exported file is 585 bytes.",
+        "Sources: [dev log](/Users/mesut/Downloads/app/cowork/logs/dev-latest.log:12)",
+      ].join("\n"),
+    );
+
+    expect(evidenceCheck).toEqual({
+      passed: true,
+      keyClaims: ["The exported file is 585 bytes."],
+    });
+  });
+
+  it("passes verification evidence through to the key-claim gate during completion", () => {
+    const daemonLike = createDaemonLike();
+    const verificationEvidenceBundle = {
+      entries: [{ kind: "shell_command", ok: true, detail: "ok", capturedAt: Date.now() }],
+    };
+
+    AgentDaemon.prototype.completeTask.call(daemonLike, "task-1", "The exported file is 585 bytes.", {
+      verificationEvidenceBundle,
+    });
+
+    expect(daemonLike.hasEvidenceForKeyClaims).toHaveBeenCalledWith(
+      "task-1",
+      "The exported file is 585 bytes.",
+      verificationEvidenceBundle,
+    );
+  });
+
   it("emits final downgraded terminal status after strict quality gate failure", () => {
     const daemonLike = createDaemonLike();
     daemonLike.taskRepo.findById.mockReturnValue({

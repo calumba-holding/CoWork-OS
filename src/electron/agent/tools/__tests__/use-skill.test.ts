@@ -518,6 +518,43 @@ describe("Skill tool", () => {
       expect(result.error).toContain("required_param");
     });
 
+    it("returns a pending parameter collection for slash-invoked skills with missing required parameters", async () => {
+      const skill = createTestSkill({
+        id: "pending-slash-skill",
+        name: "Pending Slash Skill",
+        parameters: [
+          { name: "required_param", type: "string", description: "Required", required: true },
+          {
+            name: "flavor",
+            type: "select",
+            description: "Optional flavor",
+            required: false,
+            default: "vanilla",
+            options: ["vanilla", "chocolate"],
+          },
+        ],
+      });
+      mockSkills.set("pending-slash-skill", skill);
+
+      const result = await registry.executeTool("Skill", {
+        skill: "pending-slash-skill",
+        trigger: "slash",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.pending_skill_parameter_collection).toEqual(
+        expect.objectContaining({
+          skillId: "pending-slash-skill",
+          trigger: "slash",
+          parameters: {
+            flavor: "vanilla",
+          },
+          requiredParameterNames: ["required_param"],
+          currentParameterIndex: 0,
+        }),
+      );
+    });
+
     it("should reject skills with disableModelInvocation", async () => {
       const skill = createTestSkill({
         id: "manual-only-skill",

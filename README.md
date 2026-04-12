@@ -64,7 +64,7 @@
 - **Computer use (macOS)** — Native desktop control via `computer_*` tools with a single active session, safety overlay, **Esc** to abort, per-app session consent (not per click), and a Settings onboarding panel for Accessibility + Screen Recording. Prefer browser and shell tools for web and repo work; computer use is routed as a last-resort lane in policy and planning guidance. **Documentation:** [docs/computer-use.md](docs/computer-use.md).
 - **Security-first** — Approval workflows, sandboxed execution, configurable guardrails, encrypted storage, and a verified suite of 4,932 automated tests across 390 test files.
 - **Structured guidance** — In plan-mode flows, the agent can pause with short multiple-choice prompts instead of ambiguous free-text follow-ups.
-- **Runtime resilience** — Adaptive turn budgets, context-overflow recovery, and safe path normalization keep long-running tasks moving without silent file drift.
+- **Runtime resilience** — Main interactive tasks run without an implicit turn window, while explicit turn caps, lifetime safety fuses, context-overflow recovery, and safe path normalization keep long-running work moving without silent file drift.
 - **Local-first & BYOK** — Your data and API keys stay on your machine. No telemetry. No middleman.
 
 ### Ideas & Media
@@ -183,7 +183,7 @@ Completion state and file availability are now explicit:
 Long-running tasks now have clearer operator handoffs and stronger recovery defaults:
 
 - **Structured input cards**: plan-mode tasks can pause with 1-3 short multiple-choice prompts, with answers captured inline in the desktop UI or via the Control Plane web dashboard
-- **Adaptive turn recovery**: execute-mode tasks reserve room for a final answer, soft-stop exhausted follow-up windows, make a bounded recovery attempt before triggering a safety stop, and keep follow-up completion visible when tasks resume after the main step loop
+- **Adaptive turn recovery**: main execute-mode tasks are uncapped at the turn-window level by default, still reserve room for a final answer, and use lifetime/emergency safety stops plus bounded follow-up recovery instead of strategy-assigned `30/30` style windows; explicit `maxTurns` / `windowTurnCap` still opt tasks into capped behavior
 - **Context overflow retry**: context-capacity failures trigger compaction and retry instead of immediate hard failure when the model context window is exceeded
 - **Path repair**: `/workspace/...` aliases and drifted relative paths can be normalized back into the active workspace or pinned task root, with strict-fail policies available when you want hard enforcement
 - **Parallel timeline lanes**: read-only tool batches render as grouped timeline rows so the UI stays readable even when searches/fetches run concurrently

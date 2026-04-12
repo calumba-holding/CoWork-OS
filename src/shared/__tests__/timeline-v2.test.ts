@@ -76,6 +76,7 @@ describe("timeline v2 helpers", () => {
     expect(inferTimelineStageForLegacyType("tool_protocol_violation")).toBe("FIX");
     expect(inferTimelineStageForLegacyType("turn_window_soft_exhausted")).toBe("FIX");
     expect(inferTimelineStageForLegacyType("safety_stop_triggered")).toBe("FIX");
+    expect(inferTimelineStageForLegacyType("turn_policy_selected")).toBeUndefined();
     expect(inferTimelineStageForLegacyType("task_completed")).toBe("DELIVER");
   });
 

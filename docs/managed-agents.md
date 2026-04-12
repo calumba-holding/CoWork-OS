@@ -85,6 +85,19 @@ Managed Agents is not a second executor. It maps onto the existing runtime:
 
 The important contract is that `ManagedSession` is the API-facing durable run, while `Task` remains the execution worker.
 
+## Managed Turn Budgets
+
+Managed Agents keep explicit turn caps because managed runs are often unattended or intentionally bounded.
+
+- `ManagedAgentVersion.runtimeDefaults.maxTurns` is passed through as an explicit cap on the backing task when configured
+- if a managed agent does not set `runtimeDefaults.maxTurns`, the backing task inherits the same default-unbounded main-task behavior as ordinary interactive sessions
+- this differs from older strategy behavior: the runtime no longer invents a low implicit window such as `30` turns just because the task routed as `advice` or `planning`
+
+In practice:
+
+- use `runtimeDefaults.maxTurns` when you want a managed session to stop after a defined number of turns
+- leave it unset when you want the run to rely on lifetime caps, emergency fuses, and the normal recovery/safety model instead
+
 ## Security And Policy Boundaries
 
 Managed Agents follows the same security posture as the rest of CoWork, with a few managed-specific rules:

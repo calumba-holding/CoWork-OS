@@ -176,6 +176,32 @@ Budgets are enforced per section rather than after building one giant prompt.
 
 This keeps failures interpretable when token pressure rises.
 
+## Turn Budget Model
+
+CoWork now follows a Claude-style turn-budget model for main tasks.
+
+- ordinary interactive desktop tasks do not receive an implicit strategy-derived `maxTurns`
+- `maxTurns` and `windowTurnCap` are explicit-only controls
+- `turnBudgetPolicy` only matters when an explicit window cap exists
+- helper contexts can still use deliberate caps, such as sub-agents, verification helpers, and managed-session templates
+
+This means the runtime now separates two safety layers:
+
+- **window caps**: optional, explicit, and intended for bounded helper or unattended runs
+- **runaway protection**: always-on lifetime caps, emergency fuses, loop detection, mutation checkpoints, and recovery policies
+
+When no explicit window cap exists:
+
+- the runtime does not throw `Global turn limit exceeded: X/X`
+- it does not emit window-exhaustion events for an implicit cap
+- it continues until the task completes, hits a real blocker, or trips a lifetime/emergency safety policy
+
+When an explicit cap exists:
+
+- `hard_window` still stops at the configured turn count
+- `adaptive_unbounded` still soft-lands and can recover bounded follow-up turns before escalating to a safety stop
+- task telemetry records whether the cap came from explicit config, a managed template, or an internal helper flow
+
 ## Output Budget Policy
 
 When `COWORK_LLM_OUTPUT_POLICY=adaptive` is enabled, execution turns use a centralized output-budget resolver instead of depending on scattered per-provider defaults.

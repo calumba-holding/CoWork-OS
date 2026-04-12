@@ -374,9 +374,11 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
         </div>
       </div>
 
-      <div className="mc-v2-detail-section">
-        <h4>{agentContext.getUiCopy("mcTaskBriefTitle")}</h4>
-        <p className="mc-v2-detail-brief">{task.prompt}</p>
+      <div className="mc-v2-detail-section mc-v2-detail-section-brief">
+        <h4 className="mc-v2-detail-brief-title">{agentContext.getUiCopy("mcTaskBriefTitle")}</h4>
+        <div className="mc-v2-detail-brief-scroll">
+          <p className="mc-v2-detail-brief">{task.prompt}</p>
+        </div>
       </div>
 
       <div className="mc-v2-detail-section mc-v2-learning-section">
