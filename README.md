@@ -430,6 +430,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history of completed features.
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](docs/getting-started.md) | First-time setup and usage |
+| [Beginner's Guide](docs/cowork-school.md) | Practical guide to what CoWork OS is for and which workflows to try first |
 | [Release Notes 0.5.19](docs/release-notes-0.5.19.md) | What is new in the latest release |
 | [Use Case Showcase](docs/showcase.md) | Comprehensive guide to what you can build and automate |
 | [Features](docs/features.md) | Complete feature reference |

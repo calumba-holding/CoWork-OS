@@ -29,6 +29,7 @@ export default defineConfig({
         items: [
           { text: 'Introduction', link: '/' },
           { text: 'Getting Started', link: '/getting-started' },
+          { text: "Beginner's Guide", link: '/cowork-school' },
           { text: 'Platform Updates', link: '/integration-skill-bootstrap-lifecycle' },
           { text: 'Migration Guide', link: '/migration' },
         ],
