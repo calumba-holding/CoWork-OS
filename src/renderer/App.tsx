@@ -22,6 +22,7 @@ import { HealthPanel } from "./components/HealthPanel";
 import { DevicesPanel } from "./components/DevicesPanel";
 import { IdeasPanel } from "./components/IdeasPanel";
 import { InboxAgentPanel } from "./components/InboxAgentPanel";
+import { AgentsHubPanel } from "./components/AgentsHubPanel";
 import { MissionControlPanel } from "./components/mission-control";
 // TaskQueuePanel moved to RightPanel
 import { ToastContainer } from "./components/Toast";
@@ -79,6 +80,7 @@ import {
 } from "./utils/task-completion-ux";
 import { isSpawnSubagentsPrompt } from "../shared/spawn-intent-detection";
 import { isSynthesisChildTask } from "../shared/synthesis-agent-detection";
+import { classifyShellPermissionDecision } from "../shared/shell-permission-intents";
 import { isAutomatedTaskLike } from "../shared/automated-task-detection";
 import { resolveTaskStatusUpdateFromEvent } from "../shared/task-status";
 import {
@@ -170,6 +172,7 @@ type AppView =
   | "health"
   | "ideas"
   | "inboxAgent"
+  | "agents"
   | "missionControl";
 type RemoteTaskView = {
   deviceId: string;
@@ -224,6 +227,8 @@ type SelectedTaskWorkspaceViewProps = {
   onSelectWorkspace: (workspace: Workspace) => void;
   onOpenSettings: (tab?: string) => void;
   onStopTask: () => Promise<void>;
+  onEnableShellForPausedTask: () => Promise<void>;
+  onContinueWithoutShellForPausedTask: () => Promise<void>;
   onWrapUpTask: () => Promise<void>;
   onSubmitInputRequest: (
     requestId: string,
@@ -273,6 +278,8 @@ const SelectedTaskWorkspaceView = memo(function SelectedTaskWorkspaceView({
   onSelectWorkspace,
   onOpenSettings,
   onStopTask,
+  onEnableShellForPausedTask,
+  onContinueWithoutShellForPausedTask,
   onWrapUpTask,
   onSubmitInputRequest,
   onDismissInputRequest,
@@ -302,6 +309,8 @@ const SelectedTaskWorkspaceView = memo(function SelectedTaskWorkspaceView({
         onSelectWorkspace={onSelectWorkspace}
         onOpenSettings={onOpenSettings as Any}
         onStopTask={onStopTask}
+        onEnableShellForPausedTask={onEnableShellForPausedTask}
+        onContinueWithoutShellForPausedTask={onContinueWithoutShellForPausedTask}
         onWrapUpTask={onWrapUpTask}
         inputRequest={activeInputRequest}
         onSubmitInputRequest={onSubmitInputRequest}
@@ -1520,6 +1529,7 @@ export function App() {
                 resolveTaskStatusUpdateFromEvent(t, newStatus as Task["status"]) ?? t.status;
               const updates: Partial<Task> = {
                 status: resolvedStatus,
+                updatedAt: Math.max(t.updatedAt || 0, eventTimestamp),
               };
               if (shouldClearTerminalStatus) {
                 updates.terminalStatus = undefined;
@@ -2187,11 +2197,12 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [childTasks.map((c) => `${c.id}:${c.status}`).join(","), remoteTaskView, selectedTaskId]);
 
-  // Load all existing sessions upfront so the sidebar is fully populated.
-  // Pagination only kicks in for sessions beyond INITIAL_TASK_LOAD (extremely
-  // rare — most users will never hit this).
-  const INITIAL_TASK_LOAD = 10_000;
+  // Keep startup light: load the first sidebar page, then page in more sessions
+  // only when the user scrolls. The sidebar-prioritized DB order keeps pinned
+  // and active sessions visible even if they are older than the recent page.
+  const INITIAL_TASK_LOAD = 100;
   const TASK_LOAD_MORE = 100;
+  const TASK_PAGE_LOOKAHEAD = 1;
 
   // Refs let loadMoreTasks read current state without being in its dep array
   // (avoids re-creating the callback — and re-subscribing the scroll listener
@@ -2210,12 +2221,14 @@ export function App() {
     try {
       taskOffsetRef.current = 0;
       isLoadingMoreRef.current = false;
-      const loadedTasks = await window.electronAPI.listTasks({
-        limit: INITIAL_TASK_LOAD,
+      const loadedTaskPage = await window.electronAPI.listTasks({
+        limit: INITIAL_TASK_LOAD + TASK_PAGE_LOOKAHEAD,
         offset: 0,
+        prioritizeSidebar: true,
       });
+      const loadedTasks = loadedTaskPage.slice(0, INITIAL_TASK_LOAD);
       setTasks(loadedTasks);
-      const more = loadedTasks.length >= INITIAL_TASK_LOAD;
+      const more = loadedTaskPage.length > INITIAL_TASK_LOAD;
       setHasMoreTasks(more);
       hasMoreTasksRef.current = more;
       taskOffsetRef.current = loadedTasks.length;
@@ -2231,10 +2244,12 @@ export function App() {
     isLoadingMoreRef.current = true;
     try {
       const offset = taskOffsetRef.current;
-      const moreTasks = await window.electronAPI.listTasks({
-        limit: TASK_LOAD_MORE,
+      const moreTaskPage = await window.electronAPI.listTasks({
+        limit: TASK_LOAD_MORE + TASK_PAGE_LOOKAHEAD,
         offset,
+        prioritizeSidebar: true,
       });
+      const moreTasks = moreTaskPage.slice(0, TASK_LOAD_MORE);
       if (moreTasks.length > 0) {
         setTasks((prev) => {
           const existingIds = new Set(prev.map((t) => t.id));
@@ -2243,7 +2258,7 @@ export function App() {
         });
         taskOffsetRef.current = offset + moreTasks.length;
       }
-      const more = moreTasks.length >= TASK_LOAD_MORE;
+      const more = moreTaskPage.length > TASK_LOAD_MORE;
       setHasMoreTasks(more);
       hasMoreTasksRef.current = more;
     } catch (error) {
@@ -2307,6 +2322,7 @@ export function App() {
       verificationAgent?: boolean;
       executionMode?: ExecutionMode;
       taskDomain?: TaskDomain;
+      chronicleMode?: "inherit" | "enabled" | "disabled";
       videoGenerationMode?: boolean;
       llmProfile?: LlmProfile;
       llmProfileForced?: boolean;
@@ -2353,6 +2369,7 @@ export function App() {
     const verificationAgent = options?.verificationAgent === true;
     const executionMode = options?.executionMode;
     const taskDomain = options?.taskDomain;
+    const chronicleMode = options?.chronicleMode;
     const videoGenerationMode = options?.videoGenerationMode === true;
     const llmProfile = options?.llmProfile;
     const llmProfileForced = options?.llmProfileForced;
@@ -2370,6 +2387,7 @@ export function App() {
       verificationAgent ||
       executionMode ||
       taskDomain ||
+      chronicleMode ||
       videoGenerationMode ||
       effectiveLlmProfile
         ? {
@@ -2382,6 +2400,7 @@ export function App() {
             ...(verificationAgent ? { verificationAgent: true } : {}),
             ...(executionMode ? { executionMode } : {}),
             ...(taskDomain ? { taskDomain } : {}),
+            ...(chronicleMode ? { chronicleMode } : {}),
             ...(videoGenerationMode ? { videoGenerationMode: true } : {}),
             ...(effectiveLlmProfile ? { llmProfile: effectiveLlmProfile } : {}),
             ...(effectiveLlmProfileForced ? { llmProfileForced: true } : {}),
@@ -2556,13 +2575,29 @@ export function App() {
     if (!selectedTaskId) return;
 
     try {
-      const lower = message.toLowerCase().trim();
-      const enableShellIntent =
-        /^(?:yes|yep|yeah|sure|ok|okay|please do|do it)[.!]?$/.test(lower) ||
-        /\b(?:enable|turn on|allow|grant)\b[\s\S]{0,20}\bshell\b/.test(lower) ||
-        /\bshell\b[\s\S]{0,20}\b(?:on|enable|enabled)\b/.test(lower);
+      const sentAt = Date.now();
+      if (remoteTaskView) {
+        setRemoteTaskView((prev) =>
+          prev && prev.task.id === selectedTaskId
+            ? { ...prev, task: { ...prev.task, updatedAt: sentAt } }
+            : prev,
+        );
+      } else {
+        setTasks((prev) =>
+          updateTaskPreservingIdentity(prev, selectedTaskId, (task) =>
+            mergeTaskPreservingIdentity(task, { updatedAt: sentAt }),
+          ),
+        );
+      }
 
-      if (enableShellIntent && currentWorkspace && !currentWorkspace.permissions.shell) {
+      const shellPermissionDecision = classifyShellPermissionDecision(message);
+      let nextMessage = message;
+
+      if (
+        shellPermissionDecision === "enable_shell" &&
+        currentWorkspace &&
+        !currentWorkspace.permissions.shell
+      ) {
         try {
           const updatedWorkspace = await window.electronAPI.updateWorkspacePermissions(
             currentWorkspace.id,
@@ -2574,18 +2609,21 @@ export function App() {
         } catch (permissionError) {
           console.error("Failed to pre-enable shell from user message:", permissionError);
         }
+        nextMessage = "Please continue with shell access enabled for this workspace.";
+      } else if (shellPermissionDecision === "continue_without_shell") {
+        nextMessage = "Please continue without shell access and use the limited best-effort path.";
       }
 
       if (remoteTaskView) {
         await window.electronAPI?.deviceProxyRequest?.({
           deviceId: remoteTaskView.deviceId,
           method: "task.sendMessage",
-          params: { taskId: selectedTaskId, message, images, quotedAssistantMessage },
+          params: { taskId: selectedTaskId, message: nextMessage, images, quotedAssistantMessage },
         });
       } else {
         await window.electronAPI.sendMessage(
           selectedTaskId,
-          message,
+          nextMessage,
           images,
           quotedAssistantMessage,
         );
@@ -2596,6 +2634,16 @@ export function App() {
       addToast({ type: "error", title: "Error", message: errorMessage });
     }
   };
+
+  const handleEnableShellForPausedTask = useCallback(async () => {
+    if (remoteTaskView) return;
+    await handleSendMessage("enable shell");
+  }, [handleSendMessage, remoteTaskView]);
+
+  const handleContinueWithoutShellForPausedTask = useCallback(async () => {
+    if (remoteTaskView) return;
+    await handleSendMessage("continue without shell");
+  }, [handleSendMessage, remoteTaskView]);
 
   const handleCancelTask = async () => {
     if (!selectedTaskId) return;
@@ -3335,6 +3383,7 @@ export function App() {
         currentView === "health" ||
         currentView === "ideas" ||
         currentView === "inboxAgent" ||
+        currentView === "agents" ||
         currentView === "missionControl") && (
         <>
           <div
@@ -3348,6 +3397,7 @@ export function App() {
                 isHomeActive={currentView === "home"}
                 isIdeasActive={currentView === "ideas"}
                 isInboxAgentActive={currentView === "inboxAgent"}
+                isAgentsActive={currentView === "agents"}
                 isMissionControlActive={currentView === "missionControl"}
                 isHealthActive={currentView === "health"}
                 isDevicesActive={currentView === "devices"}
@@ -3356,6 +3406,7 @@ export function App() {
                 onOpenHome={() => setCurrentView("home")}
                 onOpenIdeas={() => setCurrentView("ideas")}
                 onOpenInboxAgent={() => setCurrentView("inboxAgent")}
+                onOpenAgents={() => setCurrentView("agents")}
                 onOpenHealth={() => setCurrentView("health")}
                 onOpenDevices={() => setCurrentView("devices")}
                 onNewSession={handleNewSession}
@@ -3427,6 +3478,7 @@ export function App() {
                     multiLlmConfig: options.multiLlmConfig,
                     executionMode: options.executionMode,
                     taskDomain: options.taskDomain,
+                    chronicleMode: options.chronicleMode,
                   } : undefined);
                   loadTasks();
                 }}
@@ -3442,6 +3494,7 @@ export function App() {
                         ...(options.multiLlmMode && { multiLlmMode: true, multiLlmConfig: options.multiLlmConfig }),
                         ...(options.executionMode && { executionMode: options.executionMode }),
                         ...(options.taskDomain && { taskDomain: options.taskDomain }),
+                        ...(options.chronicleMode && { chronicleMode: options.chronicleMode }),
                       } : undefined,
                       shellAccess: options?.shellAccess,
                     });
@@ -3498,9 +3551,28 @@ export function App() {
                   setCurrentView("missionControl");
                 }}
               />
+            ) : currentView === "agents" ? (
+              <main className="main-content">
+                <AgentsHubPanel
+                  onOpenMissionControl={() => {
+                    setMissionControlInitialCompanyId(null);
+                    setMissionControlInitialIssueId(null);
+                    setCurrentView("missionControl");
+                  }}
+                  onOpenAgentPersonas={() => {
+                    setSettingsTab("digitaltwins");
+                    setCurrentView("settings");
+                  }}
+                  onOpenSlackSettings={() => {
+                    setSettingsTab("slack");
+                    setCurrentView("settings");
+                  }}
+                />
+              </main>
             ) : currentView === "missionControl" ? (
               <main className="main-content mission-control-main">
                 <MissionControlPanel
+                  onOpenAgents={() => setCurrentView("agents")}
                   initialCompanyId={missionControlInitialCompanyId}
                   initialIssueId={missionControlInitialIssueId}
                 />
@@ -3535,6 +3607,8 @@ export function App() {
                   setCurrentView("settings");
                 }}
                 onStopTask={handleCancelTask}
+                onEnableShellForPausedTask={handleEnableShellForPausedTask}
+                onContinueWithoutShellForPausedTask={handleContinueWithoutShellForPausedTask}
                 onWrapUpTask={handleWrapUpTask}
                 onSubmitInputRequest={handleSubmitInputRequestFromMainContent}
                 onDismissInputRequest={handleDismissInputRequestFromMainContent}
@@ -3626,6 +3700,9 @@ export function App() {
           onNavigateToMissionControl={(companyId) => {
             setMissionControlInitialCompanyId(companyId);
             setCurrentView("missionControl");
+          }}
+          onNavigateToAgents={() => {
+            setCurrentView("agents");
           }}
         />
       )}

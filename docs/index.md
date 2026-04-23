@@ -36,6 +36,9 @@ hero:
       text: Runtime Visibility
       link: /operator-runtime-visibility
     - theme: alt
+      text: Chronicle
+      link: /chronicle
+    - theme: alt
       text: Skills Runtime
       link: /skills-runtime-model
     - theme: alt
@@ -74,6 +77,10 @@ features:
     details: Direct LLM chat with no tools, same-session follow-ups, and chat-only streaming for supported providers.
   - title: Runtime Visibility
     details: Visible learning progression after each task, unified recall across tasks/messages/files, persistent shell sessions, and live provider routing/fallback status.
+  - title: Rich Artifact Previews
+    details: Generated PDFs, spreadsheets, videos, HTML, LaTeX/PDF pairs, and PPTX decks surface inline previews; PowerPoint artifacts open with slide thumbnails, navigation, text, and speaker notes.
+  - title: Chronicle
+    details: Opt-in desktop recent-screen context for vague on-screen references, with Memory Hub controls, local passive capture, `screen_context` recall, pause/resume, and Mission Control evidence.
   - title: Optional Supermemory
     details: Add Supermemory as an external memory lane with prompt-time profile injection, explicit external memory tools, and optional mirroring of non-private local memory captures, while keeping CoWork's local memory system primary.
   - title: Runtime Orchestration
@@ -92,8 +99,10 @@ features:
     details: The automations surface now separates core automation from trigger ingress, device routing, schedules, webhooks, and optional twin features.
   - title: Heartbeat V3
     details: Default two-lane background automation with cheap Pulse checks, selective Dispatch escalation, signal compression, automation-profile ownership, and truthful Mission Control state.
-  - title: 138 Built-in Skills
-    details: Document creation, web research, code generation, image analysis, and specialized bundled workflows such as `llm-wiki` for persistent research vaults and `manim-video` for technical animation. Extensible via custom skills, ClawHub installs, external skill imports, and optional read-only external skill directories, with staged scanning and warning/quarantine handling for managed imports.
+  - title: 139 Built-in Skills
+    details: Document creation, web research, code generation, image analysis, and specialized bundled workflows such as `llm-wiki` for persistent research vaults, `manim-video` for technical animation, and `kami` for editorial PDFs and slide decks. Extensible via custom skills, ClawHub installs, external skill imports, and optional read-only external skill directories, with staged scanning and warning/quarantine handling for managed imports.
+  - title: LaTeX PDF Artifacts
+    details: Source-first `.tex` workflows compile with installed system TeX engines and render paired source/PDF artifact workbenches in task output surfaces.
   - title: Additive Skill Routing
     details: Skills can still be proactively shortlisted from the task, but they add context and scoped runtime directives instead of replacing the canonical user request.
   - title: Profiles & Portability

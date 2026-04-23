@@ -111,11 +111,14 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] create_directory - Create folders
 - [x] search_files - Search by name/content
 
-#### Document Skills (4 skills)
+#### Document Tools and Skills
 - [x] Spreadsheet - Excel .xlsx (exceljs)
 - [x] Document - Word .docx and PDF (docx, pdfkit)
+- [x] LaTeX compilation - `.tex` source to PDF via system `tectonic`, `latexmk`, `xelatex`, `lualatex`, or `pdflatex`
 - [x] Presentation - PowerPoint .pptx (pptxgenjs)
+- [x] Presentation previews - PPTX slide thumbnails, navigation, extracted text, and speaker notes in the in-app viewer
 - [x] Folder Organizer - By type/date
+- [x] Kami - Editorial PDFs, resumes, one-pagers, diagrams, and slide decks with workspace-local scaffolding
 
 #### Browser Tools (12 tools)
 - [x] browser_navigate
@@ -203,6 +206,8 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - [x] Quick Task FAB (floating action button)
 - [x] Toast notifications for task completion
 - [x] In-app file viewer for artifacts
+- [x] Paired LaTeX/PDF artifact workbench with Summary, `.tex source`, and PDF tabs
+- [x] Rich PPTX artifact viewer with inline deck cards and full-slide preview
 - [x] Parallel task queue panel
 - [x] Collaborative Thoughts Panel - Real-time agent thinking display
 - [x] Comparison View - Side-by-side agent/model output comparison
@@ -425,7 +430,7 @@ Operations Requiring Approval:
 14. Run multiple tasks in parallel (1-10 concurrent)
 15. Configure safety guardrails (budgets, blocked commands)
 16. Use system tools (screenshots, clipboard, open apps)
-17. View artifacts with the in-app file viewer
+17. View artifacts with the in-app file viewer, including rich `.pptx` deck previews
 18. Customize agent personality via Settings or conversation prompts
 19. Run tasks in isolated git worktrees with auto-commit and merge
 20. Use collaborative mode for multi-agent team reasoning
@@ -511,7 +516,7 @@ Expected behavior:
 - **Multi-Channel**: WhatsApp, Telegram, Discord, Slack, iMessage integration
 - **Multi-Provider**: 30+ LLM providers and compatible gateways, including Claude, GPT, Gemini, Bedrock, OpenRouter, and Ollama
 - **Local-First**: Your data stays on your machine, BYOK model
-- **Extensible**: MCP support (Client, Host, Registry), 138 built-in skills, and plugin packs
+- **Extensible**: MCP support (Client, Host, Registry), 140 built-in skills, and plugin packs
 
 ### Feature Highlights
 - Real Office document creation (Excel, Word, PDF, PowerPoint)

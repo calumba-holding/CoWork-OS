@@ -17,6 +17,7 @@ import type {
   WorkspaceKitStatus,
 } from "../../shared/types";
 import { MemorySettings } from "./MemorySettings";
+import { ChronicleSettingsCard } from "./ChronicleSettings";
 import { createRendererLogger } from "../utils/logger";
 
 const DEFAULT_FEATURES: MemoryFeaturesSettings = {
@@ -1701,10 +1702,13 @@ export function MemoryHubSettings(props?: {
         )}
 
         {selectedWorkspaceId && (
-          <MemorySettings
-            workspaceId={selectedWorkspaceId}
-            onSettingsChanged={props?.onSettingsChanged}
-          />
+          <>
+            <ChronicleSettingsCard />
+            <MemorySettings
+              workspaceId={selectedWorkspaceId}
+              onSettingsChanged={props?.onSettingsChanged}
+            />
+          </>
         )}
       </div>
     </div>

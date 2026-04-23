@@ -19,14 +19,16 @@ import {
 } from "../components/Sidebar";
 
 const createTask = (overrides: Partial<Task>): Task => {
+  const createdAt = overrides.createdAt ?? 1700000000000;
+  const updatedAt = overrides.updatedAt ?? createdAt;
   return {
     id: `task-${Math.random().toString(36).slice(2, 9)}`,
     title: "Test Task",
     prompt: "Do this task",
     status: "pending",
     workspaceId: "workspace-1",
-    createdAt: 1700000000000,
-    updatedAt: 1700000000000,
+    createdAt,
+    updatedAt,
     ...overrides,
   };
 };
@@ -42,6 +44,16 @@ describe("compareTasksByPinAndRecency", () => {
 
     const sorted = tasks.sort(compareTasksByPinAndRecency).map((task) => task.id);
     expect(sorted).toEqual(["pinned-new", "pinned-old", "unpinned-new", "unpinned-old"]);
+  });
+
+  it("sorts by latest activity within pinned groups", () => {
+    const tasks = [
+      createTask({ id: "newer-created", createdAt: 20, updatedAt: 20 }),
+      createTask({ id: "older-recently-active", createdAt: 10, updatedAt: 30 }),
+    ];
+
+    const sorted = tasks.sort(compareTasksByPinAndRecency).map((task) => task.id);
+    expect(sorted).toEqual(["older-recently-active", "newer-created"]);
   });
 });
 

@@ -56,6 +56,7 @@ export interface DeviceTaskOptions {
   multiLlmConfig?: MultiLlmConfig;
   executionMode?: ExecutionMode;
   taskDomain?: TaskDomain;
+  chronicleMode?: "inherit" | "enabled" | "disabled";
 }
 
 interface DevicesPanelProps {
@@ -343,6 +344,7 @@ export function DevicesPanel({
   const [autonomousModeEnabled, setAutonomousModeEnabled] = useState(false);
   const [collaborativeModeEnabled, setCollaborativeModeEnabled] = useState(false);
   const [multiLlmModeEnabled, setMultiLlmModeEnabled] = useState(false);
+  const [chronicleEnabledForTask, setChronicleEnabledForTask] = useState(true);
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("execute");
   const [taskDomain, setTaskDomain] = useState<TaskDomain>("auto");
   const [pendingAttachments, setPendingAttachments] = useState<
@@ -640,6 +642,7 @@ export function DevicesPanel({
       shellAccess,
       executionMode,
       taskDomain,
+      chronicleMode: chronicleEnabledForTask ? "inherit" : "disabled",
     };
     if (multiLlmModeEnabled) {
       opts.multiLlmMode = true;
@@ -649,7 +652,7 @@ export function DevicesPanel({
       opts.autonomousMode = true;
     }
     return opts;
-  }, [autonomousModeEnabled, collaborativeModeEnabled, executionMode, multiLlmModeEnabled, shellAccess, taskDomain]);
+  }, [autonomousModeEnabled, chronicleEnabledForTask, collaborativeModeEnabled, executionMode, multiLlmModeEnabled, shellAccess, taskDomain]);
 
   const buildPromptWithAttachments = useCallback(
     (basePrompt: string): string => {
@@ -1036,6 +1039,23 @@ export function DevicesPanel({
                     </button>
                   </div>
                 )}
+                <div className="overflow-menu-item" role="none">
+                  <button
+                    className="goal-mode-toggle goal-mode-toggle-switch-row"
+                    onClick={() => setChronicleEnabledForTask(!chronicleEnabledForTask)}
+                    role="menuitemcheckbox"
+                    aria-checked={chronicleEnabledForTask}
+                  >
+                    <span className="goal-mode-toggle-switch-content">
+                      <span className="goal-mode-toggle-text">
+                        <span className="goal-mode-label">Chronicle</span>
+                      </span>
+                      <span className={`goal-mode-switch-track ${chronicleEnabledForTask ? "on" : ""}`} aria-hidden="true">
+                        <span className="goal-mode-switch-thumb" />
+                      </span>
+                    </span>
+                  </button>
+                </div>
                 <div className="overflow-menu-item" role="none">
                   <button
                     className={`goal-mode-toggle overflow-submenu-trigger ${overflowSubmenu === "mode" ? "active" : ""}`}

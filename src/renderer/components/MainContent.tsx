@@ -55,6 +55,7 @@ import { isCliAgentChildTask, resolveCliAgentType } from "../../shared/cli-agent
 import { MultiLlmSelectionPanel } from "./MultiLlmSelectionPanel";
 import { AssistantMessageContent } from "./AssistantMessageContent";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
+import { hasAssistantMediaDirective } from "../utils/assistant-media-directives";
 import type { AgentRoleData, LlmWikiVaultEntry, LlmWikiVaultSummary } from "../../electron/preload";
 import { useVoiceInput } from "../hooks/useVoiceInput";
 import { useVoiceTalkMode } from "../hooks/useVoiceTalkMode";
@@ -73,7 +74,7 @@ import {
 } from "../utils/task-event-visibility";
 import { friendlyToolCallTitle, friendlyToolResultTitle } from "../utils/timeline-tool-labels";
 import { normalizeEventsForTimelineUi } from "../utils/timeline-projection";
-import { getEffectiveTaskEventType } from "../utils/task-event-compat";
+import { getEffectiveTaskEventType, getTimelineErrorText } from "../utils/task-event-compat";
 import {
   incrementRendererPerfCounter,
   markTaskEventRenderable,
@@ -103,6 +104,7 @@ import {
 } from "../utils/task-event-derived";
 import {
   Check as CheckIcon,
+  Loader2,
   MessageCircle,
   Play,
   ListTodo,
@@ -118,6 +120,7 @@ import {
   Film,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { InlineHtmlPreview } from "./InlineHtmlPreview";
 import { InlineVideoPreview } from "./InlineVideoPreview";
 import { ReplayControlsBar } from "./ReplayControls";
 import { DebugSessionPanel } from "./DebugSessionPanel";
@@ -132,6 +135,12 @@ const MAX_ATTACHMENTS = 10;
 const MAX_QUOTED_ASSISTANT_MESSAGE_CHARS = 4000;
 const MAX_QUOTED_ASSISTANT_PREVIEW_CHARS = 280;
 const ACTIVE_WORK_SIGNAL_WINDOW_MS = 30_000;
+const IMAGE_FILE_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
+const VIDEO_FILE_EXT_RE = /\.(mp4|webm)$/i;
+const HTML_FILE_EXT_RE = /\.html?$/i;
+const SPREADSHEET_FILE_EXT_RE = /\.xlsx?$/i;
+const PRESENTATION_FILE_EXT_RE = /\.pptx$/i;
+const DOCUMENT_PREVIEW_EXT_RE = /\.(pdf|docx|md|markdown|tex|txt)$/i;
 const ACTIVE_WORK_EVENT_TYPES: EventType[] = [
   "executing",
   "step_started",
@@ -150,6 +159,61 @@ const TERMINAL_WORK_EVENT_TYPES = new Set<EventType | "task_paused" | "task_canc
   "task_cancelled",
   "follow_up_completed",
 ]);
+
+type GeneratedInlinePreviewKind = "image" | "video" | "html" | "spreadsheet" | "presentation";
+
+export function getInlinePreviewKindForGeneratedFile(args: {
+  path?: unknown;
+  mimeType?: unknown;
+  type?: unknown;
+}): GeneratedInlinePreviewKind | null {
+  const filePath = typeof args.path === "string" ? args.path : "";
+  const mimeType = typeof args.mimeType === "string" ? args.mimeType.toLowerCase() : "";
+  const fileType = typeof args.type === "string" ? args.type.toLowerCase() : "";
+
+  if (fileType === "image" || mimeType.startsWith("image/") || IMAGE_FILE_EXT_RE.test(filePath)) {
+    return "image";
+  }
+
+  if (fileType === "video" || mimeType.startsWith("video/") || VIDEO_FILE_EXT_RE.test(filePath)) {
+    return "video";
+  }
+
+  if (fileType === "html" || mimeType === "text/html" || HTML_FILE_EXT_RE.test(filePath)) {
+    return "html";
+  }
+
+  if (fileType === "spreadsheet" || SPREADSHEET_FILE_EXT_RE.test(filePath)) {
+    return "spreadsheet";
+  }
+
+  if (
+    fileType === "presentation" ||
+    mimeType === "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+    PRESENTATION_FILE_EXT_RE.test(filePath)
+  ) {
+    return "presentation";
+  }
+
+  return null;
+}
+
+export function getInlinePreviewKindForTaskEvent(event: TaskEvent): GeneratedInlinePreviewKind | null {
+  const effectiveType = getEffectiveTaskEventType(event);
+  if (
+    effectiveType !== "file_created" &&
+    effectiveType !== "file_modified" &&
+    effectiveType !== "artifact_created"
+  ) {
+    return null;
+  }
+
+  return getInlinePreviewKindForGeneratedFile({
+    path: event.payload?.path || event.payload?.from,
+    mimeType: event.payload?.mimeType,
+    type: event.payload?.type,
+  });
+}
 
 function isActiveWorkSignal(event: TaskEvent, effectiveType: string): boolean {
   const isActiveProgressSignal =
@@ -225,7 +289,8 @@ export function isTaskActivelyWorking(
 const isVerificationNoiseEvent = (event: TaskEvent): boolean => {
   const effectiveType = getEffectiveTaskEventType(event);
   if (effectiveType === "assistant_message") {
-    return event.payload?.internal === true;
+    const message = typeof event.payload?.message === "string" ? event.payload.message : "";
+    return event.payload?.internal === true && !hasAssistantMediaDirective(message);
   }
 
   if (
@@ -261,6 +326,7 @@ const shouldRevealInternalAssistantMessageInVerbose = (event: TaskEvent): boolea
   const message = typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
   const stepDescription = getAssistantStepDescription(event);
   if (!message) return false;
+  if (hasAssistantMediaDirective(message)) return true;
   if (isVerificationStepDescription(stepDescription)) return false;
   if (/^ok[\s.!?]*$/i.test(message) || message.length <= 12) return false;
   return true;
@@ -291,6 +357,31 @@ const getCompletionSummaryText = (event: TaskEvent): string => {
     .filter((value) => value.length > 0)
     .join("\n");
   return [summary, verification].filter((value) => value.length > 0).join("\n\n");
+};
+
+const isLowSignalPauseMessage = (
+  message: string | null | undefined,
+  reasonCode?: string | null,
+): boolean => {
+  const trimmed = String(message || "").trim();
+  if (!trimmed) return true;
+  const lower = trimmed.toLowerCase();
+  if (reasonCode && lower === String(reasonCode).trim().toLowerCase()) return true;
+  return (
+    lower === "required_decision" ||
+    lower === "required_decision_followup" ||
+    lower === "input_request" ||
+    lower === "paused - awaiting user input" ||
+    lower === "waiting for structured user input."
+  );
+};
+
+const getAssistantOrCompletionText = (event: TaskEvent | null | undefined): string => {
+  if (!event) return "";
+  if (getEffectiveTaskEventType(event) === "assistant_message") {
+    return typeof event.payload?.message === "string" ? event.payload.message.trim() : "";
+  }
+  return getCompletionSummaryText(event);
 };
 
 const buildTaskTitle = (text: string): string => {
@@ -540,6 +631,8 @@ import { CanvasPreview } from "./CanvasPreview";
 import { InlineImagePreview } from "./InlineImagePreview";
 import { InlineSpreadsheetPreview } from "./InlineSpreadsheetPreview";
 import { InlineDocumentPreview } from "./InlineDocumentPreview";
+import { InlinePresentationPreview } from "./InlinePresentationPreview";
+import { LatexArtifactWorkbench } from "./LatexArtifactWorkbench";
 import { StepFeed } from "./timeline/StepFeed";
 import { ParallelGroupFeed } from "./timeline/ParallelGroupFeed";
 import { ActionBlock, buildActionBlockSummary } from "./timeline/ActionBlock";
@@ -555,6 +648,7 @@ import {
   unwrapMarkdownCodeBlocks,
 } from "../utils/markdown-inline-lists";
 import { resolveDisclosureExpanded } from "../utils/disclosure-state";
+import { findLatexPdfPair } from "../utils/latex-artifacts";
 
 // Mermaid diagram component — theme-aware init for reliable text visibility
 let mermaidLastTheme: boolean | null = null;
@@ -2440,6 +2534,7 @@ interface CreateTaskOptions {
   verificationAgent?: boolean;
   executionMode?: ExecutionMode;
   taskDomain?: TaskDomain;
+  chronicleMode?: import("../../shared/types").ChronicleTaskMode;
   videoGenerationMode?: boolean;
 }
 
@@ -2920,6 +3015,8 @@ interface MainContentProps {
   onSelectWorkspace?: (workspace: Workspace) => void;
   onOpenSettings?: (tab?: SettingsTab) => void;
   onStopTask?: () => void;
+  onEnableShellForPausedTask?: () => void | Promise<void>;
+  onContinueWithoutShellForPausedTask?: () => void | Promise<void>;
   onWrapUpTask?: () => void;
   inputRequest?: InputRequest | null;
   onSubmitInputRequest?: (
@@ -2989,6 +3086,7 @@ const LIVE_TRANSCRIPT_TRANSIENT_RAW_EVENT_TYPES = new Set([
   "llm_output_budget_escalation",
   "llm_streaming",
 ]);
+const MAX_AGENT_REASONING_UPDATE_COUNT = 6;
 
 const LIVE_TRANSCRIPT_URGENT_EFFECTIVE_EVENT_TYPES = new Set([
   "approval_requested",
@@ -3012,6 +3110,27 @@ export function getDefaultTranscriptMode(args: {
     : "inspect";
 }
 
+export function shouldShowBootstrapProgressRow(args: {
+  isTaskWorking: boolean;
+  visibleRenderableFeedRowsLength: number;
+  isChatTask: boolean;
+}): boolean {
+  return args.isTaskWorking && args.visibleRenderableFeedRowsLength === 0 && !args.isChatTask;
+}
+
+export function getBootstrapProgressTitle(task: Task | null | undefined): string {
+  switch (task?.status) {
+    case "planning":
+      return "Planning the approach";
+    case "executing":
+      return "Getting started";
+    case "interrupted":
+      return "Resuming work";
+    default:
+      return "Working on your request";
+  }
+}
+
 function isUserFacingProgressMessage(message: string): boolean {
   const trimmed = message.trim();
   if (!trimmed) return false;
@@ -3019,6 +3138,93 @@ function isUserFacingProgressMessage(message: string): boolean {
   if (/^executing$/i.test(trimmed)) return false;
   if (/^progress_update$/i.test(trimmed)) return false;
   return true;
+}
+
+export interface AgentReasoningPanelState {
+  activeStreamText: string;
+  isStreaming: boolean;
+  recentUpdates: string[];
+}
+
+function cleanAgentReasoningText(text: string): string {
+  const sanitized = sanitizeToolCallTextFromAssistant(
+    String(text || "")
+      .replace(/\[\[speak\]\]([\s\S]*?)\[\[\/speak\]\]/gi, "$1")
+      .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+      .replace(/<tool_result>[\s\S]*?<\/tool_result>/gi, ""),
+  ).text;
+  return sanitized.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function isAgentReasoningStreamingEvent(event: TaskEvent): boolean {
+  if (event.type === "llm_streaming") return true;
+  const payload =
+    event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? (event.payload as Record<string, unknown>)
+      : null;
+  return event.type === "timeline_step_updated" && payload?.legacyType === "llm_streaming";
+}
+
+export function deriveAgentReasoningPanelState(args: {
+  events: TaskEvent[];
+  taskId?: string | null;
+  isTaskWorking: boolean;
+}): AgentReasoningPanelState {
+  if (!args.taskId || !args.isTaskWorking) {
+    return { activeStreamText: "", isStreaming: false, recentUpdates: [] };
+  }
+
+  const recentUpdates: string[] = [];
+  let lastVisibleUpdate = "";
+
+  for (const event of args.events) {
+    if (event.taskId !== args.taskId || isAgentReasoningStreamingEvent(event)) continue;
+    const effectiveType = getEffectiveTaskEventType(event);
+    if (effectiveType !== "progress_update" && effectiveType !== "assistant_message") continue;
+    if (effectiveType === "assistant_message" && event.payload?.internal === true) continue;
+    const rawMessage = typeof event.payload?.message === "string" ? event.payload.message : "";
+    if (!isUserFacingProgressMessage(rawMessage)) continue;
+    const message = cleanAgentReasoningText(
+      effectiveType === "progress_update" ? humanizeTimelineMessage(rawMessage) : rawMessage,
+    );
+    if (!message || message === lastVisibleUpdate) continue;
+    lastVisibleUpdate = message;
+    recentUpdates.push(message);
+    if (recentUpdates.length > MAX_AGENT_REASONING_UPDATE_COUNT) {
+      recentUpdates.shift();
+    }
+  }
+
+  let activeStreamText = "";
+  let isStreaming = false;
+  for (let index = args.events.length - 1; index >= 0; index -= 1) {
+    const event = args.events[index];
+    if (event.taskId !== args.taskId) continue;
+    const effectiveType = getEffectiveTaskEventType(event);
+    if (effectiveType === "log" || effectiveType === "llm_usage" || effectiveType === "command_output") {
+      continue;
+    }
+    if (isAgentReasoningStreamingEvent(event)) {
+      const rawText =
+        typeof event.payload?.text === "string"
+          ? event.payload.text
+          : typeof event.payload?.message === "string"
+            ? event.payload.message
+            : "";
+      const cleaned = cleanAgentReasoningText(rawText);
+      if (cleaned && !/^thinking(?:\.\.\.)?$/i.test(cleaned)) {
+        activeStreamText = cleaned;
+        isStreaming = event.payload?.streaming === true;
+      }
+    }
+    break;
+  }
+
+  return { activeStreamText, isStreaming, recentUpdates };
+}
+
+function hasAgentReasoningPanelContent(state: AgentReasoningPanelState): boolean {
+  return state.activeStreamText.trim().length > 0 || state.recentUpdates.length > 0;
 }
 
 function isTransientLiveTranscriptRow(row: TaskFeedRow): boolean {
@@ -3047,6 +3253,85 @@ function isMeaningfulLiveTranscriptRow(row: TaskFeedRow): boolean {
   if (row.kind !== "timeline") return true;
   if (row.item.kind !== "event") return true;
   return !isTransientLiveTranscriptRow(row);
+}
+
+function AgentReasoningPanel(props: {
+  currentStep: { description: string } | null;
+  state: AgentReasoningPanelState;
+}) {
+  const { currentStep, state } = props;
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [followStream, setFollowStream] = useState(true);
+  const stepLabel = currentStep?.description?.trim() || "";
+  const hasStreamText = state.activeStreamText.trim().length > 0;
+  const streamSignature = hasStreamText
+    ? state.activeStreamText
+    : state.recentUpdates.join("\n");
+
+  const handleScroll = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const nextFollow = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+    setFollowStream((prev) => (prev === nextFollow ? prev : nextFollow));
+  }, []);
+
+  useEffect(() => {
+    if (!scrollRef.current || !followStream) return;
+    scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [followStream, streamSignature]);
+
+  useEffect(() => {
+    if (state.isStreaming) {
+      setFollowStream(true);
+    }
+  }, [currentStep?.description, state.isStreaming]);
+
+  if (!hasAgentReasoningPanelContent(state)) return null;
+
+  return (
+    <div className="agent-reasoning-panel">
+      <div className="agent-reasoning-panel-header">
+        <div className="agent-reasoning-panel-title">
+          <Sparkles size={13} strokeWidth={1.8} />
+          <span>{state.isStreaming ? "Reasoning" : "Recent reasoning"}</span>
+        </div>
+        {stepLabel ? (
+          <span className="agent-reasoning-step" title={stepLabel}>
+            {stepLabel === "Thinking..." ? "Thinking" : stepLabel}
+          </span>
+        ) : null}
+        {!followStream && (
+          <button
+            type="button"
+            className="agent-reasoning-follow-btn"
+            onClick={() => {
+              if (scrollRef.current) {
+                scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+              }
+              setFollowStream(true);
+            }}
+          >
+            Jump to latest
+          </button>
+        )}
+      </div>
+      <div
+        ref={scrollRef}
+        className={`agent-reasoning-stream ${state.isStreaming ? "is-streaming" : ""}`}
+        onScroll={handleScroll}
+      >
+        {hasStreamText ? (
+          <div className="agent-reasoning-stream-text">{state.activeStreamText}</div>
+        ) : (
+          state.recentUpdates.map((message, index) => (
+            <div key={`${index}:${message.slice(0, 48)}`} className="agent-reasoning-update">
+              {message}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
 }
 
 function isUserFacingLiveStatusRow(row: TaskFeedRow): boolean {
@@ -3357,12 +3642,18 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
   taskId,
   rendererPerfLoggingEnabled,
   visibleFeedRows,
+  isChatTask,
+  isTaskWorking,
+  task,
+  formatTime,
   isReplayMode,
   transcriptMode,
   hiddenLiveFeedRowCount,
   canReturnToLiveView,
   onShowFullTimeline,
   onBackToLiveView,
+  reasoningPanel,
+  reasoningPanelSignature,
   mainBodyRef,
   timelineRef,
   getRenderedFeedRow,
@@ -3370,12 +3661,18 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
   taskId: string | undefined;
   rendererPerfLoggingEnabled: boolean;
   visibleFeedRows: TaskFeedRow[];
+  isChatTask: boolean;
+  isTaskWorking: boolean;
+  task: Task | null | undefined;
+  formatTime: (timestamp: number) => string;
   isReplayMode: boolean;
   transcriptMode: TranscriptMode;
   hiddenLiveFeedRowCount: number;
   canReturnToLiveView: boolean;
   onShowFullTimeline: () => void;
   onBackToLiveView: () => void;
+  reasoningPanel?: React.ReactNode;
+  reasoningPanelSignature: string;
   mainBodyRef: React.RefObject<HTMLDivElement | null>;
   timelineRef: React.RefObject<HTMLDivElement | null>;
   getRenderedFeedRow: (row: TaskFeedRow) => React.ReactNode;
@@ -3385,10 +3682,31 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
     taskId ? `task:${taskId}` : "task:none",
     rendererPerfLoggingEnabled,
   );
+  void reasoningPanelSignature;
 
+  const renderedFeedEntries = useMemo(
+    () =>
+      visibleFeedRows.reduce<Array<{ row: TaskFeedRow; node: React.ReactNode }>>((acc, row) => {
+        const node = getRenderedFeedRow(row);
+        if (node === null || node === undefined || node === false) {
+          return acc;
+        }
+        acc.push({ row, node });
+        return acc;
+      }, []),
+    [getRenderedFeedRow, visibleFeedRows],
+  );
+  const renderableFeedRows = useMemo(
+    () => renderedFeedEntries.map((entry) => entry.row),
+    [renderedFeedEntries],
+  );
+  const renderedFeedNodeByKey = useMemo(
+    () => new Map(renderedFeedEntries.map((entry) => [entry.row.key, entry.node])),
+    [renderedFeedEntries],
+  );
   const useVirtualizedFeed =
     transcriptMode === "live" &&
-    visibleFeedRows.length >= VIRTUALIZED_FEED_ROW_THRESHOLD &&
+    renderableFeedRows.length >= VIRTUALIZED_FEED_ROW_THRESHOLD &&
     !isReplayMode;
   const [feedRowHeights, setFeedRowHeights] = useState<Map<string, number>>(() => new Map());
   const feedRowHeightsRef = useRef<Map<string, number>>(new Map());
@@ -3402,7 +3720,7 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
   }, [feedRowHeights]);
 
   useEffect(() => {
-    const activeKeys = new Set(visibleFeedRows.map((row) => row.key));
+    const activeKeys = new Set(renderableFeedRows.map((row) => row.key));
     setFeedRowHeights((prev) => {
       let changed = false;
       const next = new Map<string, number>();
@@ -3418,16 +3736,16 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
       }
       return changed ? next : prev;
     });
-  }, [visibleFeedRows]);
+  }, [renderableFeedRows]);
 
   useEffect(() => {
     if (!rendererPerfLoggingEnabled) return;
-    for (const row of visibleFeedRows) {
+    for (const row of renderableFeedRows) {
       const visiblePerfEventId = getTaskFeedRowVisiblePerfEventId(row);
       if (!visiblePerfEventId) continue;
       markTaskEventRenderable({ id: visiblePerfEventId }, rendererPerfLoggingEnabled);
     }
-  }, [rendererPerfLoggingEnabled, visibleFeedRows]);
+  }, [renderableFeedRows, rendererPerfLoggingEnabled]);
 
   const flushFeedRowHeights = useCallback(() => {
     feedRowHeightFlushFrameRef.current = null;
@@ -3503,10 +3821,10 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
     return () => {
       cancelAnimationFrame(frame);
     };
-  }, [useVirtualizedFeed, visibleFeedRows.length]);
+  }, [useVirtualizedFeed, renderableFeedRows.length]);
 
   const { virtualItems: virtualFeedRows, totalHeight: virtualFeedTotalHeight } = useVirtualList({
-    items: visibleFeedRows,
+    items: renderableFeedRows,
     containerRef: mainBodyRef as React.RefObject<HTMLElement | null>,
     getItemHeight: (row) => feedRowHeights.get(row.key) ?? row.estimatedHeight,
     estimatedItemHeight: 160,
@@ -3515,9 +3833,19 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
     scrollOffsetTop: conversationFlowOffsetTop,
   });
   const renderedFeedRows = useMemo(
-    () => (useVirtualizedFeed ? virtualFeedRows.map((row) => row.item) : visibleFeedRows),
-    [useVirtualizedFeed, virtualFeedRows, visibleFeedRows],
+    () => (useVirtualizedFeed ? virtualFeedRows.map((row) => row.item) : renderableFeedRows),
+    [useVirtualizedFeed, virtualFeedRows, renderableFeedRows],
   );
+  const showBootstrapProgress = shouldShowBootstrapProgressRow({
+    isTaskWorking,
+    visibleRenderableFeedRowsLength: renderedFeedEntries.length,
+    isChatTask,
+  });
+  const bootstrapProgressTitle = getBootstrapProgressTitle(task);
+  const bootstrapProgressTimeLabel =
+    task && typeof task.createdAt === "number" && Number.isFinite(task.createdAt)
+      ? formatTime(task.createdAt)
+      : "";
 
   return (
     <div className="conversation-flow" ref={setConversationFlowNode}>
@@ -3568,14 +3896,32 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
           </button>
         </div>
       )}
-      {!useVirtualizedFeed ? (
+      {reasoningPanel}
+      {showBootstrapProgress ? (
+        <StepFeed
+          title={
+            <span className="thinking-title" aria-label={bootstrapProgressTitle}>
+              Thinking
+              <span className="thinking-ellipsis" aria-hidden="true">
+                <span>.</span>
+                <span>.</span>
+                <span>.</span>
+              </span>
+            </span>
+          }
+          timeLabel={bootstrapProgressTimeLabel}
+          indicator={{ icon: Loader2, tone: "active", spin: true, label: "In progress" }}
+          expandable={false}
+          expanded={false}
+        />
+      ) : !useVirtualizedFeed ? (
         renderedFeedRows.map((row) => (
           <MeasuredTaskFeedRow
             key={row.key}
             visiblePerfEventId={getTaskFeedRowVisiblePerfEventId(row)}
             enabled={Boolean(rendererPerfLoggingEnabled)}
           >
-            {getRenderedFeedRow(row)}
+            {renderedFeedNodeByKey.get(row.key) ?? null}
           </MeasuredTaskFeedRow>
         ))
       ) : (
@@ -3590,7 +3936,7 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
               visiblePerfEventId={getTaskFeedRowVisiblePerfEventId(virtualRow.item)}
               visibilityEnabled={Boolean(rendererPerfLoggingEnabled)}
             >
-              {getRenderedFeedRow(virtualRow.item)}
+              {renderedFeedNodeByKey.get(virtualRow.item.key) ?? null}
             </VirtualizedTaskFeedRow>
           ))}
         </div>
@@ -3600,12 +3946,18 @@ const TaskConversationRenderedRows = memo(function TaskConversationRenderedRows(
 }, (prev, next) =>
   prev.taskId === next.taskId &&
   prev.rendererPerfLoggingEnabled === next.rendererPerfLoggingEnabled &&
+  prev.isChatTask === next.isChatTask &&
+  prev.isTaskWorking === next.isTaskWorking &&
+  prev.task?.status === next.task?.status &&
+  prev.task?.createdAt === next.task?.createdAt &&
+  prev.formatTime === next.formatTime &&
   prev.isReplayMode === next.isReplayMode &&
   prev.transcriptMode === next.transcriptMode &&
   prev.hiddenLiveFeedRowCount === next.hiddenLiveFeedRowCount &&
   prev.canReturnToLiveView === next.canReturnToLiveView &&
   prev.onShowFullTimeline === next.onShowFullTimeline &&
   prev.onBackToLiveView === next.onBackToLiveView &&
+  prev.reasoningPanelSignature === next.reasoningPanelSignature &&
   prev.mainBodyRef === next.mainBodyRef &&
   prev.timelineRef === next.timelineRef &&
   prev.getRenderedFeedRow === next.getRenderedFeedRow &&
@@ -3933,6 +4285,28 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
     () => selectVisibleTaskFeedRows(feedRows, transcriptMode),
     [feedRows, transcriptMode],
   );
+  const reasoningPanelState = useMemo(
+    () =>
+      deriveAgentReasoningPanelState({
+        events,
+        taskId: task?.id,
+        isTaskWorking,
+      }),
+    [events, isTaskWorking, task?.id],
+  );
+  const showReasoningPanel =
+    transcriptMode === "live" &&
+    !isChatTask &&
+    isTaskWorking &&
+    hasAgentReasoningPanelContent(reasoningPanelState);
+  const reasoningPanelSignature = showReasoningPanel
+    ? [
+        currentStep?.description || "",
+        reasoningPanelState.isStreaming ? "1" : "0",
+        reasoningPanelState.activeStreamText,
+        reasoningPanelState.recentUpdates.join("\n"),
+      ].join("::")
+    : "";
   const feedRowRenderCacheRef = useRef<Map<string, { signature: string; node: React.ReactNode }>>(
     new Map(),
   );
@@ -3969,7 +4343,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
     () => (
       <>
         {/* Conversation Flow - renders all events in order; show when we have events OR collaborative run with child tasks */}
-        {(events.length > 0 || (collaborativeRun && childTasks.length > 0)) &&
+        {(events.length > 0 || (collaborativeRun && childTasks.length > 0) || isTaskWorking) &&
           (() => {
                 const getRowRenderSignature = (row: TaskFeedRow): string => {
                   if (row.kind === "leading-command-outputs") {
@@ -4417,6 +4791,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                                   }
                                   titleTooltip={typeof eventTitle === "string" ? eventTitle : undefined}
                                   timeLabel={formatTime(event.timestamp)}
+                                  hideTime
                                   indicator={resolveTimelineIndicator(renderEvent, {
                                     isTaskCompleted: !isTaskWorking,
                                   })}
@@ -4922,6 +5297,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                       }
                       titleTooltip={typeof eventTitle === "string" ? eventTitle : undefined}
                       timeLabel={formatTime(event.timestamp)}
+                      hideTime
                       indicator={resolveTimelineIndicator(renderEvent2, {
                         isTaskCompleted: !isTaskWorking,
                       })}
@@ -4984,12 +5360,22 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                     taskId={task?.id}
                     rendererPerfLoggingEnabled={Boolean(rendererPerfLoggingEnabled)}
                     visibleFeedRows={visibleFeedRows}
+                    isChatTask={isChatTask}
+                    isTaskWorking={isTaskWorking}
+                    task={task}
+                    formatTime={formatTime}
                     isReplayMode={isReplayMode}
                     transcriptMode={transcriptMode}
                     hiddenLiveFeedRowCount={hiddenLiveFeedRowCount}
                     canReturnToLiveView={defaultTranscriptMode === "live"}
                     onShowFullTimeline={showFullTimeline}
                     onBackToLiveView={returnToLiveTranscript}
+                    reasoningPanel={
+                      showReasoningPanel ? (
+                        <AgentReasoningPanel currentStep={currentStep} state={reasoningPanelState} />
+                      ) : null
+                    }
+                    reasoningPanelSignature={reasoningPanelSignature}
                     mainBodyRef={mainBodyRef}
                     timelineRef={timelineRef}
                     getRenderedFeedRow={getRenderedFeedRow}
@@ -5136,6 +5522,8 @@ function MainContentComponent({
   onSelectWorkspace,
   onOpenSettings,
   onStopTask,
+  onEnableShellForPausedTask,
+  onContinueWithoutShellForPausedTask,
   onWrapUpTask,
   inputRequest = null,
   onSubmitInputRequest,
@@ -5374,6 +5762,7 @@ function MainContentComponent({
   const [autonomousModeEnabled, setAutonomousModeEnabled] = useState(false);
   const [collaborativeModeEnabled, setCollaborativeModeEnabled] = useState(false);
   const [multiLlmModeEnabled, setMultiLlmModeEnabled] = useState(false);
+  const [chronicleEnabledForTask, setChronicleEnabledForTask] = useState(true);
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("execute");
   const [modeSuggestions, setModeSuggestions] = useState<ModeSuggestion[]>([]);
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
@@ -6975,46 +7364,19 @@ function MainContentComponent({
   }, []);
 
   const isImageFileEvent = useCallback((event: TaskEvent): boolean => {
-    const effectiveType = getEffectiveTaskEventType(event);
-    if (
-      effectiveType !== "file_created" &&
-      effectiveType !== "file_modified" &&
-      effectiveType !== "artifact_created"
-    )
-      return false;
-    const filePath = String(event.payload?.path || event.payload?.from || "");
-    const mimeType =
-      typeof event.payload?.mimeType === "string" ? event.payload.mimeType.toLowerCase() : "";
-    const imageExt = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
-    return (
-      event.payload?.type === "image" || mimeType.startsWith("image/") || imageExt.test(filePath)
-    );
+    return getInlinePreviewKindForTaskEvent(event) === "image";
   }, []);
 
   const isSpreadsheetFileEvent = useCallback((event: TaskEvent): boolean => {
-    const effectiveType = getEffectiveTaskEventType(event);
-    if (
-      effectiveType !== "file_created" &&
-      effectiveType !== "file_modified" &&
-      effectiveType !== "artifact_created"
-    )
-      return false;
-    const filePath = String(event.payload?.path || event.payload?.from || "");
-    return event.payload?.type === "spreadsheet" || /\.xlsx?$/i.test(filePath);
+    return getInlinePreviewKindForTaskEvent(event) === "spreadsheet";
   }, []);
 
   const isVideoFileEvent = useCallback((event: TaskEvent): boolean => {
-    const effectiveType = getEffectiveTaskEventType(event);
-    if (
-      effectiveType !== "file_created" &&
-      effectiveType !== "file_modified" &&
-      effectiveType !== "artifact_created"
-    )
-      return false;
-    const filePath = String(event.payload?.path || event.payload?.from || "");
-    const mimeType =
-      typeof event.payload?.mimeType === "string" ? event.payload.mimeType.toLowerCase() : "";
-    return event.payload?.type === "video" || mimeType.startsWith("video/") || /\.(mp4|webm)$/i.test(filePath);
+    return getInlinePreviewKindForTaskEvent(event) === "video";
+  }, []);
+
+  const isHtmlFileEvent = useCallback((event: TaskEvent): boolean => {
+    return getInlinePreviewKindForTaskEvent(event) === "html";
   }, []);
 
   const shouldRenderTimelineEventInStepFeed = useCallback((event: TaskEvent): boolean => {
@@ -7036,16 +7398,25 @@ function MainContentComponent({
       ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(event.type) ||
       ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(effectiveType as EventType) ||
       isImageFileEvent(event) ||
+      isHtmlFileEvent(event) ||
       isVideoFileEvent(event) ||
       isSpreadsheetFileEvent(event) ||
       (effectiveType === "tool_result" && event.payload?.tool === "schedule_task");
     return showSteps || showEvenWithoutSteps;
-  }, [isImageFileEvent, isSpreadsheetFileEvent, isVideoFileEvent, showSteps, toolCallPairing.claimedResultIds]);
+  }, [
+    isHtmlFileEvent,
+    isImageFileEvent,
+    isSpreadsheetFileEvent,
+    isVideoFileEvent,
+    showSteps,
+    toolCallPairing.claimedResultIds,
+  ]);
 
   // Check if an event has details to show
   const hasEventDetails = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (isImageFileEvent(event)) return true;
+    if (isHtmlFileEvent(event)) return true;
     if (isVideoFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
     if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
@@ -7095,7 +7466,15 @@ function MainContentComponent({
       "step_failed",
       "approval_requested",
     ].includes(effectiveType);
-  }, [events, isImageFileEvent, isSpreadsheetFileEvent, isVideoFileEvent, verboseSteps, workspace?.path]);
+  }, [
+    events,
+    isHtmlFileEvent,
+    isImageFileEvent,
+    isSpreadsheetFileEvent,
+    isVideoFileEvent,
+    verboseSteps,
+    workspace?.path,
+  ]);
 
   // Determine if an event should be expanded by default
   // Important events (plan, assistant responses, errors) should be expanded
@@ -7103,6 +7482,7 @@ function MainContentComponent({
   const shouldDefaultExpand = useCallback((event: TaskEvent): boolean => {
     const effectiveType = getEffectiveTaskEventType(event);
     if (isImageFileEvent(event)) return true;
+    if (isHtmlFileEvent(event)) return true;
     if (isVideoFileEvent(event)) return true;
     if (isSpreadsheetFileEvent(event)) return true;
     if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
@@ -7136,6 +7516,7 @@ function MainContentComponent({
   }, [
     codePreviewsExpanded,
     hasEventDetails,
+    isHtmlFileEvent,
     isImageFileEvent,
     isSpreadsheetFileEvent,
     isVideoFileEvent,
@@ -7633,6 +8014,7 @@ function MainContentComponent({
         const modeOptions: CreateTaskOptions = {
           executionMode,
           taskDomain,
+          chronicleMode: chronicleEnabledForTask ? "inherit" : "disabled",
           videoGenerationMode: taskDomain === "media" ? true : undefined,
         };
         const baseOptions: CreateTaskOptions =
@@ -7651,6 +8033,7 @@ function MainContentComponent({
         setAutonomousModeEnabled(false);
         setCollaborativeModeEnabled(false);
         setMultiLlmModeEnabled(false);
+        setChronicleEnabledForTask(true);
         setMultiLlmConfig(null);
         setVerificationAgentEnabled(false);
       } else {
@@ -8356,6 +8739,18 @@ function MainContentComponent({
     }
     return undefined;
   }, [events]);
+  const effectivePauseReasonCode =
+    task?.awaitingUserInputReasonCode ||
+    (typeof latestPauseEvent?.payload?.reason === "string" ? latestPauseEvent.payload.reason : undefined);
+  const effectivePauseMessage = useMemo(() => {
+    const pauseMessage =
+      typeof latestPauseEvent?.payload?.message === "string" ? latestPauseEvent.payload.message.trim() : "";
+    if (!isLowSignalPauseMessage(pauseMessage, effectivePauseReasonCode)) {
+      return pauseMessage;
+    }
+    const assistantFallback = getAssistantOrCompletionText(lastAssistantMessage);
+    return assistantFallback || pauseMessage;
+  }, [effectivePauseReasonCode, lastAssistantMessage, latestPauseEvent]);
   const latestApprovalEvent = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const event = events[i];
@@ -9060,6 +9455,24 @@ function MainContentComponent({
                               >
                                 <span className="goal-mode-label">
                                   Verify {verificationAgentEnabled ? "ON" : "OFF"}
+                                </span>
+                              </button>
+                            </div>
+                            <div className="overflow-menu-item" role="none">
+                              <button
+                                className="goal-mode-toggle menu-tooltip-target"
+                                style={{ margin: 0 }}
+                                onClick={() => {
+                                  setOverflowSubmenu(null);
+                                  setChronicleEnabledForTask(!chronicleEnabledForTask);
+                                }}
+                                data-tooltip="Allow Chronicle screen context for this task"
+                                role="menuitemcheckbox"
+                                aria-checked={chronicleEnabledForTask}
+                                data-overflow-menu-item
+                              >
+                                <span className="goal-mode-label">
+                                  Chronicle {chronicleEnabledForTask ? "ON" : "OFF"}
                                 </span>
                               </button>
                             </div>
@@ -10069,9 +10482,12 @@ function MainContentComponent({
           )}
           {task.status === "paused" && !hasActiveStructuredInputRequest && (
             <TaskPauseBanner
-              message={latestPauseEvent?.payload?.message}
-              reasonCode={task.awaitingUserInputReasonCode}
+              message={effectivePauseMessage}
+              reasonCode={effectivePauseReasonCode}
+              markdownComponents={markdownComponents}
               onStopTask={onStopTask}
+              onEnableShell={remoteSession ? undefined : onEnableShellForPausedTask}
+              onContinueWithoutShell={remoteSession ? undefined : onContinueWithoutShellForPausedTask}
             />
           )}
           {task.status === "blocked" && (
@@ -10791,6 +11207,29 @@ function truncateForDisplay(text: string, maxLength: number = 2000): string {
   return text.slice(0, maxLength) + "\n\n... [content truncated for display]";
 }
 
+/**
+ * Condense a verbose step description (often a direct echo of the user's prompt)
+ * into a short, action-oriented fragment suitable for a timeline row header.
+ */
+function condenseStepText(raw: string, maxLength: number = 72): string {
+  if (!raw) return raw;
+  let text = raw.trim();
+  // Strip leading/trailing surrounding quotes that signal a prompt echo.
+  text = text.replace(/^["“”'`]+/, "").replace(/["“”'`]+$/, "");
+  // If the text looks like a quoted phrase + meta commentary ("X" means Y…), keep only the quoted phrase.
+  const quotedLead = text.match(/^["“”'`]([^"“”'`]{3,})["“”'`]/);
+  if (quotedLead?.[1]) {
+    text = quotedLead[1].trim();
+  }
+  // Cut at the first sentence boundary or separator.
+  const sentenceCut = text.split(/(?<=[.!?])\s+|\s+[—–-]\s+/)[0] || text;
+  text = sentenceCut.trim();
+  if (text.length > maxLength) {
+    text = `${text.slice(0, maxLength - 1).trimEnd()}…`;
+  }
+  return text;
+}
+
 function formatStepContractEscalatedMessage(reason: string): string {
   const r = reason.trim().toLowerCase();
   switch (r) {
@@ -10821,11 +11260,11 @@ function humanizeTimelineMessage(message: string): string {
   if (/^Starting execution of \d+ steps$/i.test(m)) return "Starting the work";
   const executingStepMatch = /^Executing step \d+\/\d+:\s*(.+)$/i.exec(m);
   if (executingStepMatch?.[1]) {
-    return `Working on: ${executingStepMatch[1].trim()}`;
+    return `Working on: ${condenseStepText(executingStepMatch[1])}`;
   }
   const completedStepMatch = /^Completed step [^:]+:\s*(.+)$/i.exec(m);
   if (completedStepMatch?.[1]) {
-    return `Finished: ${completedStepMatch[1].trim()}`;
+    return `Finished: ${condenseStepText(completedStepMatch[1])}`;
   }
   if (m === "All steps completed") return "Completed all planned steps";
   if (m === "timeline_step_finished") return "Step finished";
@@ -11136,7 +11575,7 @@ function renderEventTitle(
   }
 
   if (event.type === "timeline_error") {
-    const message = typeof event.payload?.message === "string" ? event.payload.message : "";
+    const message = getTimelineErrorText(event);
     return message || getMessage("error", msgCtx);
   }
 
@@ -11189,7 +11628,7 @@ function renderEventTitle(
         sanitizeToolCallTextFromAssistant(event.payload.step?.description || event.payload.message || "").text,
       );
     case "step_failed":
-      return `Step failed: ${event.payload.step?.description || "Unknown step"}`;
+      return `Step failed: ${condenseStepText(event.payload.step?.description || "Unknown step")}`;
     case "continuation_decision":
       return "Deciding next steps";
     case "auto_continuation_started":
@@ -11447,10 +11886,6 @@ function renderEventDetails(
     options?.task?.id === event.taskId
       ? options.task
       : options?.childTasks?.find((t) => t.id === event.taskId) ?? options?.task;
-  const imageExt = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
-  const videoExt = /\.(mp4|webm)$/i;
-  const spreadsheetExt = /\.xlsx?$/i;
-  const documentPreviewExt = /\.(pdf|docx|md|markdown|txt)$/i;
   const effectiveType = getEffectiveTaskEventType(event);
   const stepCompletionPreviewPath = getStepCompletionPreviewPath(event);
 
@@ -11514,12 +11949,13 @@ function renderEventDetails(
   }
 
   if (event.type === "timeline_error") {
+    const message = getTimelineErrorText(event);
     return (
       <div
         className="event-details"
         style={{ background: "rgba(239, 68, 68, 0.1)", borderColor: "rgba(239, 68, 68, 0.2)" }}
       >
-        {event.payload?.message || "Timeline error"}
+        {message || "Timeline error"}
       </div>
     );
   }
@@ -11544,7 +11980,13 @@ function renderEventDetails(
       const primaryOutputName = primaryOutputPath
         ? primaryOutputPath.split("/").pop() || primaryOutputPath
         : "";
-      const primaryOutputIsVideo = typeof primaryOutputPath === "string" && videoExt.test(primaryOutputPath);
+      const primaryOutputIsVideo =
+        typeof primaryOutputPath === "string" && VIDEO_FILE_EXT_RE.test(primaryOutputPath);
+      const primaryOutputIsHtml =
+        typeof primaryOutputPath === "string" && HTML_FILE_EXT_RE.test(primaryOutputPath);
+      const primaryOutputIsPresentation =
+        typeof primaryOutputPath === "string" && PRESENTATION_FILE_EXT_RE.test(primaryOutputPath);
+      const latexPair = findLatexPdfPair(eventStream, outputSummary);
       const outputCount = outputSummary?.outputCount ?? 0;
       const outputLabel =
         outputCount === 1
@@ -11566,9 +12008,37 @@ function renderEventDetails(
           )}
           {hasTaskOutputs(outputSummary) && (
             <>
-              {primaryOutputIsVideo && primaryOutputPath && workspacePath && (
+              {latexPair && workspacePath && (
+                <div className="completion-output-preview">
+                  <LatexArtifactWorkbench
+                    sourcePath={latexPair.sourcePath}
+                    pdfPath={latexPair.pdfPath}
+                    workspacePath={workspacePath}
+                    onOpenViewer={onOpenViewer}
+                  />
+                </div>
+              )}
+              {!latexPair && primaryOutputIsVideo && primaryOutputPath && workspacePath && (
                 <div className="completion-output-preview">
                   <InlineVideoPreview
+                    filePath={primaryOutputPath}
+                    workspacePath={workspacePath}
+                    onOpenViewer={onOpenViewer}
+                  />
+                </div>
+              )}
+              {!latexPair && primaryOutputIsHtml && primaryOutputPath && workspacePath && (
+                <div className="completion-output-preview">
+                  <InlineHtmlPreview
+                    filePath={primaryOutputPath}
+                    workspacePath={workspacePath}
+                    onOpenViewer={onOpenViewer}
+                  />
+                </div>
+              )}
+              {!latexPair && primaryOutputIsPresentation && primaryOutputPath && workspacePath && (
+                <div className="completion-output-preview">
+                  <InlinePresentationPreview
                     filePath={primaryOutputPath}
                     workspacePath={workspacePath}
                     onOpenViewer={onOpenViewer}
@@ -11921,18 +12391,13 @@ function renderEventDetails(
       const fcPayload = event.payload;
       const fcPath = fcPayload?.path;
       const fcIsScreenshot = fcPayload?.type === "screenshot";
-      const fcIsImage =
-        fcPayload?.type === "image" ||
-        (typeof fcPayload?.mimeType === "string" &&
-          fcPayload.mimeType.toLowerCase().startsWith("image/")) ||
-        imageExt.test(String(fcPath || ""));
-      const fcIsVideo =
-        fcPayload?.type === "video" ||
-        (typeof fcPayload?.mimeType === "string" &&
-          fcPayload.mimeType.toLowerCase().startsWith("video/")) ||
-        videoExt.test(String(fcPath || ""));
+      const fcPreviewKind = getInlinePreviewKindForGeneratedFile({
+        path: fcPath,
+        mimeType: fcPayload?.mimeType,
+        type: fcPayload?.type,
+      });
 
-      if (fcIsImage && fcPath && workspacePath) {
+      if (fcPreviewKind === "image" && fcPath && workspacePath) {
         if (summaryMode && fcIsScreenshot) {
           return (
             <div className="event-details">
@@ -11956,7 +12421,7 @@ function renderEventDetails(
         );
       }
 
-      if (fcIsVideo && fcPath && workspacePath) {
+      if (fcPreviewKind === "video" && fcPath && workspacePath) {
         return (
           <div className="event-details event-details-file-preview">
             <InlineVideoPreview
@@ -11968,13 +12433,34 @@ function renderEventDetails(
         );
       }
 
-      // Spreadsheet preview
-      const fcIsSpreadsheet =
-        fcPayload?.type === "spreadsheet" || spreadsheetExt.test(String(fcPath || ""));
-      if (fcIsSpreadsheet && fcPath && workspacePath) {
+      if (fcPreviewKind === "html" && fcPath && workspacePath) {
+        return (
+          <div className="event-details event-details-file-preview">
+            <InlineHtmlPreview
+              filePath={fcPath}
+              workspacePath={workspacePath}
+              onOpenViewer={onOpenViewer}
+            />
+          </div>
+        );
+      }
+
+      if (fcPreviewKind === "spreadsheet" && fcPath && workspacePath) {
         return (
           <div className="event-details event-details-file-preview">
             <InlineSpreadsheetPreview
+              filePath={fcPath}
+              workspacePath={workspacePath}
+              onOpenViewer={onOpenViewer}
+            />
+          </div>
+        );
+      }
+
+      if (fcPreviewKind === "presentation" && fcPath && workspacePath) {
+        return (
+          <div className="event-details event-details-file-preview">
+            <InlinePresentationPreview
               filePath={fcPath}
               workspacePath={workspacePath}
               onOpenViewer={onOpenViewer}
@@ -12000,7 +12486,7 @@ function renderEventDetails(
         fcMimeType === "application/pdf" ||
         fcMimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
         fcMimeType === "text/markdown" ||
-        documentPreviewExt.test(String(fcPath || ""));
+        DOCUMENT_PREVIEW_EXT_RE.test(String(fcPath || ""));
 
       // For markdown outputs, prefer rendered markdown over raw contentPreview syntax.
       if (fcIsMarkdown && fcPath && workspacePath) {
@@ -12065,18 +12551,13 @@ function renderEventDetails(
       const fmPayload = event.payload;
       const fmPath = fmPayload?.path || fmPayload?.from;
       const fmIsScreenshot = fmPayload?.type === "screenshot";
-      const fmIsImage =
-        fmPayload?.type === "image" ||
-        (typeof fmPayload?.mimeType === "string" &&
-          fmPayload.mimeType.toLowerCase().startsWith("image/")) ||
-        imageExt.test(String(fmPath || ""));
-      const fmIsVideo =
-        fmPayload?.type === "video" ||
-        (typeof fmPayload?.mimeType === "string" &&
-          fmPayload.mimeType.toLowerCase().startsWith("video/")) ||
-        videoExt.test(String(fmPath || ""));
+      const fmPreviewKind = getInlinePreviewKindForGeneratedFile({
+        path: fmPath,
+        mimeType: fmPayload?.mimeType,
+        type: fmPayload?.type,
+      });
 
-      if (fmIsImage && fmPath && workspacePath) {
+      if (fmPreviewKind === "image" && fmPath && workspacePath) {
         if (summaryMode && fmIsScreenshot) {
           return (
             <div className="event-details">
@@ -12100,10 +12581,34 @@ function renderEventDetails(
         );
       }
 
-      if (fmIsVideo && fmPath && workspacePath) {
+      if (fmPreviewKind === "video" && fmPath && workspacePath) {
         return (
           <div className="event-details event-details-file-preview">
             <InlineVideoPreview
+              filePath={fmPath}
+              workspacePath={workspacePath}
+              onOpenViewer={onOpenViewer}
+            />
+          </div>
+        );
+      }
+
+      if (fmPreviewKind === "html" && fmPath && workspacePath) {
+        return (
+          <div className="event-details event-details-file-preview">
+            <InlineHtmlPreview
+              filePath={fmPath}
+              workspacePath={workspacePath}
+              onOpenViewer={onOpenViewer}
+            />
+          </div>
+        );
+      }
+
+      if (fmPreviewKind === "presentation" && fmPath && workspacePath) {
+        return (
+          <div className="event-details event-details-file-preview">
+            <InlinePresentationPreview
               filePath={fmPath}
               workspacePath={workspacePath}
               onOpenViewer={onOpenViewer}
@@ -12162,21 +12667,35 @@ function renderEventDetails(
     case "artifact_created": {
       const artifactPath = event.payload?.path;
       if (typeof artifactPath === "string" && artifactPath.trim().length > 0) {
+        const latexPair = findLatexPdfPair([event]);
+        const artifactPreviewKind = getInlinePreviewKindForGeneratedFile({
+          path: artifactPath,
+          mimeType: event.payload?.mimeType,
+          type: event.payload?.type,
+        });
         const artifactMimeType =
           typeof event.payload?.mimeType === "string" ? event.payload.mimeType.toLowerCase() : "";
-        const artifactIsImage =
-          artifactMimeType.startsWith("image/") || imageExt.test(String(artifactPath || ""));
-        const artifactIsVideo =
-          artifactMimeType.startsWith("video/") || videoExt.test(String(artifactPath || ""));
-        const artifactIsSpreadsheet = spreadsheetExt.test(String(artifactPath || ""));
         const artifactIsDocument =
           artifactMimeType === "application/pdf" ||
           artifactMimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
           artifactMimeType === "text/markdown" ||
           artifactMimeType.startsWith("text/") ||
-          documentPreviewExt.test(String(artifactPath || ""));
+          DOCUMENT_PREVIEW_EXT_RE.test(String(artifactPath || ""));
 
-        if (artifactIsImage && workspacePath) {
+        if (latexPair && workspacePath) {
+          return (
+            <div className="event-details event-details-file-preview">
+              <LatexArtifactWorkbench
+                sourcePath={latexPair.sourcePath}
+                pdfPath={latexPair.pdfPath}
+                workspacePath={workspacePath}
+                onOpenViewer={onOpenViewer}
+              />
+            </div>
+          );
+        }
+
+        if (artifactPreviewKind === "image" && workspacePath) {
           return (
             <div className="event-details event-details-file-preview">
               <InlineImagePreview
@@ -12188,7 +12707,7 @@ function renderEventDetails(
           );
         }
 
-        if (artifactIsVideo && workspacePath) {
+        if (artifactPreviewKind === "video" && workspacePath) {
           return (
             <div className="event-details event-details-file-preview">
               <InlineVideoPreview
@@ -12200,10 +12719,34 @@ function renderEventDetails(
           );
         }
 
-        if (artifactIsSpreadsheet && workspacePath) {
+        if (artifactPreviewKind === "html" && workspacePath) {
+          return (
+            <div className="event-details event-details-file-preview">
+              <InlineHtmlPreview
+                filePath={artifactPath}
+                workspacePath={workspacePath}
+                onOpenViewer={onOpenViewer}
+              />
+            </div>
+          );
+        }
+
+        if (artifactPreviewKind === "spreadsheet" && workspacePath) {
           return (
             <div className="event-details event-details-file-preview">
               <InlineSpreadsheetPreview
+                filePath={artifactPath}
+                workspacePath={workspacePath}
+                onOpenViewer={onOpenViewer}
+              />
+            </div>
+          );
+        }
+
+        if (artifactPreviewKind === "presentation" && workspacePath) {
+          return (
+            <div className="event-details event-details-file-preview">
+              <InlinePresentationPreview
                 filePath={artifactPath}
                 workspacePath={workspacePath}
                 onOpenViewer={onOpenViewer}

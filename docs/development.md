@@ -129,12 +129,44 @@ npm run skills:check
 
 `setup.sh` verifies the local Manim toolchain (`python3`, Manim CE, `ffmpeg`, and LaTeX). If Manim is missing, the skill can still scaffold projects, but render execution should be considered unavailable until the dependency is installed.
 
+### Testing `kami`
+
+The bundled `kami` skill also has non-Node runtime dependencies, so validate both the content contract and the local helper scripts:
+
+```bash
+python3 -m py_compile \
+  resources/skills/kami/scripts/bootstrap_project.py \
+  resources/skills/kami/scripts/render_html.py
+bash resources/skills/kami/scripts/setup.sh
+node resources/skills/kami/scripts/render_slides.mjs --check
+npm run skills:check
+```
+
+`setup.sh` reports the local Kami render toolchain (`python3`, `node`, `weasyprint`, `pypdf`, `pptxgenjs`, `playwright`, `pdffonts`, and local Chromium-family browser availability). If some render dependencies are missing, the skill can still scaffold and edit source projects, but PDF/PPTX export should be treated as conditional.
+
+PPTX artifact previews have a separate best-effort render path in the Electron main process. The viewer always extracts slide text and speaker notes from `.pptx`; visual slide thumbnails require local `soffice` (LibreOffice) for PPTX-to-PDF conversion and `pdftoppm` for PDF-to-PNG rendering. Missing binaries should degrade to text-only previews, not fail the file viewer.
+
+### LaTeX PDF workflow
+
+The native `compile_latex` tool is separate from `generate_document`. It compiles an existing workspace `.tex` file into a PDF by discovering a system engine in this order: `tectonic`, `latexmk`, `xelatex`, `lualatex`, `pdflatex`.
+
+Implementation and QA notes:
+
+- Do not shell-interpolate compiler commands; use bounded `execFile` calls.
+- Keep all source/output paths inside the active workspace.
+- Preserve the `.tex` source even when no compiler is installed or compilation fails.
+- Register successful PDFs as artifacts with `mimeType: "application/pdf"` and `sourcePath` metadata pointing back to the `.tex` file.
+- Renderer pairing is driven by `artifact_created.sourcePath` first, with same-folder/same-basename fallback for older events.
+
 ## Focused Test Suites
 
 For completion/output UX changes, run the focused suites:
 
 ```bash
 npx vitest run \
+  src/electron/utils/__tests__/latex-compiler.test.ts \
+  src/electron/agent/tools/__tests__/document-tools.test.ts \
+  src/renderer/utils/__tests__/latex-artifacts.test.ts \
   src/renderer/utils/__tests__/task-outputs.test.ts \
   src/renderer/utils/__tests__/task-completion-ux.test.ts \
   src/renderer/utils/__tests__/task-event-visibility.test.ts \

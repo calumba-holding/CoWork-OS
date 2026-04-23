@@ -1549,6 +1549,53 @@ Save as invoice-2026-02.pdf.
 
 ---
 
+### LaTeX Papers & Technical PDFs
+
+Write technical papers, notes, or diagram-heavy explanations as editable LaTeX source and compile them into PDFs when a system TeX engine is installed.
+
+**What it handles:**
+- `.tex` source generation for papers, reports, and architecture explanations
+- TikZ diagrams when the user explicitly asks for LaTeX/TikZ output
+- Compilation through `tectonic`, `latexmk`, `xelatex`, `lualatex`, or `pdflatex`
+- Clear dependency fallback that keeps the `.tex` source when no compiler is available
+- Paired artifact output with Summary, source, and PDF tabs in the task UI
+
+**Example prompt:**
+```
+Write a LaTeX paper explaining how our app-server request path works.
+Use TikZ diagrams for the architecture and request lifecycle.
+Save the source as artifacts/papers/app-server-paper.tex and compile it to PDF.
+If no TeX engine is installed, keep the source and tell me what is missing.
+```
+
+**Powered by:** `write_file`, `compile_latex`, local system TeX engine
+
+---
+
+### Editorial PDFs, Resumes & Slide Decks (Kami)
+
+Create designed document artifacts that feel typeset rather than merely exported. This is the right path when the output should look like an editorial one-pager, resume, white paper, formal letter, portfolio, or restrained slide deck.
+
+**What it handles:**
+- Workspace-local source scaffolding for HTML, diagram, or slide projects
+- Resume and CV typesetting with presentable typography
+- One-pagers, white papers, letters, and portfolios in a consistent editorial system
+- Standalone architecture, flowchart, and quadrant diagram pages
+- Slide decks with editable PPTX output and optional PDF conversion
+- In-app PPTX artifact previews with slide thumbnails, slide navigation, extracted text, and speaker notes
+- Dependency-aware render fallback when PDF/PPTX tooling is unavailable
+
+**Example prompt:**
+```
+Use the kami skill to turn notes/seed-round-story.md into a polished English one-pager.
+Scaffold the project in this workspace, keep the editable source files, and render a PDF if local dependencies are available.
+If rendering tools are missing, stop after editing the source and tell me exactly what is missing.
+```
+
+**Powered by:** bundled [kami](skills/kami.md) skill, local file tools, WeasyPrint/PPTX helpers
+
+---
+
 ### macOS Desktop Automation
 
 Control your Mac's UI programmatically — click buttons, fill forms, extract screen content, and automate repetitive desktop workflows.

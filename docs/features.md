@@ -41,12 +41,14 @@
 - **Permission Engine**: layered tool approvals combine explicit modes, per-tool/path/command-prefix/MCP-server rules, session grants, workspace-local rules, profile rules, and hard guardrails; `dangerous_only` adds a lower-friction mode that still prompts on destructive, privacy-sensitive, side-effecting, or ambiguous actions.
 - **Live Terminal**: Shell commands run in a real-time terminal view — see output as it happens, stop execution, or provide interactive input (e.g. `y`/`n` prompts)
 - **Dynamic Re-Planning**: Agent can revise its plan mid-execution
-- **138 Built-in Skills**: GitHub, Slack, Notion, Spotify, Apple Notes, Unity, Unreal, Terraform, Kubernetes, financial analysis, and more. Bundled workflows now include [LLM Wiki](llm-wiki.md) for persistent research vaults and [manim-video](skills/manim-video.md) for deterministic technical animation. Optional CLI-based skills (e.g. [aurl](skills/aurl.md) for OpenAPI/GraphQL APIs) appear when the binary is installed.
+- **139 Built-in Skills**: GitHub, Slack, Notion, Spotify, Apple Notes, Unity, Unreal, Terraform, Kubernetes, financial analysis, and more. Bundled workflows now include [LLM Wiki](llm-wiki.md) for persistent research vaults, [manim-video](skills/manim-video.md) for deterministic technical animation, and [kami](skills/kami.md) for editorial PDFs and slide decks. Optional CLI-based skills (e.g. [aurl](skills/aurl.md) for OpenAPI/GraphQL APIs) appear when the binary is installed.
 - **Additive Skill Runtime**: Skills can still be proactively shortlisted from task semantics, but they now apply as additive context and scoped runtime directives. They never replace the original task prompt. See [Skills Runtime Model](skills-runtime-model.md).
 - **Chat Mode**: Direct LLM chat with no tools, no step timeline, same-session follow-ups, chat-only streaming for supported providers, and a fixed high output budget for explicit `executionMode: "chat"` sessions. See [Chat Mode](chat-mode.md).
-- **Document Creation**: Excel, Word, PDF, PowerPoint with professional formatting
+- **Document Creation**: Excel, Word, PDF, PowerPoint with professional formatting, first-class LaTeX/TikZ `.tex` -> PDF compilation when a system TeX engine is installed, plus the bundled [kami](skills/kami.md) workflow for editorial PDFs, resumes, one-pagers, and slide decks
 - **Document Editing Sessions**: Inline PDF region editing and DOCX block replacement. Open a document from the Files panel or task artifact surface to enter an editing session with version browsing and document-aware controls.
+- **Rich Presentation Previews**: PPTX artifacts open in an in-app slide viewer with thumbnails, previous/next controls, zoom, extracted slide text, and speaker notes. Rendered slide images are best-effort and fall back to text/notes when local conversion tools are unavailable.
 - **Persistent Memory**: Cross-session context with curated hot memory, searchable archive recall, session transcript recall, topic packs, privacy-aware observation capture, and an optional Supermemory external provider lane
+- **Chronicle (Desktop Research Preview)**: opt-in local recent-screen context for vague prompts like `this`, `that`, `what is this`, `latest draft`, or `why is this failing`, with Memory Hub controls, pause/resume, promoted `screen_context` evidence, and optional linked background memory generation. See [Chronicle](chronicle.md).
 - **Knowledge Graph**: SQLite-backed entity/relationship memory with FTS5 search, graph traversal, and auto-extraction
 - **Workspace Kit**: `.cowork/` project kit + markdown indexing with context injection
 - **Agent Teams**: Multi-agent collaboration with shared checklists, graph-backed coordinated runs, and team management UI
@@ -64,12 +66,15 @@
 - **Completion Output Confidence UX**: When tasks finish with file outputs, users get high-signal completion toasts with direct actions (`Open file`, `Show in Finder`, `View in Files`), automatic right-panel focus for the active task, unseen-output badges when reviewing another task/view, and richer completion text composed from semantic summaries plus verifier verdict/report when available.
 - **Completion/Resume Coherence**: terminal task state is persisted before terminal events are emitted, and approval- or follow-up-driven resume paths re-check canonical persisted status before writing `executing`, preventing completed tasks from regressing to an in-progress row state.
 - **Artifact-First Output Visibility**: Artifact-only tasks are treated the same as file-created outputs across progress, timeline, and Files panel surfaces.
+- **Paired LaTeX/PDF Outputs**: Compiled LaTeX artifacts preserve the editable `.tex` source as the durable artifact and pair it with the generated PDF in one task workbench, including Summary, source, and PDF tabs.
 - **Performance Reviews**: Score and review agent-role outcomes with autonomy-level recommendations
 - **Vision**: Analyze workspace images via `analyze_image` tool (OpenAI, Anthropic, Gemini, or Bedrock)
 - **Image Attachments**: Attach images to tasks and follow-ups for multimodal analysis
 - **Image Generation**: Multi-provider support (Gemini, OpenAI gpt-image-1/1.5/DALL-E, Azure OpenAI, OpenRouter) with configurable provider ordering
 - **Video Generation**: Text-to-video and image-to-video via new video generation providers. Configure preferred video model in Settings > LLM. Generated videos render inline in the task feed.
 - **Programmatic Technical Animation**: The bundled [manim-video](skills/manim-video.md) skill scaffolds Manim CE projects for math explainers, algorithm walkthroughs, architecture animations, and data stories with local project files, dependency preflight, and draft-first render helpers.
+- **Editorial Document Design**: The bundled [kami](skills/kami.md) skill scaffolds workspace-local source projects for resumes, one-pagers, white papers, letters, portfolios, diagrams, and slide decks, with PDF/PPTX render helpers and a preserved editorial design system.
+- **High-Agency Frontend Design**: The bundled `taste-skill` workflow adds a stricter anti-slop frontend option for React/Next.js-style UI work, with stronger layout variance, typography, motion, dependency-check, and responsive-quality rules than the default frontend guidance.
 - **Visual Annotation**: Iterative image refinement with the Visual Annotator
 - **Context Summarization**: Automatic context compression surfaced in the task timeline
 - **Structured Input Requests**: In plan-mode flows, the agent can pause with 1-3 short multiple-choice questions instead of asking ambiguous free-text follow-ups
@@ -106,12 +111,25 @@ See [LLM Wiki](llm-wiki.md) for command syntax, layout, modes, and analyzer beha
 
 Desktop automation for **native apps** when MCP, browser automation, and shell are not enough. **Full guide:** [Computer use (macOS)](computer-use.md).
 
-- **Session lifecycle**: One active computer-use session at a time; orange safety overlay; global **Esc** abort; optional main-window hide during control; cleanup when the task finishes or the session ends.
-- **Per-app consent**: Each app is approved once **for that session** with tiers (`view_only`, `click_only`, `full_control`) and classifier-driven warnings (e.g. browsers, terminals/IDEs, Finder, System Settings).
-- **Permissions**: Accessibility and Screen Recording are surfaced in **Settings → Tools** with links into System Settings; restarting the app may be needed after Screen Recording changes.
+- **Session lifecycle**: One active computer-use session at a time; global **Esc** abort; cleanup when the task finishes or the session ends.
+- **Helper-targeted permissions**: Accessibility and Screen Recording are granted to the bundled helper binary through inline bootstrap and surfaced in **Settings → Tools**; restarting the app may be needed after Screen Recording changes.
 - **Built-in tools category**: Enable/disable and priority for the `computer_use` tool family alongside other built-in categories.
-- **Policy & planning**: Tool availability defers `computer_*` unless the task signals native/desktop GUI intent; executor guidance treats computer use as last resort after integrations, `browser_*`, and shell. For native GUI tasks, routing prefers **`computer_*`** (and **`open_application`** when launching the app) over **`run_applescript`** / fragile shell GUI hacks.
-- **Tools**: `computer_screenshot`, `computer_move_mouse`, `computer_click`, `computer_type`, `computer_key` (with blocklisted dangerous key chords).
+- **Policy & planning**: Tool availability defers the computer-use lane unless the task signals native/desktop GUI intent; executor guidance treats computer use as last resort after integrations, `browser_*`, and shell. For native GUI tasks, routing prefers **`screenshot`**, **`click`**, **`type_text`**, **`keypress`**, and related tools (plus **`open_application`** when launching the app) over **`run_applescript`** / fragile shell GUI hacks.
+- **Tools**: `screenshot`, `click`, `double_click`, `move_mouse`, `drag`, `scroll`, `type_text`, `keypress`, `wait` (with blocklisted dangerous key chords).
+
+### Chronicle (Desktop Research Preview)
+
+Chronicle is the desktop-only recent-screen context lane for underspecified on-screen references.
+
+- **Memory Hub-first controls**: Chronicle is configured from `Settings > Memory Hub > Chronicle`, with consent gating, pause/resume, capture scope, Screen Recording / Accessibility / OCR status, and recent-buffer status
+- **Dedicated Chronicle tool lane**: `screen_context_resolve` now lives in its own `chronicle` built-in tool category instead of piggybacking on `computer_use`
+- **Screen-context resolution**: `screen_context_resolve` searches recent local frames first and only falls back to a fresh local screenshot when passive context is weak
+- **No second memory system**: raw passive frames are ephemeral; only task-used observations are promoted into `.cowork/chronicle/`, unified recall, and optionally linked `screen_context` memory entries
+- **Mission Control visibility**: promoted observations appear as `screen_context` evidence, a dedicated learning-progress step, and recall hits
+- **Task-level control**: task creation in the main composer and Devices panel can disable Chronicle for one task without changing the global setting
+- **Privacy boundary**: passive capture stays local, screen-derived text is marked untrusted, and Chronicle-backed promotion can respect workspace memory privacy/auto-capture settings
+
+See [Chronicle](chronicle.md) for setup, testing, privacy, and contributor details.
 
 ### Inbox Agent
 
@@ -126,6 +144,7 @@ Local-first inbox workspace for email triage, follow-up, task capture, cross-cha
 - **Relationship timeline**: the research rail merges email and channel history into one relationship timeline with channel preference hints
 - **Mission Control handoff**: threads can be turned into company issues, assigned to an operator, and woken from the inbox
 - **Inbox automations**: rules, reminder cadences, and patrol schedules can create tasks, wake agents, and schedule review flows
+- **Gmail auto-forwarding**: create a forwarding automation from a Gmail thread with dry-run support, attachment filters, thread scoping, per-message dedupe, and watermark-based polling that survives downtime
 - **Commitment handling**: accepted commitments become real follow-up tasks that can later be marked done or dismissed
 - **Event pipeline**: mailbox sync, triage, draft, and action events feed Knowledge Graph, Heartbeat, triggers, playbooks, and briefing
 - **Safer review**: sensitive-content warnings and draft review keep outbound actions visible before anything leaves the app
@@ -150,22 +169,55 @@ See [Remote Access](remote-access.md) for connection patterns and [Mission Contr
 
 Automation features are now grouped together in `Settings > Automations`:
 
+- **Routines**: the primary automation abstraction for saved instructions, execution target, triggers, outputs, approval policy, connector policy, and recent runs
 - **Core automation**: `Memory + Heartbeat + Subconscious` form one always-on runtime owned by automation profiles
 - **Task Queue**: concurrency, queueing, and background execution policy
 - **Subconscious**: reflective automation with target-scoped evidence, hypotheses, critique, winner selection, backlog, and dispatch
-- **Scheduled Tasks**: recurring time-based task execution
-- **Webhooks**: inbound automation entry points
-- **Event Triggers**: condition-based actions triggered by channel, webhook, or runtime events
+- **Scheduled Tasks**: recurring time-based task execution; now also used as a compiled backend for routine schedule triggers
+- **Webhooks**: inbound automation entry points; now also used as a compiled backend for routine API triggers
+- **Event Triggers**: condition-based actions triggered by channel, webhook, or runtime events; now also used as a compiled backend for routine event triggers
 - **Daily Briefing**: scheduled summaries with workspace, memory, and evolution context
 
 Ownership model:
 
 - `Mission Control` is the cockpit around the core runtime
+- `Routines` are the main user-facing automation object
+- `Scheduled Tasks`, `Webhooks`, and `Event Triggers` remain low-level or generated infrastructure
 - `Triggers` are ingress and normalized evidence only
 - `Devices` are execution routing only
 - `Digital Twins` are optional persona presets and are not direct cognition owners
 
 The home dashboard also surfaces recent automation runs so background work is visible without opening Settings. See [Core Automation](core-automation.md).
+
+### Routines
+
+`Routines` are now the main way to define saved automation in CoWork OS.
+
+Each routine can carry:
+
+- one saved instruction block
+- one execution target (`workspace`, `worktree`, `device`, or `managed_environment`)
+- one or more triggers
+- one or more outputs
+- a connector policy (`prefer` or enforced `allowlist`)
+- an approval policy
+- durable run history
+
+Supported trigger types include:
+
+- `schedule`
+- `api`
+- `connector_event`
+- `channel_event`
+- `mailbox_event`
+- `github_event`
+- `manual`
+
+Current product stance:
+
+- use `Routines` first when you want one automation object with observability and policy
+- use `Scheduled Tasks`, `Webhooks`, or `Event Triggers` directly only when you intentionally want the lower-level surface
+- treat `Heartbeat` and `Subconscious` as the always-on cognitive runtime, not as routine triggers
 
 ### Zero-Human Company Ops
 
@@ -354,7 +406,7 @@ CoWork OS supports external skill installation through the desktop GUI, not just
 - **Cross-ecosystem support**: Other external skill stores are supported when they expose Git repos, raw manifests, or raw `SKILL.md` bundle entry points
 - **Shared runtime contract**: Once loaded, external skills follow the same additive execution model as bundled skills. They can add context and scoped directives, but they cannot replace the canonical task prompt.
 
-Access from **Settings** > **Skills** > **Skill Store**. See [Skill Store & External Skills](skill-store-and-external-skills.md) for install/import behavior and [Skills Runtime Model](skills-runtime-model.md) for execution semantics.
+Access from **Settings** > **Skills** > **Skill Store**. Users can start with bundled global skills such as `llm-wiki`, `kami`, and `taste-skill`, then add third-party skills through the same runtime model. See [Skill Store & External Skills](skill-store-and-external-skills.md) for install/import behavior and [Skills Runtime Model](skills-runtime-model.md) for execution semantics.
 
 ---
 
@@ -858,15 +910,20 @@ Extended execution mode for complex tasks that need sustained focus:
 
 ## Document Generation Tools
 
-Three dedicated agent tools for generating formatted documents from task context:
+Four dedicated agent tools for generating formatted documents from task context:
 
 | Tool | Output | Description |
 |------|--------|-------------|
+| `compile_latex` | PDF + `.tex` source pairing | Compile a workspace `.tex` file with an installed system engine (`tectonic`, `latexmk`, `xelatex`, `lualatex`, or `pdflatex`) and register the PDF with source metadata |
 | `generate_document` | PDF | Generate PDF documents with markdown content and structured sections |
 | `generate_presentation` | PPTX | Generate PowerPoint presentations with multiple slides |
 | `generate_spreadsheet` | XLSX | Generate Excel spreadsheets with multiple sheets and data |
 
 These tools complement the existing document skills (spreadsheet.ts, document.ts, presentation.ts) by providing direct LLM-callable tool interfaces. Generated files are registered as task artifacts with proper MIME types.
+
+For explicit LaTeX, TeX, TikZ, `.tex`, or "write a paper and compile PDF" requests, the runtime prefers the source-first path: write the editable `.tex` file, then call `compile_latex`. CoWork does not bundle a TeX distribution; if no supported engine is installed, the task keeps the `.tex` source and reports the missing dependency instead of silently falling back to the HTML/markdown PDF generator.
+
+PPTX outputs also participate in the artifact preview system. Task completion cards and `artifact_created` timeline events can show an inline presentation card, and opening the file launches the full presentation viewer. CoWork always extracts slide text and notes from `.pptx`; visual slide thumbnails are generated when local `soffice` and `pdftoppm` binaries are available.
 
 ---
 
@@ -897,7 +954,9 @@ Unified file aggregation service combining local workspace files, task artifacts
 | **Multi-source** | Local workspace files, task artifacts, connected cloud storage |
 | **Search** | Filename-based search across all connected sources |
 | **Recent files** | Tracks recently accessed files with timestamps |
-| **MIME detection** | 20+ common formats (PDF, images, docs, sheets, code, etc.) |
+| **MIME detection** | 20+ common formats (PDF, images, docs, sheets, slides, code, etc.) |
+| **Presentation preview** | PPTX decks show slide thumbnails, text, speaker notes, and external open/show actions when opened from task artifacts or Files |
+| **Source/rendered pairs** | LaTeX `.tex` files compiled through `compile_latex` are paired with their generated PDFs in task artifact surfaces |
 
 Access from the **File Hub** panel in the sidebar.
 

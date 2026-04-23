@@ -32,6 +32,34 @@ describe("AssistantMessageContent", () => {
     ]);
   });
 
+  it("splits markdown and html directives", () => {
+    const segments = parseAssistantMessageSegments(
+      "Here is the diagram.\n\n::html{path=\"artifacts/diagram.html\" title=\"Architecture diagram\"}\n\nWrap up.",
+    );
+
+    expect(segments).toHaveLength(3);
+    expect(segments[0]).toMatchObject({ type: "markdown" });
+    expect(segments[1]).toMatchObject({
+      type: "html",
+      directive: {
+        path: "artifacts/diagram.html",
+        title: "Architecture diagram",
+      },
+    });
+    expect(segments[2]).toMatchObject({ type: "markdown" });
+  });
+
+  it("returns a compact error segment for malformed html directives", () => {
+    const segments = parseAssistantMessageSegments("::html{title=\"Missing path\"}");
+    expect(segments).toEqual([
+      {
+        type: "html_error",
+        raw: "::html{title=\"Missing path\"}",
+        error: "HTML embed requires a path",
+      },
+    ]);
+  });
+
   it("sanitizes leaked tool transcript prefixes before segment parsing", () => {
     const segments = parseAssistantMessageSegments(
       'Tackling: {"id":"call_skill_list","tool":"skill_list","input":{}} <tool name="skill_list">{}</tool>\n{"description":"Real content"}',

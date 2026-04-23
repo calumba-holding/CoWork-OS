@@ -85,6 +85,7 @@ These directives can narrow or guide execution. They cannot redefine the task. T
 Example:
 
 - `manim-video` can add artifact expectations and project-scaffolding context for a local Manim workspace, but it still does not replace the user's original animation request.
+- `kami` can add scaffold/render expectations for a workspace-local document project, but it still does not replace the user's original document request or mutate the bundled templates.
 
 ### Reuse Guard
 

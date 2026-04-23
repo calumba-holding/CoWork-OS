@@ -8,7 +8,7 @@
 
 <p align="center">
   <strong>CoWork OS is a local-first option for production workflows.</strong><br>
-  Security-hardened, local-first AI operating system — 34 LLM provider options, 17 messaging channels, 138 built-in skills
+  Security-hardened, local-first AI operating system — 34 LLM provider options, 17 messaging channels, 140 built-in skills
 </p>
 
 <p align="center">
@@ -46,7 +46,7 @@
 - **17 messaging channels** — WhatsApp, Telegram, Discord, Slack, Teams, Google Chat, Feishu/Lark, WeCom, iMessage, Signal, X, and more. Chat with your AI from anywhere.
 - **44 MCP connectors** — Pre-built enterprise integrations across CRM, support, productivity, analytics, and payments, with native connector support for the most common internal surfaces.
 - **18 bundled role-specific packs** — including Mobile Development, Game Development, and 5 Financial packs, with 55+ skills, in-app Plugin Store for installing community packs, remote registry, and enterprise admin policies for organization-wide control.
-- **138 built-in skills** — Documents, code review, web search, image generation, cloud integrations, game development, mobile development, financial analysis, infrastructure-as-code, and more, including bundled workflows such as `llm-wiki` for persistent research vaults and `manim-video` for programmatic technical animation.
+- **140 built-in skills** — Documents, code review, web search, image generation, cloud integrations, game development, mobile development, financial analysis, infrastructure-as-code, and more, including bundled workflows such as `llm-wiki` for persistent research vaults, `manim-video` for programmatic technical animation, `kami` for editorial PDFs and slide decks, and `taste-skill` for high-agency frontend design.
 - **Profiles & portability** — run separate CoWork profiles with isolated app data, export/import complete profile bundles, and keep credentials, channels, skills, and sessions separated by profile.
 - **Active Context sidebar** — Always-visible panel showing 44 available MCP connectors with branded Lucide icons and enabled skills, auto-refreshed every 30 seconds.
 - **Agent teams** — Multi-agent collaboration with shared checklists, graph-backed runs, collaborative mode, multi-LLM synthesis, persistent teams, and ACP-targeted delegation for local or remote specialists.
@@ -57,6 +57,7 @@
 - **AI Playbook** — Auto-captures what worked from successful tasks and injects relevant patterns into future prompts. Repeated patterns auto-promote to governed, one-click-approvable skills via the Playbook-to-Skill pipeline.
 - **Evolving Intelligence** — The layered memory runtime keeps curated hot memory prompt-visible by default, leaves archive recall off by default, and adds explicit `search_sessions` / `memory_topics_load` recall paths for recent runs and topical packs. Adaptive Style Engine learns your communication preferences from message patterns and feedback. Evolution Metrics dashboard quantifies improvement over time (correction rate, knowledge growth, style alignment).
 - **Operator Runtime Visibility** — Task completion now shows what Cowork learned, semantic batch labels and follow-up completions stay visible, unified recall spans tasks/messages/files, persistent shell sessions preserve operator state, and model routing/fallback is visible in the UI and Mission Control.
+- **Chronicle (Desktop Research Preview)** — Opt-in local recent-screen context for vague prompts like “what is this?”, “why is this failing?”, or “sync the latest draft”, with consent-gated passive capture, pause/resume controls, promoted `screen_context` evidence in Mission Control, and optional linked background memory generation. **Documentation:** [docs/chronicle.md](docs/chronicle.md).
 - **Configurable fallback chains** — LLM and web-search providers can run in an explicit ordered fallback chain, including Exa for search, immediate failover on retryable provider errors, provider/model-level failover visibility in the UI, and a configurable cooldown before retrying the primary LLM route.
 - **Provider-aware prompt caching** — Prompt caching is on by default for supported routes. CoWork keeps stable system sections cacheable, keeps volatile turn context out of the cached prefix, uses Anthropic automatic caching when available, falls back to explicit Claude breakpoints on OpenRouter, and derives stable OpenAI-family cache keys for GPT routes such as Azure `gpt-5.4` / `gpt-5.4-mini`.
 - **Usage Insights** — Dashboard showing task stats, cost/token tracking by model, activity heatmaps, top skills, per-pack analytics, per-persona success/retry metrics, and task-result satisfaction signals.
@@ -74,9 +75,12 @@ Stable workflow entry points for the newest high-impact capabilities.
 - **Ideas panel** — curated launchpad of pre-written workflow prompts and capability-aware starting points, with deep links into common tasks.
 - **Research vaults (`llm-wiki`)** — first-class workspace-local knowledge bases inspired by Andrej Karpathy's LLM Wiki concept, with deterministic raw-source capture, Obsidian-friendly notes, filed-back outputs, vault search, and vault-health analysis. [Learn more](docs/llm-wiki.md)
 - **Document editing sessions** — inline PDF region editing, DOCX block replacement, version browsing, and document-aware file viewing for active editing sessions.
+- **Designed editorial documents** — bundled `kami` skill for resumes, one-pagers, white papers, letters, portfolios, diagrams, and slide decks with workspace-local source scaffolding and PDF/PPTX export helpers. [Learn more](docs/skills/kami.md)
+- **Rich presentation previews** — generated `.pptx` artifacts open in CoWork with slide thumbnails, slide navigation, extracted speaker notes, and best-effort rendered slide images. If local conversion tools are missing, CoWork still shows text and notes from the deck.
 - **Image generation** — configurable provider ordering across Gemini, OpenAI, Azure OpenAI, and OpenRouter.
 - **Video generation** — text-to-video and image-to-video routing with polling tools and inline preview.
 - **Programmatic technical video** — bundled `manim-video` skill for Manim CE explainers, equation walkthroughs, algorithm visualizations, and animated architecture/data stories. [Learn more](docs/skills/manim-video.md)
+- **High-agency frontend design** — bundled `taste-skill` for stricter anti-slop frontend work with stronger layout variance, typography, motion, and implementation rules.
 
 See [Core Automation](docs/core-automation.md), [I Gave CoWork OS A Subconscious, And Now It Self-Improves 24/7 | Full Guide](docs/continual-learning-in-cowork.md), [Features](docs/features.md), [Heartbeat v3](docs/heartbeat-v3.md), [Providers](docs/providers.md), and [Plugin Packs](docs/plugin-packs.md) for current runtime details.
 
@@ -144,6 +148,10 @@ Task-based execution with dynamic re-planning, five runtime modes (Chat, Execute
 
 Skills now follow an additive runtime model: CoWork can proactively shortlist or apply a relevant skill, but the original task remains canonical. Skills add context and scoped execution modifiers instead of replacing the task prompt. [Learn more](docs/skills-runtime-model.md)
 
+### Chronicle (Desktop Research Preview)
+
+Chronicle is an opt-in desktop-only recent-screen context lane for vague on-screen references such as `this`, `that`, `the failing one`, `latest draft`, or `why is this failing`. Configure it from **Settings > Memory Hub > Chronicle**: passive capture is consent-gated, can be paused from Settings or the tray, resolves through `screen_context_resolve`, and promotes only task-used observations into existing recall, evidence, and optional linked `screen_context` memory entries instead of creating a second memory system. [Learn more](docs/chronicle.md)
+
 ### Research Vaults (`llm-wiki`)
 
 CoWork OS includes `llm-wiki` as a bundled, first-class research-vault workflow inspired by Andrej Karpathy's LLM Wiki idea: keep a `/raw` corpus, build durable linked notes on top, and make the result easy for agents to traverse later.
@@ -176,6 +184,8 @@ Completion state and file availability are now explicit:
 - **Unseen-output badge**: if completion happens in another task/view, the collapsed right-panel toggle shows a numeric badge until you open Files
 - **Filename-first rows with clear location context**: Files rows stay filename-only, with output folder context shown separately (or **Workspace root**)
 - **Artifact parity**: artifact-only outputs are treated the same as normal file outputs in completion toasts, timeline details, and Files panel
+- **LaTeX/PDF artifact workbench**: explicit LaTeX/TikZ paper tasks can write `.tex`, compile it with a system TeX engine, and show the source plus rendered PDF together with Summary, source, and PDF tabs
+- **Presentation previews**: `.pptx` outputs show inline deck cards in task events and open into a slide viewer with thumbnails, previous/next navigation, zoom, and speaker notes
 - **Semantic completion labels**: completed tool batches and verifier verdicts now feed the richer completion text shown in timelines, feed relays, and export surfaces
 
 ### Guided Input & Runtime Recovery
@@ -198,7 +208,7 @@ The Devices tab turns CoWork OS into a multi-machine control surface. Save and r
 
 ### Automations
 
-Automations are now organized around a hard boundary: `Memory + Heartbeat + Subconscious` form the core runtime, while Triggers, Devices, Scheduled Tasks, Webhooks, and Daily Briefing remain separate ingress or execution surfaces. The home dashboard surfaces recent automation runs so you can monitor background systems without hunting through tabs. [Learn more](docs/core-automation.md)
+Automations are now organized around a hard boundary: `Memory + Heartbeat + Subconscious` form the core runtime, while `Routines` are the main saved-automation product layered on top of lower-level execution surfaces. `Scheduled Tasks`, `Webhooks`, and `Event Triggers` still exist, but they now also serve as advanced or compiled backends for routines rather than competing first-class automation concepts. The home dashboard and routines panel surface recent automation runs so you can monitor background systems without hunting through tabs. [Learn more](docs/core-automation.md)
 
 ### Zero-Human Company Ops
 
@@ -223,6 +233,7 @@ Local-first inbox workspace that turns email into an action queue. It keeps cach
 - **Action cards**: Unread, Action Needed, Suggested Actions, Open Commitments
 - **Mailbox views**: Inbox, Sent, All, plus Recent/Priority sorting
 - **Workflow buttons**: Cleanup, Follow-up, Prep thread, Extract todos, Schedule, Refresh intel
+- **Gmail auto-forwarding**: create forwarding automations from a Gmail thread with dry-run support, attachment filters, per-message dedupe, and thread-scoped execution
 - **Draft handling**: Send or discard generated replies before anything is posted externally
 - **Commitment tracking**: Accept commitments into real follow-up tasks, then mark them done or dismiss them
 - **Background sync**: Load from the local database immediately and refresh in the background without blanking the inbox on restart
@@ -294,7 +305,7 @@ These are the workflows where approval gates, local data control, and measurable
 
 ### Extensibility
 
-- **138 built-in skills** across developer, productivity, communication, documents, game development, mobile development, financial analysis, infrastructure-as-code, and more
+- **140 built-in skills** across developer, productivity, communication, documents, game development, mobile development, financial analysis, infrastructure-as-code, and more
 - **Custom skills** in `~/Library/Application Support/cowork-os/skills/` (macOS) or `%APPDATA%\cowork-os\skills\` (Windows)
 - **18 bundled plugin packs** with 55+ role-specific skills and Digital Twin integration
 - **Plugin Store** — browse, install from Git/URL, scaffold custom packs, and review quarantine/report state for imported packs
@@ -444,6 +455,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history of completed features.
 | [Architecture](docs/architecture.md) | Technical architecture deep-dive |
 | [Skills Runtime Model](docs/skills-runtime-model.md) | Canonical prompt invariant, additive skill application, routing shortlist model, and `use_skill` contract |
 | [LLM Wiki](docs/llm-wiki.md) | First-class research vault workflow, slash syntax, vault layout, analyzer outputs, and Obsidian-friendly knowledge-base behavior |
+| [Kami Skill](docs/skills/kami.md) | Bundled editorial document workflow for resumes, one-pagers, white papers, diagrams, and slide decks |
 | [manim-video Skill](docs/skills/manim-video.md) | Bundled Manim CE workflow for technical animation, project scaffolding, and draft-to-production render flow |
 | [Core Automation](docs/core-automation.md) | Runtime boundary for Memory + Heartbeat + Subconscious, automation profiles, and the core harness |
 | [Heartbeat v3](docs/heartbeat-v3.md) | Default two-lane heartbeat architecture, signals, Pulse, Dispatch, and automation-profile-backed operator semantics |

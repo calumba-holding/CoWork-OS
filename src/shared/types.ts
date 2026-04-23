@@ -1288,7 +1288,7 @@ export interface ToolResultEnvelope {
 
 export interface EvidenceRef {
   evidenceId: string;
-  sourceType: "url" | "file" | "tool_output" | "user_input" | "other";
+  sourceType: "url" | "file" | "tool_output" | "user_input" | "screen_context" | "other";
   sourceUrlOrPath: string;
   snippet?: string;
   capturedAt: number;
@@ -1306,6 +1306,7 @@ export type ToolType =
   | "search_files"
   | "run_skill"
   | "run_command"
+  | "compile_latex"
   | "generate_image"
   | "analyze_image"
   // System tools
@@ -1388,11 +1389,16 @@ export type ToolType =
   | "qa_report"
   | "qa_cleanup"
   // Computer use tools (CUA)
-  | "computer_screenshot"
-  | "computer_click"
-  | "computer_type"
-  | "computer_key"
-  | "computer_move_mouse"
+  | "screen_context_resolve"
+  | "screenshot"
+  | "click"
+  | "double_click"
+  | "move_mouse"
+  | "drag"
+  | "scroll"
+  | "type_text"
+  | "keypress"
+  | "wait"
   // Batch image processing
   | "batch_image_process"
   // Meta tools
@@ -1410,11 +1416,7 @@ export type ApprovalType =
   | "external_service"
   | "run_command"
   | "risk_gate"
-  | "computer_use"
-  | "computer_move_mouse"
-  | "computer_click"
-  | "computer_type"
-  | "computer_key";
+  | "computer_use";
 
 // ============ Security Tool Groups & Risk Levels ============
 
@@ -1464,6 +1466,7 @@ export const TOOL_GROUPS = {
     "create_directory",
     "create_spreadsheet",
     "create_document",
+    "compile_latex",
     "edit_document",
     "create_presentation",
     "organize_folder",
@@ -1484,11 +1487,16 @@ export const TOOL_GROUPS = {
     "open_url",
     "open_path",
     "show_in_folder",
-    "computer_screenshot",
-    "computer_click",
-    "computer_type",
-    "computer_key",
-    "computer_move_mouse",
+    "screen_context_resolve",
+    "screenshot",
+    "click",
+    "double_click",
+    "move_mouse",
+    "drag",
+    "scroll",
+    "type_text",
+    "keypress",
+    "wait",
     "batch_image_process",
   ],
   // Network operations - requires network permission
@@ -1592,6 +1600,7 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   move_file: "write",
   create_directory: "write",
   run_skill: "write",
+  compile_latex: "write",
   // Destructive operations
   delete_file: "destructive",
   run_command: "destructive",
@@ -1603,12 +1612,17 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   open_url: "system",
   open_path: "system",
   show_in_folder: "system",
+  screen_context_resolve: "system",
   // Computer use operations (CUA)
-  computer_screenshot: "system",
-  computer_click: "system",
-  computer_type: "system",
-  computer_key: "system",
-  computer_move_mouse: "system",
+  screenshot: "system",
+  click: "system",
+  double_click: "system",
+  move_mouse: "system",
+  drag: "system",
+  scroll: "system",
+  type_text: "system",
+  keypress: "system",
+  wait: "system",
   // Batch image processing
   batch_image_process: "write",
   // Network operations
@@ -1859,6 +1873,8 @@ export interface AgentConfig {
   bypassQueue?: boolean;
   /** Whether this task may pause and wait for user input (default: true) */
   allowUserInput?: boolean;
+  /** Override Chronicle availability for this task. */
+  chronicleMode?: ChronicleTaskMode;
   /** Allow shell tools for this task via an in-memory workspace permission override. */
   shellAccess?: boolean;
   /** Require git worktree isolation for this task and fail fast if unavailable. */
@@ -2926,6 +2942,7 @@ export interface TaskOutputSummary {
 }
 
 export type LearningProgressStage =
+  | "screen_context_used"
   | "memory_captured"
   | "playbook_reinforced"
   | "skill_proposed"
@@ -2972,7 +2989,67 @@ export type UnifiedRecallSourceType =
   | "file"
   | "workspace_note"
   | "memory"
+  | "screen_context"
   | "knowledge_graph";
+
+export type ChronicleCaptureScope = "frontmost_display" | "all_displays";
+export type ChronicleTaskMode = "inherit" | "enabled" | "disabled";
+
+export interface ChronicleSourceReference {
+  kind: "url" | "file" | "app";
+  value: string;
+  label?: string;
+}
+
+export interface ChronicleSettings {
+  enabled: boolean;
+  mode: "hybrid";
+  paused: boolean;
+  captureIntervalSeconds: number;
+  retentionMinutes: number;
+  maxFrames: number;
+  captureScope: ChronicleCaptureScope;
+  backgroundGenerationEnabled: boolean;
+  respectWorkspaceMemory: boolean;
+  consentAcceptedAt?: number | null;
+}
+
+export interface ChronicleCaptureStatus {
+  supported: boolean;
+  enabled: boolean;
+  active: boolean;
+  mode: "hybrid";
+  paused: boolean;
+  captureIntervalSeconds: number;
+  retentionMinutes: number;
+  maxFrames: number;
+  captureScope: ChronicleCaptureScope;
+  frameCount: number;
+  bufferBytes: number;
+  lastCaptureAt: number | null;
+  lastGeneratedAt: number | null;
+  consentRequired: boolean;
+  accessibilityTrusted: boolean;
+  ocrAvailable: boolean;
+  screenCaptureStatus: "granted" | "denied" | "not-determined" | "unknown";
+  reason?: string;
+}
+
+export interface ChronicleResolvedContext {
+  observationId: string;
+  capturedAt: number;
+  displayId: string;
+  appName: string;
+  windowTitle: string;
+  imagePath: string;
+  localTextSnippet: string;
+  confidence: number;
+  usedFallback: boolean;
+  provenance: "untrusted_screen_text";
+  sourceRef?: ChronicleSourceReference | null;
+  width: number;
+  height: number;
+}
 
 export interface UnifiedRecallResult {
   sourceType: UnifiedRecallSourceType;
@@ -4449,8 +4526,254 @@ export interface UpdateAgentTeamItemRequest {
 
 // ============ Managed Agents (Managed Sessions) ============
 
-export type ManagedAgentStatus = "active" | "archived";
+export type ManagedAgentStatus = "draft" | "active" | "suspended" | "archived";
 export type ManagedAgentExecutionMode = "solo" | "team";
+
+export type ManagedAgentRoutineTriggerType =
+  | "manual"
+  | "schedule"
+  | "api"
+  | "channel_event"
+  | "mailbox_event"
+  | "github_event"
+  | "connector_event";
+
+export interface ManagedAgentRoutineTriggerConfig {
+  id?: string;
+  type: ManagedAgentRoutineTriggerType;
+  enabled?: boolean;
+  cadenceMinutes?: number;
+  path?: string;
+  connectorId?: string;
+  changeType?: string;
+  resourceUriContains?: string;
+  channelType?: string;
+  chatId?: string;
+  textContains?: string;
+  senderContains?: string;
+  eventType?: string;
+  subjectContains?: string;
+  provider?: string;
+  labelContains?: string;
+  eventName?: string;
+  repository?: string;
+  action?: string;
+  ref?: string;
+}
+
+export interface ManagedAgentRoutineRecord {
+  id: string;
+  agentId: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  workspaceId: string;
+  environmentId?: string;
+  trigger: ManagedAgentRoutineTriggerConfig;
+  outputKinds: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateManagedAgentRoutineRequest {
+  agentId: string;
+  name: string;
+  description?: string;
+  enabled?: boolean;
+  trigger: ManagedAgentRoutineTriggerConfig;
+}
+
+export interface UpdateManagedAgentRoutineRequest {
+  agentId: string;
+  routineId: string;
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  trigger?: Partial<ManagedAgentRoutineTriggerConfig>;
+}
+
+export interface ManagedAgentLinkedRoutineRef {
+  routineId: string;
+  name: string;
+  enabled: boolean;
+  triggerTypes: ManagedAgentRoutineTriggerType[];
+  summary?: string;
+}
+
+export interface ManagedAgentConversionProvenance {
+  sourceType: "agent_role" | "automation_profile";
+  sourceId: string;
+  sourceLabel?: string;
+  migratedAt: number;
+}
+
+export type AgentWorkspaceRole = "viewer" | "operator" | "builder" | "publisher" | "admin";
+
+export interface AgentWorkspaceMembership {
+  id: string;
+  workspaceId: string;
+  principalId: string;
+  role: AgentWorkspaceRole;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentWorkspacePermissionSnapshot {
+  workspaceId: string;
+  principalId: string;
+  role: AgentWorkspaceRole;
+  canViewAgents: boolean;
+  canRunAgents: boolean;
+  canResumeSessions: boolean;
+  canAnswerApprovals: boolean;
+  canEditDrafts: boolean;
+  canManageEnvironments: boolean;
+  canPublishAgents: boolean;
+  canManageRoutines: boolean;
+  canManageMemberships: boolean;
+  canAuditAgents: boolean;
+}
+
+export interface ManagedAgentAuditEntry {
+  id: string;
+  agentId: string;
+  workspaceId: string;
+  actorId: string;
+  action:
+    | "created"
+    | "updated"
+    | "published"
+    | "suspended"
+    | "archived"
+    | "routine_created"
+    | "routine_updated"
+    | "routine_deleted"
+    | "slack_deployment_updated"
+    | "approval_policy_updated"
+    | "converted_from_agent_role"
+    | "converted_from_automation_profile"
+    | "membership_updated";
+  summary: string;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface ManagedAgentInsightsCount {
+  key: string;
+  count: number;
+}
+
+export interface ManagedAgentInsightsToolCount {
+  toolName: string;
+  count: number;
+}
+
+export interface ManagedAgentInsightsError {
+  id: string;
+  message: string;
+  occurredAt: number;
+  sessionId?: string;
+  routineRunId?: string;
+}
+
+export interface ManagedAgentInsights {
+  agentId: string;
+  totalRuns: number;
+  uniqueUsers: number;
+  successCount: number;
+  failureCount: number;
+  cancelledCount: number;
+  averageCompletionTimeMs: number;
+  approvalRate: number;
+  topTools: ManagedAgentInsightsToolCount[];
+  triggerBreakdown: ManagedAgentInsightsCount[];
+  deploymentSurfaceBreakdown: ManagedAgentInsightsCount[];
+  recentErrors: ManagedAgentInsightsError[];
+  updatedAt: number;
+}
+
+export interface ManagedAgentSlackDeploymentHealthTarget {
+  channelId: string;
+  channelName: string;
+  status: string;
+  connected: boolean;
+  misconfigured: boolean;
+  securityMode?: SecurityMode;
+  progressRelayMode?: "minimal" | "curated";
+  configReadError?: string;
+}
+
+export interface ManagedAgentSlackDeploymentHealth {
+  agentId: string;
+  connectedCount: number;
+  misconfiguredCount: number;
+  targets: ManagedAgentSlackDeploymentHealthTarget[];
+  lastSuccessfulRoutedRunAt?: number;
+  lastSuccessfulRoutedRunId?: string;
+  lastDeploymentError?: string;
+  updatedAt: number;
+}
+
+export interface ManagedSessionWorkpaperDecision {
+  summary: string;
+  timestamp: number;
+  sourceEventId?: string;
+}
+
+export interface ManagedSessionWorkpaperApproval {
+  requestId: string;
+  status: string;
+  summary: string;
+  createdAt: number;
+  resolvedAt?: number;
+}
+
+export interface ManagedSessionWorkpaperArtifact {
+  artifactId: string;
+  label: string;
+  path: string;
+  mimeType?: string;
+  playbackUrl?: string;
+}
+
+export interface ManagedSessionWorkpaperAuditItem {
+  id: string;
+  action: string;
+  summary: string;
+  createdAt: number;
+  actorId: string;
+}
+
+export interface ManagedSessionWorkpaper {
+  sessionId: string;
+  agentId: string;
+  summary: string;
+  evidenceRefs: EvidenceRef[];
+  decisions: ManagedSessionWorkpaperDecision[];
+  approvals: ManagedSessionWorkpaperApproval[];
+  artifacts: ManagedSessionWorkpaperArtifact[];
+  auditTrail: ManagedSessionWorkpaperAuditItem[];
+  generatedAt: number;
+}
+
+export interface ConvertAgentRoleToManagedAgentRequest {
+  agentRoleId: string;
+  workspaceId?: string;
+}
+
+export interface ConvertAutomationProfileToManagedAgentRequest {
+  automationProfileId: string;
+  workspaceId?: string;
+}
+
+export interface ManagedAgentConversionResult {
+  agent: ManagedAgent;
+  version: ManagedAgentVersion;
+  environment: ManagedEnvironment;
+  routines: ManagedAgentRoutineRecord[];
+  sourceType: "agent_role" | "automation_profile";
+  sourceId: string;
+}
 
 export interface ManagedAgentModelConfig {
   providerType?: LLMProviderType;
@@ -4512,6 +4835,8 @@ export interface ManagedEnvironmentConfig {
   enableComputerUse?: boolean;
   allowedMcpServerIds?: string[];
   skillPackIds?: string[];
+  filePaths?: string[];
+  allowedToolFamilies?: ManagedAgentToolFamily[];
   credentialRefs?: string[];
   managedAccountRefs?: string[];
 }
@@ -4588,6 +4913,184 @@ export interface ManagedSessionEvent {
   timestamp: number;
   type: ManagedSessionEventType;
   payload: Record<string, unknown>;
+}
+
+export type ManagedAgentToolFamily =
+  | "shell"
+  | "browser"
+  | "computer-use"
+  | "files"
+  | "memory"
+  | "documents"
+  | "images"
+  | "search"
+  | "communication";
+
+export type ManagedAgentRuntimeToolSurface = "chatgpt" | "slack";
+
+export type ManagedAgentRuntimeToolApprovalBehavior =
+  | "no_approval"
+  | "auto_approve"
+  | "require_approval"
+  | "workspace_policy";
+
+export interface ManagedAgentRuntimeToolCatalogEntry {
+  name: string;
+  description: string;
+  readOnly: boolean;
+  approvalKind: RuntimeToolApprovalKind;
+  approvalType?: ApprovalType | null;
+  approvalBehavior: ManagedAgentRuntimeToolApprovalBehavior;
+  sideEffectLevel: RuntimeToolSideEffectLevel;
+  resultKind: RuntimeToolResultKind;
+  capabilityTags: RuntimeToolCapabilityTag[];
+  exposure: RuntimeToolMetadata["exposure"];
+  family?: ManagedAgentToolFamily;
+  mcpServerName?: string | null;
+}
+
+export interface ManagedAgentRuntimeToolCatalog {
+  agentId: string;
+  environmentId?: string;
+  chatgpt: ManagedAgentRuntimeToolCatalogEntry[];
+  slack: ManagedAgentRuntimeToolCatalogEntry[];
+}
+
+export interface ManagedAgentFileRef {
+  id: string;
+  path: string;
+  name: string;
+  mimeType?: string;
+  size?: number;
+}
+
+export interface ManagedAgentMemoryConfig {
+  mode: "default" | "focused" | "disabled";
+  sources?: string[];
+}
+
+export interface ManagedAgentChannelTarget {
+  id: string;
+  channelType: "slack";
+  channelId: string;
+  channelName?: string;
+  enabled?: boolean;
+  replyMode?: "default" | "mentions" | "manual";
+  allowedUserIds?: string[];
+  securityMode?: SecurityMode;
+  progressRelayMode?: "minimal" | "curated";
+}
+
+export interface ManagedAgentScheduleConfig {
+  enabled: boolean;
+  mode: "manual" | "routine" | "recurring";
+  label?: string;
+  cadenceMinutes?: number;
+  activeHours?: HeartbeatActiveHours | null;
+}
+
+export interface AudioSummaryConfig {
+  enabled: boolean;
+  style: "public-radio" | "executive-briefing" | "study-guide";
+  title?: string;
+  voice?: string;
+  lastArtifactId?: string;
+}
+
+export interface ImageGenReferencePhoto {
+  id: string;
+  path: string;
+  name: string;
+  mimeType?: string;
+  size?: number;
+}
+
+export interface ImageGenProfile {
+  id: string;
+  name: string;
+  description?: string;
+  isDefault?: boolean;
+  referencePhotos: ImageGenReferencePhoto[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ManagedAgentLegacyMirror {
+  agentRoleId?: string;
+  automationProfileId?: string;
+}
+
+export interface ManagedAgentApprovalPolicy {
+  requireApprovalFor?: string[];
+  autoApproveReadOnly?: boolean;
+  escalationChannel?: string;
+}
+
+export interface ManagedAgentSharingConfig {
+  visibility?: "private" | "team" | "workspace";
+  ownerLabel?: string;
+  sharedWith?: string[];
+}
+
+export interface ManagedAgentDeploymentConfig {
+  surfaces?: Array<"chatgpt" | "slack">;
+}
+
+export interface ManagedAgentStudioConfig {
+  templateId?: string;
+  workflowBrief?: string;
+  instructions?: {
+    operatingNotes?: string;
+  };
+  skills?: string[];
+  apps?: {
+    mcpServers?: string[];
+    connectorIds?: string[];
+    allowedToolFamilies?: ManagedAgentToolFamily[];
+  };
+  fileRefs?: ManagedAgentFileRef[];
+  memoryConfig?: ManagedAgentMemoryConfig;
+  channelTargets?: ManagedAgentChannelTarget[];
+  scheduleConfig?: ManagedAgentScheduleConfig;
+  audioSummaryConfig?: AudioSummaryConfig;
+  imageGenProfileId?: string;
+  approvalPolicy?: ManagedAgentApprovalPolicy;
+  sharing?: ManagedAgentSharingConfig;
+  deployment?: ManagedAgentDeploymentConfig;
+  defaultEnvironmentId?: string;
+  routineIds?: string[];
+  linkedRoutines?: ManagedAgentLinkedRoutineRef[];
+  scheduleSummary?: string;
+  conversion?: ManagedAgentConversionProvenance;
+  legacyMirror?: ManagedAgentLegacyMirror;
+}
+
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  description: string;
+  tagline?: string;
+  icon: string;
+  color: string;
+  category: "operations" | "support" | "planning" | "research" | "engineering";
+  featured?: boolean;
+  systemPrompt: string;
+  executionMode: ManagedAgentExecutionMode;
+  runtimeDefaults?: ManagedAgentRuntimeDefaults;
+  skills?: string[];
+  mcpServers?: string[];
+  teamTemplate?: ManagedAgentTeamTemplate;
+  environmentConfig?: Partial<ManagedEnvironmentConfig>;
+  studio?: Partial<ManagedAgentStudioConfig>;
+}
+
+export interface AudioSummaryResult {
+  sessionId: string;
+  artifact: Artifact;
+  style: AudioSummaryConfig["style"];
+  title: string;
+  script: string;
+  playbackUrl?: string;
 }
 
 // ============ Collaborative Thoughts (Team Multi-Agent Thinking) ============
@@ -6231,6 +6734,31 @@ export const IPC_CHANNELS = {
   GOOGLE_WORKSPACE_OAUTH_START: "googleWorkspace:oauthStart",
   GOOGLE_WORKSPACE_OAUTH_GET_LINK: "googleWorkspace:oauthGetLink",
 
+  // AgentMail Settings
+  AGENTMAIL_GET_SETTINGS: "agentmail:getSettings",
+  AGENTMAIL_SAVE_SETTINGS: "agentmail:saveSettings",
+  AGENTMAIL_TEST_CONNECTION: "agentmail:testConnection",
+  AGENTMAIL_GET_STATUS: "agentmail:getStatus",
+  AGENTMAIL_LIST_PODS: "agentmail:listPods",
+  AGENTMAIL_GET_WORKSPACE_BINDING: "agentmail:getWorkspaceBinding",
+  AGENTMAIL_BIND_WORKSPACE_POD: "agentmail:bindWorkspacePod",
+  AGENTMAIL_CREATE_WORKSPACE_POD: "agentmail:createWorkspacePod",
+  AGENTMAIL_LIST_INBOXES: "agentmail:listInboxes",
+  AGENTMAIL_CREATE_INBOX: "agentmail:createInbox",
+  AGENTMAIL_UPDATE_INBOX: "agentmail:updateInbox",
+  AGENTMAIL_DELETE_INBOX: "agentmail:deleteInbox",
+  AGENTMAIL_LIST_DOMAINS: "agentmail:listDomains",
+  AGENTMAIL_CREATE_DOMAIN: "agentmail:createDomain",
+  AGENTMAIL_VERIFY_DOMAIN: "agentmail:verifyDomain",
+  AGENTMAIL_DELETE_DOMAIN: "agentmail:deleteDomain",
+  AGENTMAIL_LIST_LIST_ENTRIES: "agentmail:listListEntries",
+  AGENTMAIL_CREATE_LIST_ENTRY: "agentmail:createListEntry",
+  AGENTMAIL_DELETE_LIST_ENTRY: "agentmail:deleteListEntry",
+  AGENTMAIL_LIST_INBOX_API_KEYS: "agentmail:listInboxApiKeys",
+  AGENTMAIL_CREATE_INBOX_API_KEY: "agentmail:createInboxApiKey",
+  AGENTMAIL_DELETE_INBOX_API_KEY: "agentmail:deleteInboxApiKey",
+  AGENTMAIL_REFRESH_WORKSPACE: "agentmail:refreshWorkspace",
+
   // Dropbox Settings
   DROPBOX_GET_SETTINGS: "dropbox:getSettings",
   DROPBOX_SAVE_SETTINGS: "dropbox:saveSettings",
@@ -6376,6 +6904,15 @@ export const IPC_CHANNELS = {
   BUILTIN_TOOLS_SAVE_SETTINGS: "builtinTools:saveSettings",
   BUILTIN_TOOLS_GET_CATEGORIES: "builtinTools:getCategories",
 
+  // Chronicle (desktop passive screen context)
+  CHRONICLE_GET_SETTINGS: "chronicle:getSettings",
+  CHRONICLE_SAVE_SETTINGS: "chronicle:saveSettings",
+  CHRONICLE_GET_STATUS: "chronicle:getStatus",
+  CHRONICLE_QUERY_RECENT_CONTEXT: "chronicle:queryRecentContext",
+  CHRONICLE_LIST_OBSERVATIONS: "chronicle:listObservations",
+  CHRONICLE_DELETE_OBSERVATION: "chronicle:deleteObservation",
+  CHRONICLE_CLEAR_OBSERVATIONS: "chronicle:clearObservations",
+
   // Computer use (desktop automation session)
   COMPUTER_USE_GET_STATUS: "computerUse:getStatus",
   COMPUTER_USE_END_SESSION: "computerUse:endSession",
@@ -6445,6 +6982,46 @@ export const IPC_CHANNELS = {
   CONTROL_PLANE_GET_TOKEN: "controlPlane:getToken",
   CONTROL_PLANE_REGENERATE_TOKEN: "controlPlane:regenerateToken",
   CONTROL_PLANE_EVENT: "controlPlane:event",
+
+  // Agents Hub
+  MANAGED_AGENT_LIST_IPC: "managedAgent:listIpc",
+  MANAGED_AGENT_GET_IPC: "managedAgent:getIpc",
+  MANAGED_AGENT_CREATE_IPC: "managedAgent:createIpc",
+  MANAGED_AGENT_UPDATE_IPC: "managedAgent:updateIpc",
+  MANAGED_AGENT_ARCHIVE_IPC: "managedAgent:archiveIpc",
+  MANAGED_AGENT_PUBLISH_IPC: "managedAgent:publishIpc",
+  MANAGED_AGENT_SUSPEND_IPC: "managedAgent:suspendIpc",
+  MANAGED_AGENT_RUNTIME_TOOL_CATALOG_IPC: "managedAgent:runtimeToolCatalogIpc",
+  MANAGED_AGENT_ROUTINE_LIST_IPC: "managedAgent:routineListIpc",
+  MANAGED_AGENT_ROUTINE_CREATE_IPC: "managedAgent:routineCreateIpc",
+  MANAGED_AGENT_ROUTINE_UPDATE_IPC: "managedAgent:routineUpdateIpc",
+  MANAGED_AGENT_ROUTINE_DELETE_IPC: "managedAgent:routineDeleteIpc",
+  MANAGED_AGENT_INSIGHTS_GET_IPC: "managedAgent:insightsGetIpc",
+  MANAGED_AGENT_AUDIT_LIST_IPC: "managedAgent:auditListIpc",
+  MANAGED_AGENT_SLACK_HEALTH_GET_IPC: "managedAgent:slackHealthGetIpc",
+  MANAGED_AGENT_CONVERT_ROLE_IPC: "managedAgent:convertRoleIpc",
+  MANAGED_AGENT_CONVERT_AUTOMATION_IPC: "managedAgent:convertAutomationIpc",
+  MANAGED_ENVIRONMENT_LIST_IPC: "managedEnvironment:listIpc",
+  MANAGED_ENVIRONMENT_GET_IPC: "managedEnvironment:getIpc",
+  MANAGED_ENVIRONMENT_CREATE_IPC: "managedEnvironment:createIpc",
+  MANAGED_ENVIRONMENT_UPDATE_IPC: "managedEnvironment:updateIpc",
+  MANAGED_ENVIRONMENT_ARCHIVE_IPC: "managedEnvironment:archiveIpc",
+  MANAGED_SESSION_LIST_IPC: "managedSession:listIpc",
+  MANAGED_SESSION_GET_IPC: "managedSession:getIpc",
+  MANAGED_SESSION_CREATE_IPC: "managedSession:createIpc",
+  MANAGED_SESSION_RESUME_IPC: "managedSession:resumeIpc",
+  MANAGED_SESSION_CANCEL_IPC: "managedSession:cancelIpc",
+  MANAGED_SESSION_EVENTS_LIST_IPC: "managedSession:eventsListIpc",
+  MANAGED_SESSION_WORKPAPER_GET_IPC: "managedSession:workpaperGetIpc",
+  MANAGED_SESSION_GENERATE_AUDIO_SUMMARY: "managedSession:generateAudioSummary",
+  AGENT_WORKSPACE_MEMBERSHIP_LIST_IPC: "agentWorkspaceMembership:listIpc",
+  AGENT_WORKSPACE_MEMBERSHIP_UPDATE_IPC: "agentWorkspaceMembership:updateIpc",
+  AGENT_WORKSPACE_PERMISSION_SNAPSHOT_IPC: "agentWorkspacePermission:snapshotIpc",
+  AGENT_TEMPLATE_LIST: "agentTemplate:list",
+  IMAGE_GEN_PROFILE_LIST: "imageGenProfile:list",
+  IMAGE_GEN_PROFILE_CREATE: "imageGenProfile:create",
+  IMAGE_GEN_PROFILE_UPDATE: "imageGenProfile:update",
+  IMAGE_GEN_PROFILE_DELETE: "imageGenProfile:delete",
 
   // Tailscale Integration
   TAILSCALE_GET_STATUS: "tailscale:getStatus",
@@ -6666,6 +7243,16 @@ export const IPC_CHANNELS = {
   TRIGGER_REMOVE: "trigger:remove",
   TRIGGER_HISTORY: "trigger:history",
 
+  // Routines
+  ROUTINE_LIST: "routine:list",
+  ROUTINE_GET: "routine:get",
+  ROUTINE_LIST_RUNS: "routine:listRuns",
+  ROUTINE_CREATE: "routine:create",
+  ROUTINE_UPDATE: "routine:update",
+  ROUTINE_REMOVE: "routine:remove",
+  ROUTINE_RUN_NOW: "routine:runNow",
+  ROUTINE_REGENERATE_API_TOKEN: "routine:regenerateApiToken",
+
   // Mailbox Automations
   MAILBOX_AUTOMATION_LIST: "mailboxAutomation:list",
   MAILBOX_AUTOMATION_LIST_THREAD: "mailboxAutomation:listThread",
@@ -6675,6 +7262,10 @@ export const IPC_CHANNELS = {
   MAILBOX_AUTOMATION_CREATE_SCHEDULE: "mailboxAutomation:createSchedule",
   MAILBOX_AUTOMATION_UPDATE_SCHEDULE: "mailboxAutomation:updateSchedule",
   MAILBOX_AUTOMATION_DELETE_SCHEDULE: "mailboxAutomation:deleteSchedule",
+  MAILBOX_AUTOMATION_CREATE_FORWARD: "mailboxAutomation:createForward",
+  MAILBOX_AUTOMATION_UPDATE_FORWARD: "mailboxAutomation:updateForward",
+  MAILBOX_AUTOMATION_DELETE_FORWARD: "mailboxAutomation:deleteForward",
+  MAILBOX_AUTOMATION_RUN_FORWARD: "mailboxAutomation:runForward",
 
   // Daily Briefing (extended)
   BRIEFING_GET_LATEST: "briefing:getLatest",
@@ -6931,8 +7522,12 @@ export interface LLMSettingsData {
   } & ProviderRoutingSettings;
   /** Text-to-image model selection. Default tried first; backup used on failure. */
   imageGeneration?: {
+    /** Primary provider route. Leave unset for automatic provider selection. */
+    defaultProvider?: "openai" | "openai-codex" | "azure" | "openrouter" | "gemini";
     /** Primary model: gpt-image-1.5 (OpenAI/Azure/OpenRouter) or nano-banana-2 (Gemini/Vertex) */
     defaultModel?: "gpt-image-1.5" | "nano-banana-2";
+    /** Fallback provider route. Leave unset for automatic provider fallback. */
+    backupProvider?: "openai" | "openai-codex" | "azure" | "openrouter" | "gemini";
     /** Fallback model when default fails */
     backupModel?: "gpt-image-1.5" | "nano-banana-2";
   };
@@ -7488,6 +8083,113 @@ export interface GoogleWorkspaceConnectionTestResult {
   name?: string;
   userId?: string;
   email?: string;
+}
+
+export interface AgentMailSettingsData {
+  enabled: boolean;
+  apiKey?: string;
+  baseUrl?: string;
+  websocketUrl?: string;
+  timeoutMs?: number;
+  realtimeEnabled?: boolean;
+}
+
+export interface AgentMailConnectionTestResult {
+  success: boolean;
+  error?: string;
+  podCount?: number;
+  inboxCount?: number;
+  baseUrl?: string;
+}
+
+export type AgentMailRealtimeConnectionState =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  | "error";
+
+export interface AgentMailStatus {
+  configured: boolean;
+  connected: boolean;
+  realtimeConnected: boolean;
+  connectionState: AgentMailRealtimeConnectionState;
+  baseUrl?: string;
+  websocketUrl?: string;
+  podCount?: number;
+  inboxCount?: number;
+  domainCount?: number;
+  lastEventAt?: number;
+  error?: string;
+}
+
+export interface AgentMailPod {
+  podId: string;
+  name?: string;
+  clientId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface AgentMailWorkspaceBinding {
+  workspaceId: string;
+  podId: string;
+  podName?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentMailInbox {
+  podId: string;
+  inboxId: string;
+  email?: string;
+  displayName?: string;
+  clientId?: string;
+  workspaceId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface AgentMailDomainRecord {
+  type: string;
+  name: string;
+  value: string;
+  status?: string;
+  priority?: number;
+}
+
+export interface AgentMailDomain {
+  domainId: string;
+  domain?: string;
+  status?: string;
+  feedbackEnabled: boolean;
+  records: AgentMailDomainRecord[];
+  podId: string;
+  clientId?: string;
+  workspaceId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface AgentMailListEntry {
+  direction: "send" | "receive" | "reply";
+  listType: "allow" | "block";
+  entry: string;
+  entryType?: "email" | "domain";
+  reason?: string;
+  organizationId?: string;
+  podId?: string;
+  inboxId?: string;
+  createdAt?: number;
+}
+
+export interface AgentMailApiKeySummary {
+  apiKeyId: string;
+  prefix: string;
+  name?: string;
+  podId?: string;
+  inboxId?: string;
+  createdAt?: number;
+  permissions?: Record<string, boolean>;
 }
 
 // Dropbox integration settings

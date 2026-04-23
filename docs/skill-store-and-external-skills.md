@@ -16,7 +16,7 @@ There are two different concepts in the product:
    These are individual skills installed into the managed skills directory and surfaced in the Skills settings area.
    This is the capability documented here.
 
-Bundled skills such as [`manim-video`](skills/manim-video.md) do not need installation from the Skill Store. They ship with the app and are available immediately.
+Bundled skills such as [`manim-video`](skills/manim-video.md) and [`kami`](skills/kami.md) do not need installation from the Skill Store. They ship with the app and are available immediately.
 
 ## Supported Skill Sources
 
@@ -69,6 +69,8 @@ Repository support works when the repo contains either:
 
 This is the main generic path for third-party skill stores that publish skills as Git repositories.
 
+For multi-file bundles such as the upstream [Kami](https://github.com/tw93/Kami) repo, prefer the repository URL over a raw `SKILL.md` URL so bundled `scripts/`, `references/`, and asset files are imported together.
+
 ### 4. Raw JSON Skill Manifests
 
 CoWork OS can import a raw skill manifest from a direct URL when the URL serves JSON.
@@ -83,6 +85,8 @@ This is useful when:
 - a skill is published as documentation-first bundle content
 - the store exposes a raw `SKILL.md`
 - you want to import a skill bundle without cloning a repository manually
+
+This path is weaker for multi-file bundles because it stages the markdown entry point only. If a skill depends on support files, import the repository URL instead.
 
 ## “Other External Skill Stores”
 
@@ -238,6 +242,7 @@ Current limits:
 
 This gives CoWork OS an important ecosystem advantage:
 - users can start with bundled skills
+- bundled examples now include workflows such as `llm-wiki`, `kami`, and `taste-skill`
 - adopt curated CoWork registry skills
 - pull in popular ClawHub skills directly from the app
 - bring skills from other ecosystems without waiting for a custom marketplace integration

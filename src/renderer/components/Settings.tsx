@@ -99,6 +99,7 @@ import { SkillHubBrowser } from "./SkillHubBrowser";
 import { MCPSettings } from "./MCPSettings";
 import { ConnectorsSettings } from "./ConnectorsSettings";
 import { BuiltinToolsSettings } from "./BuiltinToolsSettings";
+import { ChronicleSettingsCard } from "./ChronicleSettings";
 import { ComputerUseSettings } from "./ComputerUseSettings";
 import { TraySettings } from "./TraySettings";
 import { ScheduledTasksSettings } from "./ScheduledTasksSettings";
@@ -124,6 +125,7 @@ import { SubconsciousSettingsPanel } from "./SubconsciousSettingsPanel";
 import { CompaniesPanel } from "./CompaniesPanel";
 import { HealthPanel } from "./HealthPanel";
 import { CouncilSettings } from "./CouncilSettings";
+import { RoutineSettingsPanel } from "./RoutineSettingsPanel";
 import { ContactIdentitySettings } from "./ContactIdentitySettings";
 import { TaskTraceDebuggerPanel } from "./TaskTraceDebuggerPanel";
 import {
@@ -219,6 +221,7 @@ interface SettingsProps {
   onCreateTask?: (title: string, prompt: string) => void;
   onOpenTask?: (taskId: string) => void;
   onNavigateToMissionControl?: (companyId: string) => void;
+  onNavigateToAgents?: () => void;
 }
 
 interface ModelOption {
@@ -507,6 +510,7 @@ type SidebarSearchTarget = {
   secondaryChannel?: SecondaryChannel;
   aiModelsSubTab?: "llm" | "video" | "search";
   automationsSubTab?:
+    | "routines"
     | "queue"
     | "subconscious"
     | "scheduled"
@@ -821,6 +825,10 @@ const sidebarSearchEntries: Partial<Record<SettingsTab, SidebarSearchEntry[]>> =
     memory: [{ terms: ["memory", "memories", "memory hub", "knowledge"] }],
     automations: [
       {
+        terms: ["routines", "routine", "automation routines"],
+        target: { tab: "automations", automationsSubTab: "routines" },
+      },
+      {
         terms: ["queue", "task queue", "queued tasks"],
         target: { tab: "automations", automationsSubTab: "queue" },
       },
@@ -965,6 +973,7 @@ export function Settings({
   onCreateTask,
   onOpenTask,
   onNavigateToMissionControl,
+  onNavigateToAgents,
 }: SettingsProps) {
   const normalizedInitialTab: SettingsTab =
     initialTab === "tray" ||
@@ -1004,9 +1013,10 @@ export function Settings({
     "llm" | "video" | "search"
   >(initialTab === "search" ? "search" : "llm");
   const [activeAutomationsSubTab, setActiveAutomationsSubTab] = useState<
-    "queue" | "subconscious" | "scheduled" | "hooks" | "triggers" | "council"
+    "routines" | "queue" | "subconscious" | "scheduled" | "hooks" | "triggers" | "council"
   >(
     [
+      "routines",
       "queue",
       "subconscious",
       "scheduled",
@@ -1015,13 +1025,14 @@ export function Settings({
       "council",
     ].includes(initialTab as string)
       ? (initialTab as
+          | "routines"
           | "queue"
           | "subconscious"
           | "scheduled"
           | "hooks"
           | "triggers"
           | "council")
-      : "queue",
+      : "routines",
   );
   const [activeIntegrationsSubTab, setActiveIntegrationsSubTab] = useState<
     "git" | "connectors" | "identity" | "infrastructure"
@@ -1197,10 +1208,16 @@ export function Settings({
   const [openaiOAuthConnected, setOpenaiOAuthConnected] = useState(false);
   const [openaiOAuthLoading, setOpenaiOAuthLoading] = useState(false);
 
+  type ImageGenProvider = "openai" | "openai-codex" | "azure" | "openrouter" | "gemini";
+
   // Image generation (text-to-image) state
+  const [imageGenDefaultProvider, setImageGenDefaultProvider] = useState<ImageGenProvider | "">(
+    "",
+  );
   const [imageGenDefaultModel, setImageGenDefaultModel] = useState<
     "gpt-image-1.5" | "nano-banana-2" | ""
   >("");
+  const [imageGenBackupProvider, setImageGenBackupProvider] = useState<ImageGenProvider | "">("");
   const [imageGenBackupModel, setImageGenBackupModel] = useState<
     "gpt-image-1.5" | "nano-banana-2" | ""
   >("");
@@ -2238,10 +2255,20 @@ export function Settings({
       }
 
       // Image generation (text-to-image) settings
+      if (loadedSettings.imageGeneration?.defaultProvider) {
+        setImageGenDefaultProvider(loadedSettings.imageGeneration.defaultProvider);
+      } else {
+        setImageGenDefaultProvider("");
+      }
       if (loadedSettings.imageGeneration?.defaultModel) {
         setImageGenDefaultModel(loadedSettings.imageGeneration.defaultModel);
       } else {
         setImageGenDefaultModel("");
+      }
+      if (loadedSettings.imageGeneration?.backupProvider) {
+        setImageGenBackupProvider(loadedSettings.imageGeneration.backupProvider);
+      } else {
+        setImageGenBackupProvider("");
       }
       if (loadedSettings.imageGeneration?.backupModel) {
         setImageGenBackupModel(loadedSettings.imageGeneration.backupModel);
@@ -3243,9 +3270,14 @@ export function Settings({
           ...failoverFor("openai-compatible"),
         },
         imageGeneration:
-          imageGenDefaultModel || imageGenBackupModel
+          imageGenDefaultProvider ||
+          imageGenDefaultModel ||
+          imageGenBackupProvider ||
+          imageGenBackupModel
             ? {
+                defaultProvider: imageGenDefaultProvider || undefined,
                 defaultModel: imageGenDefaultModel || undefined,
+                backupProvider: imageGenBackupProvider || undefined,
                 backupModel: imageGenBackupModel || undefined,
               }
             : undefined,
@@ -6352,6 +6384,23 @@ export function Settings({
             try the default first, then fall back to the backup if it fails.
           </p>
           <div className="settings-subsection" style={{ marginTop: "8px" }}>
+            <label className="settings-label">Default provider</label>
+            <select
+              className="settings-select"
+              value={imageGenDefaultProvider}
+              onChange={(e) =>
+                setImageGenDefaultProvider((e.target.value || "") as ImageGenProvider | "")
+              }
+            >
+              <option value="">Auto (best configured)</option>
+              <option value="azure">Azure OpenAI</option>
+              <option value="openai">OpenAI API key</option>
+              <option value="openai-codex">OpenAI OAuth</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </div>
+          <div className="settings-subsection" style={{ marginTop: "8px" }}>
             <label className="settings-label">Default model</label>
             <select
               className="settings-select"
@@ -6367,11 +6416,28 @@ export function Settings({
             >
               <option value="">Auto (best configured)</option>
               <option value="gpt-image-1.5">
-                gpt-image-1.5 (OpenAI / Azure / OpenRouter)
+                gpt-image-1.5 (OpenAI / OpenAI OAuth / Azure / OpenRouter)
               </option>
               <option value="nano-banana-2">
                 nano-banana-2 (Gemini 3.1 Flash Image)
               </option>
+            </select>
+          </div>
+          <div className="settings-subsection" style={{ marginTop: "8px" }}>
+            <label className="settings-label">Backup provider</label>
+            <select
+              className="settings-select"
+              value={imageGenBackupProvider}
+              onChange={(e) =>
+                setImageGenBackupProvider((e.target.value || "") as ImageGenProvider | "")
+              }
+            >
+              <option value="">Auto fallback</option>
+              <option value="azure">Azure OpenAI</option>
+              <option value="openai">OpenAI API key</option>
+              <option value="openai-codex">OpenAI OAuth</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="gemini">Gemini</option>
             </select>
           </div>
           <div className="settings-subsection" style={{ marginTop: "8px" }}>
@@ -6390,7 +6456,7 @@ export function Settings({
             >
               <option value="">None</option>
               <option value="gpt-image-1.5">
-                gpt-image-1.5 (OpenAI / Azure / OpenRouter)
+                gpt-image-1.5 (OpenAI / OpenAI OAuth / Azure / OpenRouter)
               </option>
               <option value="nano-banana-2">
                 nano-banana-2 (Gemini 3.1 Flash Image)
@@ -6609,7 +6675,10 @@ export function Settings({
                 }}
               />
             ) : activeTab === "digitaltwins" ? (
-              <DigitalTwinsPanel initialCompanyId={digitalTwinsCompanyId} />
+              <DigitalTwinsPanel
+                initialCompanyId={digitalTwinsCompanyId}
+                onOpenAgents={onNavigateToAgents}
+              />
             ) : activeTab === "health" ? (
               <HealthPanel compact onCreateTask={onCreateTask} />
             ) : activeTab === "system" ? (
@@ -6751,13 +6820,14 @@ export function Settings({
                 <div className="more-channels-header">
                   <h2>Automations</h2>
                   <p className="settings-description">
-                    Task queue, R&D councils, subconscious reflection, scheduled tasks,
-                    webhooks, and event triggers
+                    Routines first, then queueing, core reflection, and the lower-level automation
+                    engines that routines compile into
                   </p>
                 </div>
                 <div className="more-channels-tabs">
                   {(
                     [
+                      "routines",
                       "queue",
                       "council",
                       "subconscious",
@@ -6771,6 +6841,7 @@ export function Settings({
                       className={`more-channels-tab ${activeAutomationsSubTab === key ? "active" : ""}`}
                       onClick={() => setActiveAutomationsSubTab(key)}
                     >
+                      {key === "routines" && <Box {...S} />}
                       {key === "queue" && <ListOrdered {...S} />}
                       {key === "council" && <Users {...S} />}
                       {key === "subconscious" && <Sparkles {...S} />}
@@ -6778,6 +6849,7 @@ export function Settings({
                       {key === "hooks" && <Link {...S} />}
                       {key === "triggers" && <Zap {...S} />}
                       <span>
+                        {key === "routines" && "Routines"}
                         {key === "queue" && "Task Queue"}
                         {key === "council" && "R&D Council"}
                         {key === "subconscious" && "Subconscious"}
@@ -6789,6 +6861,7 @@ export function Settings({
                   ))}
                 </div>
                 <div className="more-channels-content">
+                  {activeAutomationsSubTab === "routines" && <RoutineSettingsPanel />}
                   {activeAutomationsSubTab === "queue" && <QueueSettings />}
                   {activeAutomationsSubTab === "council" && (
                     <CouncilSettings
@@ -6898,6 +6971,7 @@ export function Settings({
             ) : activeTab === "tools" ? (
               <div className="settings-tools-stack">
                 <BuiltinToolsSettings />
+                <ChronicleSettingsCard />
                 <ComputerUseSettings />
               </div>
             ) : activeTab === "access" ? (

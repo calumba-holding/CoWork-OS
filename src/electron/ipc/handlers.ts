@@ -23,11 +23,22 @@ import {
   shouldRunImageOcr,
 } from "./image-viewer-ocr";
 import { extractPptxContentFromFile } from "../utils/pptx-extractor";
+import {
+  PptxPreviewService,
+  type PptxPresentationPreview,
+} from "../utils/PptxPreviewService";
 import { extractPdfReviewData } from "../utils/pdf-review";
 import ExcelJS from "exceljs";
 import { createMediaPlaybackUrl } from "../media";
 import { DocumentEditorSessionService } from "../documents/DocumentEditorSessionService";
 import { MailboxService } from "../mailbox/MailboxService";
+import { AgentMailAdminService } from "../agentmail/AgentMailAdminService";
+import { AgentMailRealtimeService } from "../agentmail/AgentMailRealtimeService";
+import { ManagedSessionService } from "../managed/ManagedSessionService";
+import { AgentTemplateService } from "../managed/AgentTemplateService";
+import { ImageGenProfileService } from "../managed/ImageGenProfileService";
+import type { RoutineService } from "../routines/service";
+import type { RoutineCreate, RoutineTrigger } from "../routines/types";
 
 import { DatabaseManager } from "../database/schema";
 import {
@@ -59,6 +70,8 @@ import { OnboardingProfileService } from "../onboarding/OnboardingProfileService
 import type { ApplyOnboardingProfileRequest } from "../../shared/onboarding";
 import {
   IPC_CHANNELS,
+  AgentMailSettingsData,
+  AgentMailListEntry,
   LLMSettingsData,
   AddChannelRequest,
   UpdateChannelRequest as _UpdateChannelRequest,
@@ -90,6 +103,9 @@ import {
   TaskLearningProgress,
   UnifiedRecallQuery,
   UnifiedRecallResponse,
+  ChronicleSettings,
+  ChronicleCaptureStatus,
+  ChronicleResolvedContext,
   LLMRoutingRuntimeState,
   ShellSessionInfo,
   ShellSessionScope,
@@ -145,6 +161,7 @@ import {
   BoxSettingsSchema,
   OneDriveSettingsSchema,
   GoogleWorkspaceSettingsSchema,
+  AgentMailSettingsSchema,
   DropboxSettingsSchema,
   SharePointSettingsSchema,
   PermissionSettingsSchema,
@@ -203,6 +220,7 @@ import {
   startGoogleWorkspaceOAuthGetLink,
 } from "../utils/google-workspace-oauth";
 import { setupTaskTraceHandlers } from "./task-trace-handlers";
+import { buildVideoPreviewTranscodeArgs } from "./video-preview-transcode";
 
 import { XSettingsManager } from "../settings/x-manager";
 import { testXConnection, checkBirdInstalled } from "../utils/x-cli";
@@ -220,11 +238,14 @@ import type { MCPSettings, MCPServerConfig } from "../mcp/types";
 import { MCPHostServer } from "../mcp/host/MCPHostServer";
 import { CoWorkHostProvider } from "../mcp/host/CoWorkHostProvider";
 import { BuiltinToolsSettingsManager } from "../agent/tools/builtin-settings";
-import { ComputerUseSessionManager } from "../computer-use/session-manager";
 import {
-  checkAccessibilityTrusted,
-  getMacScreenCaptureAccessStatus,
-} from "../computer-use/computer-use-permissions";
+  ChronicleCaptureService,
+  ChronicleMemoryService,
+  ChronicleObservationRepository,
+  ChronicleSettingsManager,
+} from "../chronicle";
+import { ComputerUseSessionManager } from "../computer-use/session-manager";
+import { ComputerUseHelperRuntime } from "../computer-use/helper-runtime";
 import {
   MCPServerConfigSchema,
   MCPServerUpdateSchema,
@@ -412,26 +433,7 @@ const generateTranscodedVideoPreviewDataUrl = async (
       try {
         await execFileAsync(
           "ffmpeg",
-          [
-            "-y",
-            "-i",
-            resolvedPath,
-            "-c:v",
-            "libvpx",
-            "-deadline",
-            "realtime",
-            "-cpu-used",
-            "5",
-            "-crf",
-            "24",
-            "-b:v",
-            "1M",
-            "-c:a",
-            "libopus",
-            "-b:a",
-            "96k",
-            tempOutputPath,
-          ],
+          buildVideoPreviewTranscodeArgs(resolvedPath, tempOutputPath),
           {
             timeout: VIDEO_PREVIEW_FFMPEG_TIMEOUT_MS,
             maxBuffer: 8 * 1024 * 1024,
@@ -990,7 +992,10 @@ export async function setupIpcHandlers(
   dbManager: DatabaseManager,
   agentDaemon: AgentDaemon,
   gateway?: ChannelGateway,
-  options?: { getMainWindow?: () => BrowserWindow | null },
+  options?: {
+    getMainWindow?: () => BrowserWindow | null;
+    getRoutineService?: () => RoutineService | null;
+  },
 ) {
   if (options?.getMainWindow) mainWindowGetter = options.getMainWindow;
 
@@ -1034,7 +1039,16 @@ export async function setupIpcHandlers(
     agentDaemon,
   );
   const mailboxService = new MailboxService(db);
+  const agentMailRealtimeService = new AgentMailRealtimeService(db, mailboxService);
+  const agentMailAdminService = new AgentMailAdminService(
+    db,
+    () => agentMailRealtimeService.getRuntimeStatus(),
+  );
+  agentMailRealtimeService.start();
   const contextPolicyManager = new ContextPolicyManager(db);
+  const managedSessionService = new ManagedSessionService(db, agentDaemon);
+  const agentTemplateService = new AgentTemplateService();
+  const imageGenProfileService = new ImageGenProfileService();
   const emitTaskStatusEvent = (
     taskId: string,
     status: Task["status"],
@@ -1791,6 +1805,7 @@ export async function setupIpcHandlers(
         | "text"
         | "docx"
         | "pdf"
+        | "latex"
         | "image"
         | "video"
         | "pptx"
@@ -1854,6 +1869,7 @@ export async function setupIpcHandlers(
 
         if (ext === ".md" || ext === ".markdown") return "markdown";
         if (ext === ".html" || ext === ".htm") return "html";
+        if (ext === ".tex") return "latex";
         if (ext === ".docx") return "docx";
         if (ext === ".pdf") return "pdf";
         if (ext === ".pptx") return "pptx";
@@ -1935,11 +1951,13 @@ export async function setupIpcHandlers(
         let pdfThumbnailDataUrl: string | undefined;
         let pdfDataBase64: string | undefined;
         let pdfReviewSummary: PdfReviewSummary | undefined;
+        let presentationPreview: PptxPresentationPreview | undefined;
         let playbackUrl: string | undefined;
         let mimeType: string | undefined;
 
         switch (fileType) {
           case "markdown":
+          case "latex":
           case "code":
           case "text": {
             content = await fs.readFile(resolvedPath, "utf-8");
@@ -2048,9 +2066,14 @@ export async function setupIpcHandlers(
             break;
           }
 
-          case "pptx":
+          case "pptx": {
             content = await extractPptxContentFromFile(resolvedPath);
+            presentationPreview = await new PptxPreviewService().buildPreview({
+              filePath: resolvedPath,
+              workspaceRoot: workspacePath,
+            });
             break;
+          }
 
           case "xlsx": {
             const workbook = new ExcelJS.Workbook();
@@ -2110,6 +2133,7 @@ export async function setupIpcHandlers(
             pdfThumbnailDataUrl,
             pdfDataBase64,
             pdfReviewSummary,
+            presentationPreview,
             playbackUrl,
             mimeType,
           },
@@ -2562,6 +2586,41 @@ export async function setupIpcHandlers(
     async (event, id: string) => {
       assertTrustedMailboxSender(event);
       return mailboxService.deleteMailboxSchedule(id);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_AUTOMATION_CREATE_FORWARD,
+    async (event, data?: Any) => {
+      assertTrustedMailboxSender(event);
+      return mailboxService.createMailboxForward(data?.recipe || data);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_AUTOMATION_UPDATE_FORWARD,
+    async (event, data?: Any) => {
+      assertTrustedMailboxSender(event);
+      if (typeof data?.id !== "string") {
+        throw new Error("Missing automation id for mailbox forward update");
+      }
+      return mailboxService.updateMailboxForward(data.id, data.patch || {});
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_AUTOMATION_DELETE_FORWARD,
+    async (event, id: string) => {
+      assertTrustedMailboxSender(event);
+      return mailboxService.deleteMailboxForward(id);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_AUTOMATION_RUN_FORWARD,
+    async (event, id: string) => {
+      assertTrustedMailboxSender(event);
+      return mailboxService.runMailboxForward(id);
     },
   );
 
@@ -3448,12 +3507,14 @@ export async function setupIpcHandlers(
 
   ipcMain.handle(
     IPC_CHANNELS.TASK_LIST,
-    async (_, opts?: { limit?: number; offset?: number }) => {
+    async (_, opts?: { limit?: number; offset?: number; prioritizeSidebar?: boolean }) => {
       const limit =
         typeof opts?.limit === "number" && opts.limit > 0 ? opts.limit : 100;
       const offset =
         typeof opts?.offset === "number" && opts.offset >= 0 ? opts.offset : 0;
-      return taskRepo.findAll(limit, offset);
+      return taskRepo.findAll(limit, offset, {
+        prioritizeSidebar: opts?.prioritizeSidebar === true,
+      });
     },
   );
 
@@ -3981,6 +4042,325 @@ export async function setupIpcHandlers(
   ipcMain.handle(IPC_CHANNELS.ARTIFACT_PREVIEW, async (_, _id: string) => {
     // TODO: Implement artifact preview
     return null;
+  });
+
+  // Agents Hub handlers
+  const getRoutineService = () => options?.getRoutineService?.() || null;
+  const toManagedRoutinePayload = (
+    input: ReturnType<ManagedSessionService["buildManagedAgentRoutineDefinition"]>,
+    agentId: string,
+  ): RoutineCreate => {
+    const triggerId = input.trigger.id || `managed:${input.trigger.type}:${Date.now()}`;
+    let trigger: RoutineTrigger;
+    switch (input.trigger.type) {
+      case "schedule":
+        trigger = {
+          id: triggerId,
+          type: "schedule",
+          enabled: input.trigger.enabled !== false,
+          schedule: {
+            kind: "every",
+            everyMs: Math.max(15, input.trigger.cadenceMinutes || 60) * 60_000,
+          },
+        };
+        break;
+      case "api":
+        trigger = {
+          id: triggerId,
+          type: "api",
+          enabled: input.trigger.enabled !== false,
+          path: input.trigger.path || `/agents/${agentId}`,
+        };
+        break;
+      case "channel_event":
+        trigger = {
+          id: triggerId,
+          type: "channel_event",
+          enabled: input.trigger.enabled !== false,
+          channelType: input.trigger.channelType,
+          chatId: input.trigger.chatId,
+          textContains: input.trigger.textContains,
+          senderContains: input.trigger.senderContains,
+        };
+        break;
+      case "mailbox_event":
+        trigger = {
+          id: triggerId,
+          type: "mailbox_event",
+          enabled: input.trigger.enabled !== false,
+          eventType: input.trigger.eventType,
+          subjectContains: input.trigger.subjectContains,
+          provider: input.trigger.provider,
+          labelContains: input.trigger.labelContains,
+        };
+        break;
+      case "github_event":
+        trigger = {
+          id: triggerId,
+          type: "github_event",
+          enabled: input.trigger.enabled !== false,
+          eventName: input.trigger.eventName,
+          repository: input.trigger.repository,
+          action: input.trigger.action,
+          ref: input.trigger.ref,
+        };
+        break;
+      case "connector_event":
+        trigger = {
+          id: triggerId,
+          type: "connector_event",
+          enabled: input.trigger.enabled !== false,
+          connectorId: input.trigger.connectorId || "connector",
+          changeType: input.trigger.changeType,
+          resourceUriContains: input.trigger.resourceUriContains,
+        };
+        break;
+      case "manual":
+      default:
+        trigger = {
+          id: triggerId,
+          type: "manual",
+          enabled: input.trigger.enabled !== false,
+        };
+        break;
+    }
+    return {
+      name: input.name || "Managed agent routine",
+      description: input.description,
+      enabled: input.enabled ?? true,
+      workspaceId: input.workspaceId,
+      instructions: input.instructions,
+      executionTarget: {
+        kind: "managed_environment" as const,
+        managedEnvironmentId: input.environmentId,
+      },
+      contextBindings: {
+        metadata: {
+          managedAgentId: agentId,
+        },
+      },
+      triggers: [trigger],
+      outputs: [{ kind: "task_only" }],
+      approvalPolicy: { mode: "inherit" },
+      connectorPolicy: { mode: "prefer", connectorIds: [] },
+    };
+  };
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_LIST_IPC, async (_, params?: Any) => {
+    return managedSessionService.listAgents(params);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_GET_IPC, async (_, agentId: string) => {
+    return managedSessionService.getAgent(agentId) || null;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_RUNTIME_TOOL_CATALOG_IPC, async (_, agentId: string) => {
+    return managedSessionService.getRuntimeToolCatalog(agentId);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_CREATE_IPC, async (_, request: Any) => {
+    return managedSessionService.createAgent(request);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_UPDATE_IPC, async (_, request: Any) => {
+    if (!request?.agentId) throw new Error("agentId is required");
+    return managedSessionService.updateAgent(request.agentId, request);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_ARCHIVE_IPC, async (_, agentId: string) => {
+    return managedSessionService.archiveAgent(agentId) || null;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_PUBLISH_IPC, async (_, agentId: string) => {
+    return managedSessionService.publishAgent(agentId) || null;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_SUSPEND_IPC, async (_, agentId: string) => {
+    return managedSessionService.suspendAgent(agentId) || null;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_ROUTINE_LIST_IPC, async (_, agentId: string) => {
+    return managedSessionService.listManagedAgentRoutines(agentId);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_ROUTINE_CREATE_IPC, async (_, request: Any) => {
+    const routineService = getRoutineService();
+    if (!routineService) throw new Error("Routine service is not available");
+    const prepared = managedSessionService.buildManagedAgentRoutineDefinition(request);
+    const routine = await routineService.create(
+      toManagedRoutinePayload(prepared, request.agentId),
+    );
+    managedSessionService.syncManagedAgentRoutineRefs(request.agentId);
+    const created = managedSessionService
+      .listManagedAgentRoutines(request.agentId)
+      .find((entry) => entry.id === routine.id);
+    if (!created) throw new Error("Failed to create managed agent routine");
+    const workspaceId = managedSessionService.getEnvironment(prepared.environmentId)?.config.workspaceId;
+    if (workspaceId) {
+      (managedSessionService as Any).appendAudit?.({
+        agentId: request.agentId,
+        workspaceId,
+        action: "routine_created",
+        summary: `Created routine ${created.name}`,
+        metadata: { routineId: created.id, triggerType: created.trigger.type },
+      });
+    }
+    return created;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_ROUTINE_UPDATE_IPC, async (_, request: Any) => {
+    const routineService = getRoutineService();
+    if (!routineService) throw new Error("Routine service is not available");
+    const existing = routineService.get(request.routineId);
+    if (!existing) throw new Error(`Routine not found: ${request.routineId}`);
+    const prepared = managedSessionService.buildManagedAgentRoutineDefinition(request);
+    await routineService.update(request.routineId, toManagedRoutinePayload(prepared, request.agentId));
+    managedSessionService.syncManagedAgentRoutineRefs(request.agentId);
+    const updated = managedSessionService
+      .listManagedAgentRoutines(request.agentId)
+      .find((entry) => entry.id === request.routineId);
+    if (!updated) throw new Error("Failed to update managed agent routine");
+    return updated;
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.MANAGED_AGENT_ROUTINE_DELETE_IPC,
+    async (_, payload: { agentId: string; routineId: string }) => {
+      const routineService = getRoutineService();
+      if (!routineService) throw new Error("Routine service is not available");
+      const removed = await routineService.remove(payload.routineId);
+      managedSessionService.syncManagedAgentRoutineRefs(payload.agentId);
+      return removed;
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_INSIGHTS_GET_IPC, async (_, agentId: string) => {
+    return managedSessionService.getAgentInsights(agentId);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.MANAGED_AGENT_AUDIT_LIST_IPC,
+    async (_, payload: { agentId: string; limit?: number }) => {
+      return managedSessionService.listAuditEntries(payload.agentId, payload.limit);
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_SLACK_HEALTH_GET_IPC, async (_, agentId: string) => {
+    return managedSessionService.getSlackDeploymentHealth(agentId);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_CONVERT_ROLE_IPC, async (_, request: Any) => {
+    const routineService = getRoutineService();
+    const converted = managedSessionService.convertAgentRoleToManagedAgent(request);
+    const routines = routineService
+      ? await Promise.all(
+          converted.routineDrafts.map((draft) =>
+            routineService.create(
+              toManagedRoutinePayload(
+                managedSessionService.buildManagedAgentRoutineDefinition(draft),
+                draft.agentId,
+              ),
+            ),
+          ),
+        )
+      : [];
+    managedSessionService.syncManagedAgentRoutineRefs(converted.agent.id);
+    return {
+      agent: converted.agent,
+      version: converted.version,
+      environment: converted.environment,
+      routines: managedSessionService.listManagedAgentRoutines(converted.agent.id),
+      sourceType: converted.sourceType,
+      sourceId: converted.sourceId,
+    };
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_AGENT_CONVERT_AUTOMATION_IPC, async (_, request: Any) => {
+    const routineService = getRoutineService();
+    const converted = managedSessionService.convertAutomationProfileToManagedAgent(request);
+    if (routineService) {
+      for (const draft of converted.routineDrafts) {
+        await routineService.create(
+          toManagedRoutinePayload(
+            managedSessionService.buildManagedAgentRoutineDefinition(draft),
+            draft.agentId,
+          ),
+        );
+      }
+    }
+    managedSessionService.syncManagedAgentRoutineRefs(converted.agent.id);
+    return {
+      agent: converted.agent,
+      version: converted.version,
+      environment: converted.environment,
+      routines: managedSessionService.listManagedAgentRoutines(converted.agent.id),
+      sourceType: converted.sourceType,
+      sourceId: converted.sourceId,
+    };
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_ENVIRONMENT_LIST_IPC, async (_, params?: Any) => {
+    return managedSessionService.listEnvironments(params);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_ENVIRONMENT_GET_IPC, async (_, environmentId: string) => {
+    return managedSessionService.getEnvironment(environmentId) || null;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_ENVIRONMENT_CREATE_IPC, async (_, request: Any) => {
+    return managedSessionService.createEnvironment(request);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_ENVIRONMENT_UPDATE_IPC, async (_, request: Any) => {
+    if (!request?.environmentId) throw new Error("environmentId is required");
+    return managedSessionService.updateEnvironment(request.environmentId, request) || null;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_ENVIRONMENT_ARCHIVE_IPC, async (_, environmentId: string) => {
+    return managedSessionService.archiveEnvironment(environmentId) || null;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_SESSION_LIST_IPC, async (_, params?: Any) => {
+    return managedSessionService.listSessions(params);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_SESSION_GET_IPC, async (_, sessionId: string) => {
+    return managedSessionService.getSession(sessionId) || null;
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_SESSION_CREATE_IPC, async (_, request: Any) => {
+    return managedSessionService.createSession(request);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_SESSION_RESUME_IPC, async (_, sessionId: string) => {
+    return managedSessionService.resumeSession(sessionId);
+  });
+  ipcMain.handle(IPC_CHANNELS.MANAGED_SESSION_CANCEL_IPC, async (_, sessionId: string) => {
+    return managedSessionService.cancelSession(sessionId);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.MANAGED_SESSION_EVENTS_LIST_IPC,
+    async (_, payload: { sessionId: string; limit?: number }) => {
+      return managedSessionService.listSessionEvents(payload.sessionId, payload.limit);
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.MANAGED_SESSION_WORKPAPER_GET_IPC, async (_, sessionId: string) => {
+    return managedSessionService.getSessionWorkpaper(sessionId);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.MANAGED_SESSION_GENERATE_AUDIO_SUMMARY,
+    async (_, payload: { sessionId: string; config?: Any }) => {
+      return managedSessionService.generateAudioSummary(payload.sessionId, payload.config);
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.AGENT_WORKSPACE_MEMBERSHIP_LIST_IPC, async (_, workspaceId?: string) => {
+    return managedSessionService.listWorkspaceMemberships(workspaceId);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_WORKSPACE_MEMBERSHIP_UPDATE_IPC,
+    async (_, request: { workspaceId: string; principalId: string; role: string }) => {
+      return managedSessionService.updateWorkspaceMembership({
+        workspaceId: request.workspaceId,
+        principalId: request.principalId,
+        role: request.role as Any,
+      });
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_WORKSPACE_PERMISSION_SNAPSHOT_IPC,
+    async (_, payload: { workspaceId: string; principalId?: string }) => {
+      return managedSessionService.getMyWorkspacePermissions(payload.workspaceId);
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.AGENT_TEMPLATE_LIST, async () => {
+    return agentTemplateService.list();
+  });
+  ipcMain.handle(IPC_CHANNELS.IMAGE_GEN_PROFILE_LIST, async () => {
+    return imageGenProfileService.list();
+  });
+  ipcMain.handle(IPC_CHANNELS.IMAGE_GEN_PROFILE_CREATE, async (_, request: Any) => {
+    return imageGenProfileService.create(request);
+  });
+  ipcMain.handle(IPC_CHANNELS.IMAGE_GEN_PROFILE_UPDATE, async (_, request: Any) => {
+    if (!request?.id) throw new Error("id is required");
+    return imageGenProfileService.update(request.id, request);
+  });
+  ipcMain.handle(IPC_CHANNELS.IMAGE_GEN_PROFILE_DELETE, async (_, id: string) => {
+    return imageGenProfileService.delete(id);
   });
 
   // Skill handlers
@@ -5175,6 +5555,322 @@ export async function setupIpcHandlers(
       return { url };
     },
   );
+
+  // AgentMail Settings handlers
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_GET_SETTINGS, async () => {
+    return agentMailAdminService.getSettings();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_SAVE_SETTINGS, async (_, settings) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_SAVE_SETTINGS);
+    const validated = validateInput(
+      AgentMailSettingsSchema,
+      settings,
+      "agentmail settings",
+    ) as AgentMailSettingsData;
+    agentMailAdminService.saveSettings(validated);
+    agentMailRealtimeService.refreshSubscriptions();
+    return { success: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_TEST_CONNECTION, async () => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_TEST_CONNECTION);
+    return agentMailAdminService.testConnection();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_GET_STATUS, async () => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_GET_STATUS);
+    return agentMailAdminService.getStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_LIST_PODS, async () => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_LIST_PODS);
+    return agentMailAdminService.listPods();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_GET_WORKSPACE_BINDING, async (_, workspaceId) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_GET_WORKSPACE_BINDING);
+    const validatedWorkspaceId = validateInput(
+      WorkspaceIdSchema,
+      workspaceId,
+      "agentmail workspaceId",
+    ) as string;
+    return agentMailAdminService.getWorkspaceBinding(validatedWorkspaceId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_BIND_WORKSPACE_POD, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_BIND_WORKSPACE_POD);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        podId: StringIdSchema,
+      }),
+      payload,
+      "agentmail bind workspace pod",
+    ) as { workspaceId: string; podId: string };
+    const result = await agentMailAdminService.bindWorkspacePod(validated.workspaceId, validated.podId);
+    agentMailRealtimeService.refreshSubscriptions();
+    return result;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_CREATE_WORKSPACE_POD, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_CREATE_WORKSPACE_POD);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        podName: z.string().max(200).optional(),
+      }),
+      payload,
+      "agentmail create workspace pod",
+    ) as { workspaceId: string; podName?: string };
+    const result = await agentMailAdminService.createWorkspacePod(validated.workspaceId, validated.podName);
+    agentMailRealtimeService.refreshSubscriptions();
+    return result;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_LIST_INBOXES, async (_, workspaceId) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_LIST_INBOXES);
+    const validatedWorkspaceId = validateInput(
+      WorkspaceIdSchema,
+      workspaceId,
+      "agentmail list inboxes workspaceId",
+    ) as string;
+    return agentMailAdminService.listInboxes(validatedWorkspaceId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_CREATE_INBOX, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_CREATE_INBOX);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        username: z.string().max(200).optional(),
+        domain: z.string().max(255).optional(),
+        displayName: z.string().max(255).optional(),
+        clientId: z.string().max(255).optional(),
+      }),
+      payload,
+      "agentmail create inbox",
+    ) as {
+      workspaceId: string;
+      username?: string;
+      domain?: string;
+      displayName?: string;
+      clientId?: string;
+    };
+    const result = await agentMailAdminService.createInbox(validated.workspaceId, validated);
+    agentMailRealtimeService.refreshSubscriptions();
+    return result;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_UPDATE_INBOX, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_UPDATE_INBOX);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        inboxId: z.string().max(255),
+        displayName: z.string().max(255),
+      }),
+      payload,
+      "agentmail update inbox",
+    ) as { workspaceId: string; inboxId: string; displayName: string };
+    return agentMailAdminService.updateInbox(validated.workspaceId, validated.inboxId, {
+      displayName: validated.displayName,
+    });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_DELETE_INBOX, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_DELETE_INBOX);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        inboxId: z.string().max(255),
+      }),
+      payload,
+      "agentmail delete inbox",
+    ) as { workspaceId: string; inboxId: string };
+    const result = await agentMailAdminService.deleteInbox(validated.workspaceId, validated.inboxId);
+    agentMailRealtimeService.refreshSubscriptions();
+    return result;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_LIST_DOMAINS, async (_, workspaceId) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_LIST_DOMAINS);
+    const validatedWorkspaceId = validateInput(
+      WorkspaceIdSchema,
+      workspaceId,
+      "agentmail list domains workspaceId",
+    ) as string;
+    return agentMailAdminService.listDomains(validatedWorkspaceId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_CREATE_DOMAIN, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_CREATE_DOMAIN);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        domain: z.string().max(255),
+        feedbackEnabled: z.boolean().optional(),
+      }),
+      payload,
+      "agentmail create domain",
+    ) as { workspaceId: string; domain: string; feedbackEnabled?: boolean };
+    return agentMailAdminService.createDomain(validated.workspaceId, validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_VERIFY_DOMAIN, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_VERIFY_DOMAIN);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        domainId: z.string().max(255),
+      }),
+      payload,
+      "agentmail verify domain",
+    ) as { workspaceId: string; domainId: string };
+    return agentMailAdminService.verifyDomain(validated.workspaceId, validated.domainId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_DELETE_DOMAIN, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_DELETE_DOMAIN);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        domainId: z.string().max(255),
+      }),
+      payload,
+      "agentmail delete domain",
+    ) as { workspaceId: string; domainId: string };
+    return agentMailAdminService.deleteDomain(validated.workspaceId, validated.domainId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_LIST_LIST_ENTRIES, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_LIST_LIST_ENTRIES);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        inboxId: z.string().max(255).optional(),
+        direction: z.enum(["receive", "reply", "send"]).optional(),
+        listType: z.enum(["allow", "block"]).optional(),
+      }),
+      payload,
+      "agentmail list entries",
+    ) as {
+      workspaceId: string;
+      inboxId?: string;
+      direction?: AgentMailListEntry["direction"];
+      listType?: AgentMailListEntry["listType"];
+    };
+    return agentMailAdminService.listListEntries(validated.workspaceId, validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_CREATE_LIST_ENTRY, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_CREATE_LIST_ENTRY);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        inboxId: z.string().max(255).optional(),
+        direction: z.enum(["receive", "reply", "send"]),
+        listType: z.enum(["allow", "block"]),
+        entry: z.string().max(255),
+        reason: z.string().max(500).optional(),
+      }),
+      payload,
+      "agentmail create list entry",
+    ) as {
+      workspaceId: string;
+      inboxId?: string;
+      direction: AgentMailListEntry["direction"];
+      listType: AgentMailListEntry["listType"];
+      entry: string;
+      reason?: string;
+    };
+    return agentMailAdminService.createListEntry(validated.workspaceId, validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_DELETE_LIST_ENTRY, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_DELETE_LIST_ENTRY);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        inboxId: z.string().max(255).optional(),
+        direction: z.enum(["receive", "reply", "send"]),
+        listType: z.enum(["allow", "block"]),
+        entry: z.string().max(255),
+      }),
+      payload,
+      "agentmail delete list entry",
+    ) as {
+      workspaceId: string;
+      inboxId?: string;
+      direction: AgentMailListEntry["direction"];
+      listType: AgentMailListEntry["listType"];
+      entry: string;
+    };
+    return agentMailAdminService.deleteListEntry(validated.workspaceId, validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_LIST_INBOX_API_KEYS, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_LIST_INBOX_API_KEYS);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        inboxId: z.string().max(255),
+      }),
+      payload,
+      "agentmail list inbox api keys",
+    ) as { workspaceId: string; inboxId: string };
+    return agentMailAdminService.listInboxApiKeys(validated.workspaceId, validated.inboxId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_CREATE_INBOX_API_KEY, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_CREATE_INBOX_API_KEY);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        inboxId: z.string().max(255),
+        name: z.string().max(255).optional(),
+        permissions: z.record(z.string(), z.boolean()).optional(),
+      }),
+      payload,
+      "agentmail create inbox api key",
+    ) as {
+      workspaceId: string;
+      inboxId: string;
+      name?: string;
+      permissions?: Record<string, boolean>;
+    };
+    return agentMailAdminService.createInboxApiKey(validated.workspaceId, validated.inboxId, validated);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_DELETE_INBOX_API_KEY, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_DELETE_INBOX_API_KEY);
+    const validated = validateInput(
+      z.object({
+        workspaceId: WorkspaceIdSchema,
+        inboxId: z.string().max(255),
+        apiKeyId: z.string().max(255),
+      }),
+      payload,
+      "agentmail delete inbox api key",
+    ) as { workspaceId: string; inboxId: string; apiKeyId: string };
+    return agentMailAdminService.deleteInboxApiKey(
+      validated.workspaceId,
+      validated.inboxId,
+      validated.apiKeyId,
+    );
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AGENTMAIL_REFRESH_WORKSPACE, async (_, workspaceId) => {
+    checkRateLimit(IPC_CHANNELS.AGENTMAIL_REFRESH_WORKSPACE);
+    const validatedWorkspaceId = validateInput(
+      WorkspaceIdSchema,
+      workspaceId,
+      "agentmail refresh workspaceId",
+    ) as string;
+    const result = await agentMailAdminService.refreshWorkspace(validatedWorkspaceId);
+    agentMailRealtimeService.refreshSubscriptions();
+    return result;
+  });
 
   // Dropbox Settings handlers
   ipcMain.handle(IPC_CHANNELS.DROPBOX_GET_SETTINGS, async () => {
@@ -8257,23 +8953,118 @@ function setupMCPHandlers(): void {
     return BuiltinToolsSettingsManager.getToolsByCategory();
   });
 
+  ipcMain.handle(IPC_CHANNELS.CHRONICLE_GET_SETTINGS, async (): Promise<ChronicleSettings> => {
+    return ChronicleSettingsManager.loadSettings();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.CHRONICLE_SAVE_SETTINGS,
+    async (_, settings: Partial<ChronicleSettings>) => {
+      const next = ChronicleSettingsManager.saveSettings(settings || {});
+      await ChronicleCaptureService.getInstance().applySettings(next);
+      ChronicleMemoryService.getInstance().applySettings(next);
+      return { success: true, settings: next };
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.CHRONICLE_GET_STATUS, async (): Promise<ChronicleCaptureStatus> => {
+    return ChronicleCaptureService.getInstance().getStatus();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.CHRONICLE_QUERY_RECENT_CONTEXT,
+    async (
+      _,
+      input: {
+        query: string;
+        limit?: number;
+        useFallback?: boolean;
+      },
+    ): Promise<ChronicleResolvedContext[]> => {
+      return ChronicleCaptureService.getInstance().queryRecentContext({
+        query: input?.query || "",
+        limit: input?.limit,
+        useFallback: input?.useFallback,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CHRONICLE_LIST_OBSERVATIONS,
+    async (
+      _,
+      input: {
+        workspaceId: string;
+        limit?: number;
+      },
+    ) => {
+      const workspace = new WorkspaceRepository(DatabaseManager.getInstance().getDatabase()).findById(
+        String(input?.workspaceId || ""),
+      );
+      if (!workspace) return [];
+      return ChronicleObservationRepository.list(workspace.path, input?.limit || 50);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CHRONICLE_DELETE_OBSERVATION,
+    async (
+      _,
+      input: {
+        workspaceId: string;
+        observationId: string;
+      },
+    ) => {
+      const workspace = new WorkspaceRepository(DatabaseManager.getInstance().getDatabase()).findById(
+        String(input?.workspaceId || ""),
+      );
+      if (!workspace) return { success: false };
+      const record = ChronicleObservationRepository.listSync(workspace.path, 10_000).find(
+        (entry) => entry.id === input?.observationId,
+      );
+      if (record?.memoryId) {
+        MemoryService.deleteEntries(workspace.id, [record.memoryId]);
+      }
+      const success = await ChronicleObservationRepository.deleteObservation(
+        workspace.path,
+        String(input?.observationId || ""),
+      );
+      return { success };
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CHRONICLE_CLEAR_OBSERVATIONS,
+    async (_, input: { workspaceId: string }) => {
+      const workspace = new WorkspaceRepository(DatabaseManager.getInstance().getDatabase()).findById(
+        String(input?.workspaceId || ""),
+      );
+      if (!workspace) return { success: false };
+      const observations = ChronicleObservationRepository.listSync(workspace.path, 10_000);
+      const memoryIds = observations.map((entry) => entry.memoryId).filter(Boolean) as string[];
+      if (memoryIds.length > 0) {
+        MemoryService.deleteEntries(workspace.id, memoryIds);
+      }
+      await ChronicleObservationRepository.clearWorkspace(workspace.path);
+      return { success: true, deleted: observations.length };
+    },
+  );
+
   // =====================
   // Computer use (desktop automation)
   // =====================
 
   ipcMain.handle(IPC_CHANNELS.COMPUTER_USE_GET_STATUS, async () => {
     const sm = ComputerUseSessionManager.getInstance();
-    const pm = sm.getAppPermissionManagerOrNull();
+    const helperStatus = await ComputerUseHelperRuntime.getInstance().getStatus();
     return {
       activeTaskId: sm.getActiveTaskId(),
-      accessibilityTrusted: checkAccessibilityTrusted(false),
-      screenCaptureStatus: getMacScreenCaptureAccessStatus(),
-      approvedApps:
-        pm?.getActivePermissions().map((p) => ({
-          appName: p.appName,
-          bundleId: p.bundleId,
-          accessLevel: p.accessLevel,
-        })) ?? [],
+      helperPath: helperStatus.helperPath,
+      sourcePath: helperStatus.sourcePath,
+      installed: helperStatus.installed,
+      accessibilityTrusted: helperStatus.accessibility,
+      screenCaptureStatus: helperStatus.screenRecording ? "granted" : "denied",
+      error: helperStatus.error ?? null,
     };
   });
 
@@ -8284,18 +9075,14 @@ function setupMCPHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.COMPUTER_USE_OPEN_ACCESSIBILITY, async () => {
     if (process.platform === "darwin") {
-      await shell.openExternal(
-        "x-apple.systempreferences:com.apple.preference.universalaccess?Privacy_Accessibility",
-      );
+      await ComputerUseHelperRuntime.getInstance().openPermissionPane("accessibility");
     }
     return { success: true };
   });
 
   ipcMain.handle(IPC_CHANNELS.COMPUTER_USE_OPEN_SCREEN_RECORDING, async () => {
     if (process.platform === "darwin") {
-      await shell.openExternal(
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-      );
+      await ComputerUseHelperRuntime.getInstance().openPermissionPane("screenRecording");
     }
     return { success: true };
   });
@@ -8950,6 +9737,16 @@ function setupNotificationHandlers(): void {
 let hooksServer: HooksServer | null = null;
 let hooksServerStarting = false; // Lock to prevent concurrent server creation
 let hookTriggerEmitter: ((event: TriggerEvent) => void) | null = null;
+let hookAgentDispatchObserver:
+  | ((payload: {
+      mappingId?: string;
+      path?: string;
+      workspaceId?: string;
+      taskId?: string;
+      metadata?: Record<string, string>;
+      response?: { statusCode?: number; message?: string; includeTaskId?: boolean };
+    }) => void)
+  | null = null;
 
 /**
  * Get the hooks server instance
@@ -8962,6 +9759,21 @@ export function setHookTriggerEmitter(
   emitter: ((event: TriggerEvent) => void) | null,
 ): void {
   hookTriggerEmitter = emitter;
+}
+
+export function setHookAgentDispatchObserver(
+  observer:
+    | ((payload: {
+        mappingId?: string;
+        path?: string;
+        workspaceId?: string;
+        taskId?: string;
+        metadata?: Record<string, string>;
+        response?: { statusCode?: number; message?: string; includeTaskId?: boolean };
+      }) => void)
+    | null,
+): void {
+  hookAgentDispatchObserver = observer;
 }
 
 /**
@@ -9039,7 +9851,23 @@ async function setupHooksHandlers(agentDaemon: AgentDaemon): Promise<void> {
         const result = await hookIngress.createTaskFromAgentAction(action, {
           tempWorkspaceKey: "default",
         });
-        return { taskId: result.taskId };
+        hookAgentDispatchObserver?.({
+          mappingId: action.metadata?.mappingId,
+          path: action.metadata?.hookPath,
+          workspaceId: result.workspaceId || action.workspaceId,
+          taskId: result.taskId,
+          metadata: action.metadata,
+          response: action.response,
+        });
+        return {
+          taskId: result.taskId,
+          statusCode: action.response?.statusCode,
+          body: {
+            success: true,
+            ...(action.response?.message ? { message: action.response.message } : {}),
+            ...((action.response?.includeTaskId ?? true) ? { taskId: result.taskId } : {}),
+          },
+        };
       },
       onTaskMessage: async (action) => {
         logger.debug("[Hooks] Task message:", action.taskId);

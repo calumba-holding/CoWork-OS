@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **LaTeX/PDF artifact workflow docs**: documented the new `compile_latex` source-first workflow across README, feature, use-case, architecture, runtime, troubleshooting, development, showcase, status, ideas, changelog, and docs index surfaces.
+- **Bundled `taste-skill` frontend workflow**: CoWork OS now ships `taste-skill` as a global bundled skill for high-agency frontend design with stricter anti-slop layout, typography, motion, dependency, and responsive-implementation rules.
+- **Rich PPTX artifact previews**: PowerPoint outputs now open in an in-app presentation viewer with slide thumbnails, navigation, zoom, extracted slide text, and speaker notes. Visual slide images are cached when local `soffice` + `pdftoppm` are available and fall back to text-only previews otherwise.
+
+### Changed
+- **Bundled-skill docs**: README, features, skill-store, and related status/comparison docs now reflect the bundled `taste-skill` addition and the built-in skill count increase to 140.
+
 ## [0.5.35] - 2026-04-12
 
 ### Added

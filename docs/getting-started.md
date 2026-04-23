@@ -115,8 +115,30 @@ Once the app opens, the most important places to know are:
 - **Settings > Skills**: Skill Store imports plus optional external read-only skill directories
 - **Settings > Channels**: Slack multi-workspace setup, Telegram group routing, Discord guild allowlists, and enterprise channels such as Feishu/Lark and WeCom
 - **Settings → Tools → Computer use** (macOS): Accessibility + Screen Recording onboarding, built-in tool toggles, and context for [desktop automation](computer-use.md)
+- **Settings → Memory Hub → Chronicle**: primary Chronicle setup for consent-gated recent-screen context, pause/resume, capture scope, OCR status, and linked memory behavior. The dedicated `chronicle` tool category still lives in **Settings → Tools → Built-in tools**. See [Chronicle](chronicle.md).
 
 If you are just getting started, do not configure everything at once. Set up an LLM provider, run one local task, then add Devices, Automations, or Companies as needed.
+
+## Optional: Try Chronicle
+
+Use this if you want CoWork OS to understand vague on-screen references from the desktop app.
+
+1. Open **Settings > Memory Hub > Chronicle**.
+2. Turn on **Chronicle (Research Preview)** and accept the consent prompt.
+3. Grant **Screen Recording** for CoWork OS if macOS prompts for it.
+4. Optional but useful: grant **Accessibility** so Chronicle can attach better frontmost app/window metadata.
+5. Confirm **Settings > Tools > Built-in tools** still has **Chronicle** enabled.
+6. Restart the app if you changed Screen Recording.
+7. Put a window with distinctive visible text on screen for 15-30 seconds.
+8. Start a fresh task with the per-task **Chronicle ON** toggle left enabled and ask:
+
+```text
+Use screen_context_resolve now. Tell me what app and window are on screen and what text is visible on the right side.
+```
+
+Once that works, try vaguer prompts such as `what is this on screen` or `why is this failing`. You can later pause Chronicle from the Chronicle settings card or the tray menu instead of turning it off entirely.
+
+See [Chronicle](chronicle.md) for the full guide and [Troubleshooting](troubleshooting.md#chronicle-desktop-screen-context-issues) if it does not trigger.
 
 ## Optional: Add A Remote Device
 
@@ -156,10 +178,15 @@ Open **Settings > Automations** when you want CoWork OS to do background work wi
 Recommended order:
 
 1. **Task Queue**: confirm concurrency and timeout defaults.
-2. **Scheduled Tasks**: add one safe recurring task.
-3. **Daily Briefing**: enable a daily summary.
-4. **Event Triggers / Webhooks**: connect inbound automation only after you have a stable workspace and provider setup.
+2. **Routines**: create one safe routine with a manual or schedule trigger.
+3. **Daily Briefing**: enable a daily summary if you want background context generation.
+4. **Webhooks / Event Triggers**: connect inbound automation only after you have a stable workspace and provider setup, and only when you need the lower-level surfaces directly.
 5. **Subconscious**: enable the reflective loop once you have at least one stable workflow target. Code-change dispatch works best on git-backed workspaces where worktrees are available.
+
+Rule of thumb:
+
+- use `Routines` for saved automation with policy, outputs, and run history
+- use `Scheduled Tasks`, `Webhooks`, or `Event Triggers` directly only when you specifically need the advanced underlying engine
 
 ## Zero-Human Company Quick Start
 
@@ -212,6 +239,8 @@ Description: Create a Word document summarizing our project. Include sections fo
 Title: Create quarterly report
 Description: Create a PowerPoint presentation with 5 slides covering Q1 2024 highlights. Include: Title slide, Overview, Key Metrics, Challenges, and Next Steps.
 ```
+
+When the task completes, the `.pptx` appears as a normal task artifact. Click the inline deck card or open the file from **Files** to inspect slides in CoWork with thumbnails, slide navigation, extracted speaker notes, and best-effort rendered slide images. If local rendering tools are missing, the viewer still shows extracted slide text and notes.
 
 ### 5. Web Research (works out of the box; optional paid providers for richer results)
 

@@ -3,14 +3,19 @@ import { describe, expect, it } from "vitest";
 import type { Task, TaskEvent } from "../../../shared/types";
 import {
   collectInlineRunCommandSessionIds,
+  deriveAgentReasoningPanelState,
   deriveTaskHeaderPresentation,
   estimateTaskFeedRowHeight,
+  getInlinePreviewKindForGeneratedFile,
+  getInlinePreviewKindForTaskEvent,
   getAutoScrollTargetTop,
+  getBootstrapProgressTitle,
   getDefaultTranscriptMode,
   hasInactiveStringSetEntries,
   isTaskActivelyWorking,
   pruneStringSetToActiveIds,
   selectVisibleTaskFeedRows,
+  shouldShowBootstrapProgressRow,
   shouldScheduleAutoScrollWrite,
 } from "../MainContent";
 
@@ -43,6 +48,43 @@ function makeEvent(
 }
 
 describe("isTaskActivelyWorking", () => {
+  it("classifies generated html outputs as live html previews", () => {
+    expect(
+      getInlinePreviewKindForGeneratedFile({
+        path: "artifacts/demo-animation.html",
+        mimeType: "text/html",
+      }),
+    ).toBe("html");
+  });
+
+  it("classifies generated pptx outputs as presentation previews", () => {
+    expect(
+      getInlinePreviewKindForGeneratedFile({
+        path: "artifacts/output.pptx",
+        mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      }),
+    ).toBe("presentation");
+  });
+
+  it("treats file lifecycle html events as previewable", () => {
+    expect(
+      getInlinePreviewKindForTaskEvent(
+        makeEvent("html-created", 100, "file_created", {
+          path: "artifacts/preview.html",
+          mimeType: "text/html",
+        }),
+      ),
+    ).toBe("html");
+    expect(
+      getInlinePreviewKindForTaskEvent(
+        makeEvent("html-artifact", 100, "artifact_created", {
+          path: "artifacts/preview.html",
+          mimeType: "text/html",
+        }),
+      ),
+    ).toBe("html");
+  });
+
   it("hides the header title when it only repeats the initial prompt", () => {
     const presentation = deriveTaskHeaderPresentation({
       title: "run command 'echo hello world'",
@@ -134,6 +176,118 @@ describe("isTaskActivelyWorking", () => {
         isChatTask: false,
       }),
     ).toBe("inspect");
+  });
+
+  it("shows a bootstrap progress row while an active non-chat task has no visible feed rows", () => {
+    expect(
+      shouldShowBootstrapProgressRow({
+        isTaskWorking: true,
+        visibleRenderableFeedRowsLength: 0,
+        isChatTask: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldShowBootstrapProgressRow({
+        isTaskWorking: true,
+        visibleRenderableFeedRowsLength: 1,
+        isChatTask: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowBootstrapProgressRow({
+        isTaskWorking: true,
+        visibleRenderableFeedRowsLength: 0,
+        isChatTask: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("uses task status to label bootstrap progress", () => {
+    expect(getBootstrapProgressTitle(makeTask({ status: "planning" }))).toBe("Planning the approach");
+    expect(getBootstrapProgressTitle(makeTask({ status: "executing" }))).toBe("Getting started");
+    expect(getBootstrapProgressTitle(makeTask({ status: "interrupted" }))).toBe("Resuming work");
+  });
+
+  it("surfaces the latest active reasoning stream text for the live panel", () => {
+    const state = deriveAgentReasoningPanelState({
+      events: [
+        makeEvent("progress-1", 100, "timeline_step_updated", {
+          legacyType: "progress_update",
+          message: "Executing step 1/2: Inspect repository",
+        }),
+        makeEvent("stream-1", 200, "timeline_step_updated", {
+          legacyType: "llm_streaming",
+          text: "I'm checking the repo and runtime state first.",
+          streaming: true,
+        }),
+      ],
+      taskId: "task-1",
+      isTaskWorking: true,
+    });
+
+    expect(state.activeStreamText).toBe("I'm checking the repo and runtime state first.");
+    expect(state.isStreaming).toBe(true);
+    expect(state.recentUpdates).toEqual(["Working on: Inspect repository"]);
+  });
+
+  it("falls back to recent user-facing progress updates when no reasoning stream is active", () => {
+    const state = deriveAgentReasoningPanelState({
+      events: [
+        makeEvent("progress-hidden", 100, "timeline_step_updated", {
+          legacyType: "progress_update",
+          message: "Thinking...",
+        }),
+        makeEvent("progress-1", 200, "timeline_step_updated", {
+          legacyType: "progress_update",
+          message: "Analyzing task requirements...",
+        }),
+        makeEvent("progress-2", 300, "timeline_step_updated", {
+          legacyType: "progress_update",
+          message: "Executing step 1/2: Inspect repository",
+        }),
+        makeEvent("step-1", 400, "timeline_step_started", {
+          step: { id: "step-1", description: "Inspect repository" },
+        }),
+      ],
+      taskId: "task-1",
+      isTaskWorking: true,
+    });
+
+    expect(state.activeStreamText).toBe("");
+    expect(state.isStreaming).toBe(false);
+    expect(state.recentUpdates).toEqual([
+      "Understanding the request",
+      "Working on: Inspect repository",
+    ]);
+  });
+
+  it("includes assistant messages in the reasoning fallback window", () => {
+    const state = deriveAgentReasoningPanelState({
+      events: [
+        makeEvent("progress-1", 100, "timeline_step_updated", {
+          legacyType: "progress_update",
+          message: "Executing step 1/2: Inspect repository",
+        }),
+        makeEvent("assistant-1", 200, "timeline_step_updated", {
+          legacyType: "assistant_message",
+          message: "I’m checking the scaffolded Kami slide project first.",
+        }),
+        makeEvent("assistant-internal", 300, "timeline_step_updated", {
+          legacyType: "assistant_message",
+          internal: true,
+          message: "OK",
+        }),
+      ],
+      taskId: "task-1",
+      isTaskWorking: true,
+    });
+
+    expect(state.activeStreamText).toBe("");
+    expect(state.isStreaming).toBe(false);
+    expect(state.recentUpdates).toEqual([
+      "Working on: Inspect repository",
+      "I’m checking the scaffolded Kami slide project first.",
+    ]);
   });
 
   it("detects when action block state contains stale ids", () => {

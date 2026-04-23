@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Fragment, useDeferredValue } from "react";
-import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Search, Server, Workflow, HeartPulse, Lightbulb, Inbox, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Search, Server, Workflow, HeartPulse, Lightbulb, Inbox, Users, Bot } from "lucide-react";
 import { resolveTwinIcon } from "../utils/twin-icons";
 import { stripAllEmojis } from "../utils/emoji-replacer";
 import { Task, Workspace, UiDensity, InfraStatus } from "../../shared/types";
@@ -9,6 +9,7 @@ import { VirtualList } from "./VirtualList";
 import { isPretextEnabled } from "../utils/pretext-adapter";
 
 const SIDEBAR_ITEM_HEIGHT = 36;
+const SIDEBAR_LOAD_MORE_THRESHOLD_PX = 320;
 
 interface AgentRoleInfo {
   id: string;
@@ -36,6 +37,7 @@ interface SidebarProps {
   isHomeActive?: boolean;
   isIdeasActive?: boolean;
   isInboxAgentActive?: boolean;
+  isAgentsActive?: boolean;
   isMissionControlActive?: boolean;
   isHealthActive?: boolean;
   completionAttentionTaskIds?: string[];
@@ -43,6 +45,7 @@ interface SidebarProps {
   onOpenHome?: () => void;
   onOpenIdeas?: () => void;
   onOpenInboxAgent?: () => void;
+  onOpenAgents?: () => void;
   onOpenHealth?: () => void;
   onNewSession?: () => void;
   onOpenSettings: () => void;
@@ -132,6 +135,8 @@ export function shouldShowTaskInSidebarSessions(task: Task): boolean {
 export function compareTasksByPinAndRecency(a: Task, b: Task): number {
   const pinnedDiff = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
   if (pinnedDiff !== 0) return pinnedDiff;
+  const recencyDiff = (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt);
+  if (recencyDiff !== 0) return recencyDiff;
   return b.createdAt - a.createdAt;
 }
 
@@ -289,6 +294,7 @@ export function Sidebar({
   isHomeActive = false,
   isIdeasActive = false,
   isInboxAgentActive = false,
+  isAgentsActive = false,
   isMissionControlActive = false,
   isHealthActive = false,
   completionAttentionTaskIds = [],
@@ -296,6 +302,7 @@ export function Sidebar({
   onOpenHome,
   onOpenIdeas,
   onOpenInboxAgent,
+  onOpenAgents,
   onOpenHealth,
   onNewSession,
   onOpenSettings,
@@ -722,8 +729,7 @@ export function Sidebar({
 
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = el;
-      // Trigger 200 px before the very bottom so loading feels instant
-      if (scrollHeight - scrollTop - clientHeight < 200) {
+      if (scrollHeight - scrollTop - clientHeight < SIDEBAR_LOAD_MORE_THRESHOLD_PX) {
         onLoadMoreTasks();
       }
     };
@@ -731,6 +737,29 @@ export function Sidebar({
     el.addEventListener("scroll", handleScroll, { passive: true });
     return () => el.removeEventListener("scroll", handleScroll);
   }, [onLoadMoreTasks, useVirtualizedTaskRows]);
+
+  // If the first page does not fill the scroll container (for example because
+  // focused mode hides failed sessions), keep paging until the list can scroll.
+  useEffect(() => {
+    if (useVirtualizedTaskRows || sessionsCollapsed || !hasMoreTasks || !onLoadMoreTasks) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      const el = taskListRef.current;
+      if (!el) return;
+      if (el.scrollHeight <= el.clientHeight + SIDEBAR_LOAD_MORE_THRESHOLD_PX) {
+        onLoadMoreTasks();
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    filteredAutomatedTaskTree.length,
+    filteredTaskTree.length,
+    hasMoreTasks,
+    onLoadMoreTasks,
+    sessionsCollapsed,
+    useVirtualizedTaskRows,
+  ]);
 
   // Close menu when clicking outside (use 'click' not 'mousedown' so moving from outside to menu still allows selection)
   useEffect(() => {
@@ -1461,6 +1490,24 @@ export function Sidebar({
 
           <button
             type="button"
+            className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-home-btn ${isAgentsActive ? "active" : ""}`}
+            onClick={onOpenAgents}
+            aria-pressed={isAgentsActive}
+            title="Agents"
+          >
+            <span className="cli-btn-text">
+              <span className="terminal-only">agents</span>
+              <span className="modern-only cli-new-task-modern-label">
+                <span className="sidebar-home-btn-icon" aria-hidden="true" style={{ display: "flex" }}>
+                  <Bot size={16} strokeWidth={2} style={{ display: "block" }} />
+                </span>
+                <span>Agents</span>
+              </span>
+            </span>
+          </button>
+
+          <button
+            type="button"
             className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-home-btn ${isMissionControlActive ? "active" : ""}`}
             onClick={onOpenMissionControl}
             aria-pressed={isMissionControlActive}
@@ -1643,7 +1690,7 @@ export function Sidebar({
                     <input
                       type="search"
                       aria-label="Search sessions"
-                      placeholder="Search session titles, prompts, or ids"
+                      placeholder="Search"
                       value={sessionSearch}
                       onChange={(event) => setSessionSearch(event.target.value)}
                     />

@@ -77,6 +77,16 @@ interface MemoryItem {
   type?: string;
 }
 
+interface ChronicleObservationItem {
+  id: string;
+  appName: string;
+  windowTitle: string;
+  localTextSnippet?: string;
+  capturedAt: number;
+  destinationHints?: string[];
+  memoryId?: string;
+}
+
 interface MemorySettingsProps {
   workspaceId: string;
   onSettingsChanged?: () => void;
@@ -137,6 +147,12 @@ function formatRelativeTime(timestamp: number): string {
   if (hours < 24) return `Updated ${hours} hour${hours === 1 ? "" : "s"} ago`;
   const days = Math.floor(hours / 24);
   return `Updated ${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function formatMemoryTypeLabel(type?: string): string {
+  if (!type) return "Memory";
+  if (type === "screen_context") return "Screen context";
+  return `${type.charAt(0).toUpperCase()}${type.slice(1).replace(/_/g, " ")}`;
 }
 
 function ToggleRow({ title, description, checked, onChange, disabled }: ToggleRowProps) {
@@ -202,9 +218,12 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
   const [cleaningRecurringHistory, setCleaningRecurringHistory] = useState(false);
   const [recurringCleanupMessage, setRecurringCleanupMessage] = useState("");
   const [recentMemories, setRecentMemories] = useState<MemoryItem[]>([]);
+  const [chronicleObservations, setChronicleObservations] = useState<ChronicleObservationItem[]>([]);
   const [memorySearchQuery, setMemorySearchQuery] = useState("");
   const [memorySearchResults, setMemorySearchResults] = useState<MemoryItem[]>([]);
   const [searchingMemories, setSearchingMemories] = useState(false);
+  const [clearingChronicle, setClearingChronicle] = useState(false);
+  const [deletingChronicleId, setDeletingChronicleId] = useState<string | null>(null);
 
   useEffect(() => {
     if (workspaceId) {
@@ -223,6 +242,7 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
         loadedRelationshipItems,
         loadedDueSoon,
         loadedRecentMemories,
+        loadedChronicleObservations,
       ] = await Promise.all([
         window.electronAPI.getMemorySettings(workspaceId),
         window.electronAPI.getMemoryStats(workspaceId),
@@ -231,6 +251,7 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
         window.electronAPI.listRelationshipMemory({ limit: 80, includeDone: false }),
         window.electronAPI.getDueSoonCommitments(72),
         window.electronAPI.getRecentMemories({ workspaceId, limit: 20 }),
+        window.electronAPI.listChronicleObservations({ workspaceId, limit: 50 }),
       ]);
       setSettings(loadedSettings);
       setStats(loadedStats);
@@ -242,6 +263,9 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
         typeof loadedDueSoon?.reminderText === "string" ? loadedDueSoon.reminderText : "",
       );
       setRecentMemories(Array.isArray(loadedRecentMemories) ? loadedRecentMemories : []);
+      setChronicleObservations(
+        Array.isArray(loadedChronicleObservations) ? loadedChronicleObservations : [],
+      );
     } catch (error) {
       console.error("Failed to load memory settings:", error);
     } finally {
@@ -431,6 +455,30 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
       console.error("Failed to clear memory:", error);
     } finally {
       setClearing(false);
+    }
+  };
+
+  const handleDeleteChronicleObservation = async (observationId: string) => {
+    try {
+      setDeletingChronicleId(observationId);
+      await window.electronAPI.deleteChronicleObservation({ workspaceId, observationId });
+      await loadData();
+    } catch (error) {
+      console.error("Failed to delete Chronicle observation:", error);
+    } finally {
+      setDeletingChronicleId(null);
+    }
+  };
+
+  const handleClearChronicleObservations = async () => {
+    try {
+      setClearingChronicle(true);
+      await window.electronAPI.clearChronicleObservations({ workspaceId });
+      await loadData();
+    } catch (error) {
+      console.error("Failed to clear Chronicle observations:", error);
+    } finally {
+      setClearingChronicle(false);
     }
   };
 
@@ -713,7 +761,7 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
                   const title = parsed.isImported
                     ? parsed.title
                     : memory.type
-                      ? `${memory.type.charAt(0).toUpperCase()}${memory.type.slice(1)}`
+                      ? formatMemoryTypeLabel(memory.type)
                       : parsed.title;
                   return (
                     <div key={memory.id} className="memory-list-item">
@@ -742,6 +790,80 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
                     </div>
                   );
                 })}
+            </div>
+          </div>
+
+          <div className="settings-form-group memory-section">
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: "8px",
+              }}
+            >
+              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+                Chronicle observations
+              </div>
+              <button
+                className="settings-button"
+                onClick={handleClearChronicleObservations}
+                disabled={clearingChronicle || chronicleObservations.length === 0}
+              >
+                {clearingChronicle ? "Clearing..." : "Clear Chronicle"}
+              </button>
+            </div>
+            <p className="settings-form-hint" style={{ marginTop: 0 }}>
+              Promoted Chronicle screen-context entries that were actually used by tasks.
+            </p>
+            <div className="memory-list" style={{ maxHeight: "220px" }}>
+              {chronicleObservations.length === 0 && (
+                <div className="settings-empty">No Chronicle observations stored yet.</div>
+              )}
+              {chronicleObservations.map((observation) => (
+                <div
+                  key={observation.id}
+                  className="memory-list-item"
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: "8px",
+                    alignItems: "start",
+                  }}
+                >
+                  <div>
+                    <div style={{ color: "var(--color-text-primary)", fontSize: "13px" }}>
+                      {observation.windowTitle || observation.appName || "Screen context"}
+                    </div>
+                    <div style={{ color: "var(--color-text-secondary)", fontSize: "12px" }}>
+                      {[observation.appName, observation.localTextSnippet]
+                        .filter(Boolean)
+                        .join(" • ")
+                        .slice(0, 220) || "No OCR text cached yet."}
+                    </div>
+                    <div
+                      style={{
+                        color: "var(--color-text-tertiary)",
+                        fontSize: "11px",
+                        marginTop: "4px",
+                      }}
+                    >
+                      {new Date(observation.capturedAt).toLocaleString()}
+                      {observation.destinationHints?.length
+                        ? ` • ${observation.destinationHints.join(", ")}`
+                        : ""}
+                      {observation.memoryId ? " • memory linked" : ""}
+                    </div>
+                  </div>
+                  <button
+                    className="memory-inline-btn danger"
+                    disabled={deletingChronicleId === observation.id}
+                    onClick={() => void handleDeleteChronicleObservation(observation.id)}
+                  >
+                    {deletingChronicleId === observation.id ? "Deleting..." : "Delete"}
+                  </button>
+                </div>
+              ))}
             </div>
           </div>
 

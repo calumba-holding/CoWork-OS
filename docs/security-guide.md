@@ -13,6 +13,8 @@ CoWork OS is an AI-powered task automation tool that can execute actions on your
 
 All of these capabilities are **consent-based** and **sandboxed** where possible.
 
+CoWork OS can also expose **Chronicle**, an opt-in desktop recent-screen context feature. Chronicle keeps a short local passive screen buffer to resolve vague on-screen references, but it does not send those passive screenshots to external providers by itself. Chronicle is configured from **Settings > Memory Hub > Chronicle**, with pause/resume controls and explicit consent gating. See [Chronicle](chronicle.md).
+
 ---
 
 ## Permissions Model
@@ -162,6 +164,21 @@ The app includes Playwright for web automation:
 | Mode | Headless by default |
 
 **User agent**: `CoWork OS Browser Automation`
+
+### Chronicle Screen Context
+
+Chronicle is separate from browser automation and from dedicated computer-use mouse/keyboard control.
+
+| Capability | Details |
+|------------|---------|
+| Passive capture | Opt-in only; local recent-screen buffer in the desktop app |
+| Consent / controls | Explicit consent before first enable; pause/resume from Settings or the tray menu when available |
+| Storage model | Raw passive frames stay in app-local storage and are pruned aggressively |
+| Workspace persistence | Only task-used observations are copied into `.cowork/chronicle/`; linked `screen_context` memory generation can follow when enabled |
+| Network behavior | No automatic provider export; later vision analysis still follows normal approval rules |
+| Availability | Desktop app only; not offered in headless or channel runtimes |
+
+Chronicle also introduces a **prompt-injection risk from visible screen content**. A malicious page, document, or chat window can place instructions on screen that the agent may later treat as relevant context. CoWork marks Chronicle text as untrusted screen text, but you should still keep Chronicle paused or off when viewing sensitive or untrusted material, and prefer direct source tools over screen-derived context when a file, URL, PR, or thread can be read directly.
 
 ---
 
@@ -518,13 +535,13 @@ Tools are categorized by risk level for policy-based access control:
 
 High-autonomy modes and session "Approve all" do not silently bypass this export/egress lane.
 
-The `computer_*` family (screenshot, pointer, keyboard on macOS) is **not** low-risk read-only automation: it can drive arbitrary UI the operator can reach. Treat it as **high trust** and keep the `computer_use` built-in category disabled unless you need it. See [Computer use (macOS)](computer-use.md).
+The computer-use family (`screenshot`, `click`, `type_text`, `keypress`, and related tools on macOS) is **not** low-risk read-only automation: it can drive arbitrary UI the operator can reach. Treat it as **high trust** and keep the `computer_use` built-in category disabled unless you need it. See [Computer use (macOS)](computer-use.md).
 
 ### Computer use (macOS) security
 
-- **Session-scoped per-app consent**: Before interacting with a given app, the user chooses an access tier (`view_only`, `click_only`, `full_control`, or deny) for the **current computer-use session**. Grants do not replace review of the underlying task.
-- **Safety UX**: Active sessions use a visible overlay, **Esc** abort, window isolation, and shortcut guarding to reduce accidental cross-window effects and disruptive global hotkeys during automation.
-- **Tool gating**: Policy defers `computer_*` unless the task signals **native desktop GUI intent**, so gateway and general tasks default to safer tool lanes.
+- **Helper-targeted macOS permissions**: Accessibility and Screen Recording are granted to the bundled helper runtime, with inline bootstrap at task time and settings shortcuts for recovery.
+- **Safety UX**: Active sessions use a single-session lock, **Esc** abort, and shortcut guarding to reduce accidental cross-window effects and disruptive global hotkeys during automation.
+- **Tool gating**: Policy defers the computer-use lane unless the task signals **native desktop GUI intent**, so gateway and general tasks default to safer tool lanes.
 - **Key chord blocklist**: Certain OS-level shortcuts are rejected at the tool layer to avoid session or system disruption.
 
 Full operator and troubleshooting guidance: [Computer use (macOS)](computer-use.md).

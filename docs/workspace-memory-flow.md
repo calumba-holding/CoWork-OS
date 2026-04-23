@@ -18,6 +18,8 @@ Those lanes map into runtime layers as:
 - **L2 Topic Packs**: focused topic files loaded on demand
 - **L3 Deep Recall**: unified recall and verbatim quote search across tasks/messages/files/memory/KG
 
+Chronicle fits this model as a **screen-context evidence source**, not as a fifth memory lane. Raw passive frames stay ephemeral in app-local storage. Only task-used Chronicle observations are promoted into workspace state and become searchable through unified recall as `screen_context`. When enabled, those promoted observations can also create linked `screen_context` memory entries through the normal memory service instead of bypassing it.
+
 ---
 
 ## Overview
@@ -62,6 +64,10 @@ Explicit recall tools
         ├─→ supermemory_search
         ├─→ supermemory_remember
         └─→ supermemory_forget
+
+Chronicle promoted observations
+        ├─→ .cowork/chronicle/observations + assets
+        └─→ ChronicleMemoryService → MemoryService (`screen_context`)
 ```
 
 ---
@@ -116,6 +122,8 @@ This is the broad searchable archive:
 - imported ChatGPT history
 - compressed summaries
 
+Chronicle-promoted observations remain provenance-rich `screen_context` records so unified recall can surface them separately from ordinary memory text. When background Chronicle memory generation is enabled, the runtime can also create linked `screen_context` memory rows derived from those observations. Those derived rows are summaries with provenance warnings, not raw frame dumps.
+
 This lane still uses hybrid lexical + local semantic retrieval, but it is **not injected by default**. The feature flag `defaultArchiveInjectionEnabled` now defaults to `false`.
 
 ### Retrieval path
@@ -123,6 +131,37 @@ This lane still uses hybrid lexical + local semantic retrieval, but it is **not 
 - `search_memories` searches archive memory plus indexed `.cowork/` markdown
 - archive recall can still be injected when explicitly enabled for a workspace/runtime
 - `MemoryTierService` still tracks reference counts and promotes/evicts archive entries over time
+
+## Screen Context Evidence — Chronicle Promotions
+
+**Services:** `src/electron/chronicle/ChronicleCaptureService.ts`, `src/electron/chronicle/ChronicleObservationRepository.ts`, `src/electron/chronicle/ChronicleMemoryService.ts`
+**Workspace storage:** `.cowork/chronicle/observations/*.json`, `.cowork/chronicle/assets/*`
+
+Chronicle keeps a local recent-screen buffer in app user-data storage, but only writes into the workspace when a task actually used a screen observation.
+
+Promoted Chronicle records contain:
+
+- the original query
+- capture timestamp
+- app name and window title
+- OCR-derived local text snippet
+- confidence
+- provenance (`untrusted_screen_text`)
+- source reference when frontmost URL/file/app metadata can be resolved
+- destination hints when the task implied a workflow target such as `google_doc` or `slack_dm`
+- linked `memoryId` / `memoryGeneratedAt` fields when background Chronicle memory generation produced a related `screen_context` memory row
+
+Durable promotion is also gated by Chronicle's `respectWorkspaceMemory` setting:
+
+- when it is `true`, Chronicle only persists promoted observations if workspace memory is enabled, auto-capture is enabled, and memory privacy mode is not disabled
+- when it is `false`, Chronicle can still persist observations even if workspace memory capture is otherwise restricted
+
+### Retrieval path
+
+- unified recall can surface promoted Chronicle observations as `screen_context`
+- Mission Control learning/evidence cards can attach Chronicle-backed evidence refs and a dedicated `Chronicle screen context used` learning step
+- linked `screen_context` memory rows can participate in normal memory search and retention logic
+- raw passive frames are **not** indexed or injected by default
 
 ---
 

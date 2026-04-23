@@ -6,6 +6,7 @@ import { NotionSettings } from "./NotionSettings";
 import { BoxSettings } from "./BoxSettings";
 import { OneDriveSettings } from "./OneDriveSettings";
 import { GoogleWorkspaceSettings } from "./GoogleWorkspaceSettings";
+import { AgentMailSettings } from "./AgentMailSettings";
 import { DropboxSettings } from "./DropboxSettings";
 import { SharePointSettings } from "./SharePointSettings";
 
@@ -571,6 +572,12 @@ const INTEGRATIONS: IntegrationDefinition[] = [
     name: "Google Workspace",
     description: "Access Drive, Gmail, and Calendar with OAuth.",
     component: <GoogleWorkspaceSettings />,
+  },
+  {
+    key: "agentmail",
+    name: "AgentMail",
+    description: "Native agent inboxes, pods, domains, scoped keys, and realtime email.",
+    component: <AgentMailSettings />,
   },
   {
     key: "box",
@@ -1146,4 +1153,3 @@ export function ConnectorsSettings() {
     </div>
   );
 }
-

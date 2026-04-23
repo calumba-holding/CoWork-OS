@@ -395,3 +395,55 @@ browser -> CDN -> API gateway -> app server -> database.
 Focus on clarity over visual density.
 Scaffold the local Manim project and produce a render checklist, but do not attempt production render until I review the draft plan.
 ```
+
+### 15) Designed Editorial Documents (Kami)
+
+Prompt:
+```
+Use the kami skill to turn notes/company-overview.md into a polished English one-pager.
+
+Scaffold the project in this workspace.
+Keep the editable source files.
+Render a PDF if local dependencies are available.
+If rendering tools are missing, stop after editing the source and tell me exactly what is missing.
+```
+
+Prompt (resume refresh):
+```
+Use the kami skill to build a resume PDF from docs/resume-notes.md.
+
+Target document type: resume.
+Language: english.
+Keep claims factual and do not invent metrics.
+Write the editable source files plus a rendered PDF when possible.
+```
+
+Prompt (slides):
+```
+Use the kami skill to create a restrained slide deck for our product brief from docs/briefing.md.
+
+Target document type: slides.
+Prefer editable PPTX output first.
+If a local Chromium-family browser is available, also export PDF from the same slide source.
+If not, leave me with the source and output.pptx only and tell me what browser dependency is missing.
+```
+
+After the task completes, open `output.pptx` from the task output card or Files panel to review it in CoWork's presentation viewer. The viewer shows extracted text and speaker notes for every deck; slide thumbnails render when local `soffice` and `pdftoppm` are available.
+
+### 16) LaTeX Paper with Compiled PDF
+
+Prompt:
+```
+Write a LaTeX paper explaining how our app-server request path works.
+
+Use TikZ diagrams where they clarify the architecture.
+Save the editable source as artifacts/papers/app-server-paper.tex.
+Compile it to artifacts/papers/app-server-paper.pdf with the built-in LaTeX compile workflow.
+If no TeX engine is installed, keep the .tex source and tell me which dependency is missing.
+```
+
+Expected behavior:
+
+- CoWork writes the `.tex` file first so the source remains editable.
+- It calls `compile_latex`, which uses an installed `tectonic`, `latexmk`, `xelatex`, `lualatex`, or `pdflatex` binary.
+- The task output pairs the `.tex` source and compiled PDF in one artifact workbench with Summary, source, and PDF tabs.

@@ -63,10 +63,6 @@ function titleForType(type: ApprovalType): string {
     case "risk_gate":
       return "Risk review";
     case "computer_use":
-    case "computer_move_mouse":
-    case "computer_click":
-    case "computer_type":
-    case "computer_key":
       return "Computer use";
     default:
       return "Action approval";

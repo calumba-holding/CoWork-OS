@@ -46,11 +46,73 @@ npm run setup
 
 ## Computer use (macOS) issues
 
-If **screenshots fail or time out**, grant **Screen Recording** for CoWork OS in **System Settings → Privacy & Security**, then **quit and restart** the app. If **clicks or typing do nothing**, enable **Accessibility** for CoWork OS the same way.
+If **screenshots fail or time out**, grant **Screen Recording** for the helper path shown in **Settings → Tools → Computer use**, then **quit and restart** the app. If **clicks or typing do nothing**, enable **Accessibility** for that helper path the same way.
 
-If the agent **never uses** `computer_*` tools, confirm **Settings → Tools → Built-in tools** includes the **computer use** category, and phrase tasks as **native app / window / dialog** work (not pure browser or CLI tasks).
+If the agent **never uses** the computer-use tools, confirm **Settings → Tools → Built-in tools** includes the **computer use** category, and phrase tasks as **native app / window / dialog** work (not pure browser or CLI tasks).
 
 See the full guide: [Computer use (macOS)](computer-use.md).
+
+## PPTX previews only show text or speaker notes
+
+CoWork can always extract slide text and presenter notes from `.pptx` files. Rendered slide thumbnails are best-effort and depend on local conversion tools:
+
+- `soffice` from LibreOffice converts the deck to PDF
+- `pdftoppm` renders PDF pages to PNG thumbnails
+
+If either binary is missing or fails on a deck, the presentation viewer falls back to text/notes mode. Install LibreOffice and Poppler, restart CoWork, then reopen the artifact to regenerate the cached preview. The `.pptx` file itself is still available through **Open file** or **Show in Finder**.
+
+## Chronicle desktop screen context issues
+
+If Chronicle never seems to help with prompts like `what is this on the right side` or `why is this failing`, check these in order:
+
+1. **Enable Chronicle** in **Settings > Memory Hub > Chronicle** and accept the consent prompt.
+2. Confirm **Settings > Tools > Built-in tools** still has the **Chronicle** category enabled.
+3. Make sure the per-task **Chronicle ON** toggle was not turned off in the task composer or Devices panel.
+4. Confirm **Screen Recording** is granted for CoWork OS.
+5. If Chronicle is enabled but paused, resume it from the Chronicle settings card or the tray menu.
+6. Restart the app if Screen Recording was just changed.
+7. Leave the target window visible for **15-30 seconds** so Chronicle has recent frames.
+8. Start a **fresh task** after enabling Chronicle.
+
+For the first smoke test, use a deterministic prompt instead of a vague one:
+
+```text
+Use screen_context_resolve now. Tell me what app and window are on screen and what text is visible on the right side.
+```
+
+What to look for:
+
+- the task trace should show a `screen_context_resolve` tool call
+- Mission Control task detail should later show `screen_context` evidence or recall hits
+- the Chronicle settings card should show a non-zero recent-screen frame count
+- the Chronicle settings card should show whether OCR is available and whether Screen Recording is actually granted
+- **Settings > Memory Hub > Memory** should show promoted entries under **Chronicle observations**
+
+If the agent still asks you for a screenshot:
+
+- the task may have re-planned before invoking `screen_context_resolve`
+- the visible UI may not have had enough distinctive app/title/OCR text
+- the current run may not have had fresh passive frames yet
+- OCR-backed matches may be weaker if local `tesseract` is not installed
+
+If you need a fresh repro log, run:
+
+```bash
+npm run dev:log
+```
+
+Then inspect:
+
+```bash
+logs/dev-latest.log
+```
+
+Look for lines such as:
+
+- `Chronicle initialized (enabled=true, mode=hybrid)`
+- `screen_context_resolve`
+
+If those never appear, see [Chronicle](chronicle.md) and [Computer use (macOS)](computer-use.md).
 
 ## Windows native setup fails (`better-sqlite3`)
 
@@ -185,6 +247,38 @@ Notes:
 - `cached` is the default mode.
 - If strict cached provider behavior is unavailable, runtime falls back to `live` and emits `web_search_mode_fallback_live`.
 - Domain filtering emits `web_search_domain_filtered_result_count`. If all results are filtered, `web_search` returns a structured policy error.
+
+## LaTeX PDF compile fails or only creates `.tex`
+
+The `compile_latex` tool uses a system TeX engine. CoWork OS does not bundle TeX Live, MacTeX, MikTeX, or Tectonic.
+
+If a LaTeX/TikZ paper task leaves the `.tex` source but does not produce a PDF, check the task timeline for a `compile_latex` diagnostic. The most common message is:
+
+```text
+No LaTeX engine found. Install tectonic, latexmk, xelatex, lualatex, or pdflatex and retry.
+```
+
+Fix:
+
+1. Install one supported engine on the machine running CoWork OS.
+2. Confirm the binary is on `PATH` with one of:
+
+```bash
+which tectonic
+which latexmk
+which xelatex
+which lualatex
+which pdflatex
+```
+
+3. Retry the task or ask CoWork to compile the existing `.tex` file.
+
+Notes:
+
+- Engine priority is `tectonic`, then `latexmk`, `xelatex`, `lualatex`, and `pdflatex`.
+- Paths are restricted to the active workspace.
+- A failed compile should still keep the editable `.tex` source as the durable artifact.
+- Successful compiles show a paired artifact workbench with Summary, `.tex source`, and PDF tabs.
 
 ## Subconscious startup warnings in development
 

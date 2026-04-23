@@ -19,8 +19,10 @@ import { DatabaseManager } from "./database/schema";
 import { SecureSettingsRepository } from "./database/SecureSettingsRepository";
 import {
   setupIpcHandlers,
+  getHooksServer,
   getNotificationService,
   setHeartbeatWakeSubmitter,
+  setHookAgentDispatchObserver,
   setHookTriggerEmitter,
 } from "./ipc/handlers";
 import { setupMissionControlHandlers } from "./ipc/mission-control-handlers";
@@ -117,10 +119,14 @@ import {
 } from "./cron/workspace-context";
 import { MemoryService } from "./memory/MemoryService";
 import { CuratedMemoryService } from "./memory/CuratedMemoryService";
+import { ChronicleCaptureService, ChronicleMemoryService, ChronicleSettingsManager } from "./chronicle";
+import { revealWindow } from "./utils/window-visibility";
 import { KnowledgeGraphService } from "./knowledge-graph/KnowledgeGraphService";
 import { MailboxAutomationHub } from "./mailbox/MailboxAutomationHub";
 import { MailboxAutomationRegistry } from "./mailbox/MailboxAutomationRegistry";
+import { MailboxForwardingService } from "./mailbox/MailboxForwardingService";
 import { getMailboxServiceInstance } from "./mailbox/MailboxService";
+import { setMailboxForwardingServiceInstance } from "./mailbox/mailbox-forwarding-singleton";
 import {
   ControlPlaneSettingsManager,
   setupControlPlaneHandlers,
@@ -160,6 +166,8 @@ import { pruneTempSandboxProfiles } from "./utils/temp-sandbox-profiles";
 // Gap features: triggers, briefing, file hub, web access
 import { EventTriggerService } from "./triggers/EventTriggerService";
 import { setupTriggerHandlers } from "./ipc/trigger-handlers";
+import { setupRoutineHandlers } from "./ipc/routine-handlers";
+import { RoutineService } from "./routines/service";
 import { DailyBriefingService } from "./briefing/DailyBriefingService";
 import {
   syncDailyBriefingCronJob,
@@ -178,6 +186,7 @@ import {
 } from "./ipc/subconscious-handlers";
 import { FileHubService } from "./file-hub/FileHubService";
 import { setupFileHubHandlers } from "./ipc/file-hub-handlers";
+import { HooksSettingsManager } from "./hooks/settings";
 import { WebAccessServer } from "./web-server/WebAccessServer";
 import {
   DEFAULT_WEB_ACCESS_CONFIG,
@@ -196,6 +205,7 @@ import { AmbientMonitoringService } from "./monitoring/AmbientMonitoringService"
 import { AwarenessService } from "./awareness/AwarenessService";
 import { AutonomyEngine } from "./awareness/AutonomyEngine";
 import { SubconsciousLoopService } from "./subconscious/SubconsciousLoopService";
+import { ManagedSessionService } from "./managed/ManagedSessionService";
 import { createLogger } from "./utils/logger";
 import { registerMediaProtocol, registerMediaScheme } from "./media";
 import { rememberApprovedImportFiles } from "./security/file-import-approvals";
@@ -209,6 +219,7 @@ let cronService: CronService | null = null;
 let councilService: CouncilService | null = null;
 let dailyBriefingService: DailyBriefingService | null = null;
 let ambientMonitoringService: AmbientMonitoringService | null = null;
+let mailboxForwardingService: MailboxForwardingService | null = null;
 let heartbeatService: HeartbeatService | null = null;
 let awarenessService: AwarenessService | null = null;
 let autonomyEngine: AutonomyEngine | null = null;
@@ -219,6 +230,7 @@ let loreService: LoreService | null = null;
 let xMentionBridgeService: XMentionBridgeService | null = null;
 let strategicPlannerService: StrategicPlannerService | null = null;
 let eventTriggerService: EventTriggerService | null = null;
+let routineService: RoutineService | null = null;
 let coreTraceService: CoreTraceService | null = null;
 let coreMemoryCandidateService: CoreMemoryCandidateService | null = null;
 let coreMemoryDistiller: CoreMemoryDistiller | null = null;
@@ -629,9 +641,7 @@ if (!gotTheLock) {
   app.on("second-instance", () => {
     if (HEADLESS) return;
     // Focus the existing window instead of starting a second instance.
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
+    if (revealWindow(mainWindow)) {
       return;
     }
     // If the window was closed (but app kept running), recreate it.
@@ -1018,6 +1028,17 @@ if (!gotTheLock) {
     } catch (error) {
       logger.error("Failed to initialize Memory Service:", error);
       // Don't fail app startup if memory init fails
+    }
+
+    try {
+      const chronicleSettings = ChronicleSettingsManager.loadSettings();
+      await ChronicleCaptureService.getInstance().applySettings(chronicleSettings);
+      ChronicleMemoryService.getInstance().applySettings(chronicleSettings);
+      logger.info(
+        `Chronicle initialized (enabled=${chronicleSettings.enabled}, mode=${chronicleSettings.mode})`,
+      );
+    } catch (error) {
+      logger.warn("Failed to initialize Chronicle:", error);
     }
 
     // Initialize agent daemon
@@ -1592,6 +1613,11 @@ if (!gotTheLock) {
               error,
             );
           }
+          try {
+            routineService?.recordScheduledEvent(evt);
+          } catch (error) {
+            logger.debug("[Routines] Failed to record cron routine run:", error);
+          }
 
           if (
             evt.action === "finished" &&
@@ -1736,6 +1762,7 @@ if (!gotTheLock) {
     // Setup IPC handlers
     await setupIpcHandlers(dbManager, agentDaemon, channelGateway, {
       getMainWindow: () => mainWindow,
+      getRoutineService: () => routineService,
     });
     if (subconsciousLoopService) {
       setupSubconsciousHandlers(subconsciousLoopService);
@@ -2364,11 +2391,13 @@ if (!gotTheLock) {
             title: string;
             prompt: string;
             workspaceId: string;
+            agentConfig?: Any;
           }) => {
             const task = await agentDaemon.createTask({
               title: params.title,
               prompt: params.prompt,
               workspaceId: params.workspaceId,
+              agentConfig: params.agentConfig,
               source: "hook",
             });
             return { id: task.id };
@@ -2396,6 +2425,7 @@ if (!gotTheLock) {
           log: (...args: unknown[]) => console.log("[EventTriggers]", ...args),
           onTriggerFired: (payload) => {
             MailboxAutomationRegistry.recordTriggerFire(payload);
+            routineService?.recordEventTriggerFire(payload);
           },
         },
         db,
@@ -2411,13 +2441,23 @@ if (!gotTheLock) {
           );
         await mcpClientManager.syncTriggerResourceSubscriptions(subscriptions);
       };
+      mailboxForwardingService = new MailboxForwardingService({
+        db,
+        log: (...args: unknown[]) =>
+          logger.debug("[MailboxForwardingService]", ...args),
+      });
+      setMailboxForwardingServiceInstance(mailboxForwardingService);
       MailboxAutomationRegistry.configure({
         db,
         triggerService: currentTriggerService,
         resolveDefaultWorkspaceId: () => resolveDefaultWorkspace()?.id,
         log: (...args: unknown[]) =>
           logger.debug("[MailboxAutomationRegistry]", ...args),
+        onMutation: () => {
+          void mailboxForwardingService?.refresh();
+        },
       });
+      mailboxForwardingService.start();
       currentTriggerService.start();
       setHookTriggerEmitter((event) => {
         void currentTriggerService.evaluateEvent(event);
@@ -2438,9 +2478,109 @@ if (!gotTheLock) {
             payload: JSON.stringify(event.payload || {}),
           },
         });
+        if ((event.connectorId || "").trim().toLowerCase() === "github") {
+          const githubPayload =
+            event.payload && typeof event.payload === "object" ? (event.payload as Record<string, unknown>) : {};
+          void currentTriggerService.evaluateEvent({
+            source: "github_event",
+            timestamp: event.timestamp,
+            fields: {
+              connectorId: "github",
+              eventName:
+                typeof githubPayload.eventName === "string"
+                  ? githubPayload.eventName
+                  : typeof githubPayload.event === "string"
+                    ? githubPayload.event
+                    : "",
+              action: typeof githubPayload.action === "string" ? githubPayload.action : "",
+              repository:
+                typeof githubPayload.repository === "string"
+                  ? githubPayload.repository
+                  : typeof githubPayload.repo === "string"
+                    ? githubPayload.repo
+                    : "",
+              ref: typeof githubPayload.ref === "string" ? githubPayload.ref : "",
+              resourceUri: event.resourceUri || "",
+              payload: JSON.stringify(event.payload || {}),
+            },
+          });
+        }
       });
       void syncMcpTriggerSubscriptions();
       setupTriggerHandlers(currentTriggerService, syncMcpTriggerSubscriptions);
+      const managedSessionService = new ManagedSessionService(db, agentDaemon);
+      const routineTaskRepo = new TaskRepository(db);
+      routineService = new RoutineService({
+        db,
+        getCronService: () => cronService,
+        getEventTriggerService: () => eventTriggerService,
+        loadHooksSettings: () => HooksSettingsManager.loadSettings(),
+        saveHooksSettings: (settings) => HooksSettingsManager.saveSettings(settings),
+        createTask: async (params) => {
+          const task = await agentDaemon.createTask({
+            title: params.title,
+            prompt: params.prompt,
+            workspaceId: params.workspaceId,
+            agentConfig: params.agentConfig,
+            source: params.source,
+          });
+          return { id: task.id };
+        },
+        createManagedSession: async (params) => {
+          const agent = params.agentId
+            ? managedSessionService.getAgent(params.agentId)?.agent
+            : managedSessionService.listAgents({ limit: 1 })[0];
+          if (!agent) {
+            throw new Error("No managed agents are available for routine execution");
+          }
+          const session = await managedSessionService.createSession({
+            agentId: agent.id,
+            environmentId: params.environmentId,
+            title: params.title,
+            initialEvent: {
+              type: "user.message",
+              content: [{ type: "text", text: params.prompt }],
+            },
+          });
+          return {
+            id: session.id,
+            backingTaskId: session.backingTaskId || undefined,
+            workspaceId: session.workspaceId,
+          };
+        },
+        getManagedSessionSnapshot: async (sessionId) => {
+          const session = managedSessionService.getSession(sessionId);
+          if (!session) return null;
+          return {
+            status: session.status,
+            latestSummary: session.latestSummary || undefined,
+            completedAt: session.completedAt || undefined,
+            backingTaskId: session.backingTaskId || undefined,
+          };
+        },
+        getTaskSnapshot: (taskId) => {
+          const task = routineTaskRepo.findById(taskId);
+          if (!task) return null;
+          return {
+            status: task.status,
+            error: task.error || undefined,
+            resultSummary: task.resultSummary || task.semanticSummary || undefined,
+            terminalStatus: task.terminalStatus || undefined,
+            completedAt: task.completedAt || undefined,
+          };
+        },
+        onHooksConfigChanged: (settings) => {
+          const server = getHooksServer();
+          if (server && settings.enabled) {
+            server.setHooksConfig(settings);
+          }
+        },
+        onTriggerMutation: syncMcpTriggerSubscriptions,
+      });
+      setupRoutineHandlers(routineService);
+      setHookAgentDispatchObserver((payload) => {
+        routineService?.recordApiTriggerDispatch(payload);
+      });
       MailboxAutomationHub.configure({
         triggerService: eventTriggerService,
         heartbeatService,
@@ -2948,6 +3088,9 @@ if (!gotTheLock) {
     logger.info(`Startup complete in ${Date.now() - startupStartedAt} ms`);
 
     app.on("activate", () => {
+      if (revealWindow(mainWindow)) {
+        return;
+      }
       if (BrowserWindow.getAllWindows().length === 0) {
         createWindow();
       }
@@ -2992,6 +3135,11 @@ if (!gotTheLock) {
     if (ambientMonitoringService) {
       await ambientMonitoringService.stop();
       ambientMonitoringService = null;
+    }
+    if (mailboxForwardingService) {
+      mailboxForwardingService.stop();
+      mailboxForwardingService = null;
+      setMailboxForwardingServiceInstance(null);
     }
     if (awarenessService) {
       await awarenessService.stop();

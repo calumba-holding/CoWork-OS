@@ -14,9 +14,14 @@ import type {
   AgentTeamMember,
   AgentTeamRun,
   AgentThought,
+  AgentWorkspaceMembership,
+  AgentWorkspacePermissionSnapshot,
   AgentPerformanceReview,
   AgentReviewGenerateRequest,
+  AgentTemplate,
   AppProfileSummary,
+  AudioSummaryConfig,
+  AudioSummaryResult,
   ProfileExportResult,
   EvalBaselineMetrics,
   EvalCase,
@@ -34,6 +39,7 @@ import type {
   CreateAgentTeamMemberRequest,
   CreateAgentTeamRequest,
   CreateAgentTeamRunRequest,
+  CreateManagedAgentRoutineRequest,
   CoreEvalCase,
   CoreFailureCluster,
   CoreFailureRecord,
@@ -47,8 +53,25 @@ import type {
   GetCoreTraceResult,
   ImageAttachment,
   LLMProviderType,
+  ManagedAgentAuditEntry,
+  ManagedAgentConversionResult,
+  ManagedAgentInsights,
+  ManagedAgentRoutineRecord,
+  ManagedAgentSlackDeploymentHealth,
+  ImageGenProfile,
   MemoryFeaturesSettings,
   MemoryLayerPreviewPayload,
+  ManagedAgent,
+  ManagedAgentRuntimeToolCatalog,
+  ManagedAgentVersion,
+  ManagedEnvironment,
+  ManagedSession,
+  ManagedSessionCreateInput,
+  ManagedSessionEvent,
+  ManagedSessionWorkpaper,
+  UpdateManagedAgentRoutineRequest,
+  ConvertAgentRoleToManagedAgentRequest,
+  ConvertAutomationProfileToManagedAgentRequest,
   SupermemoryConfigStatus,
   SupermemorySettings,
   WorkspaceKitInitRequest,
@@ -78,12 +101,24 @@ import type {
   TaskLearningProgress,
   UnifiedRecallResponse,
   UnifiedRecallSourceType,
+  ChronicleSettings,
+  ChronicleCaptureStatus,
+  ChronicleResolvedContext,
   ShellSessionInfo,
   ShellSessionLifecycleEvent,
   LLMRoutingRuntimeState,
   SupervisorExchange,
   SupervisorExchangeEvent,
   SupervisorExchangeStatus,
+  AgentMailApiKeySummary,
+  AgentMailConnectionTestResult,
+  AgentMailDomain,
+  AgentMailInbox,
+  AgentMailListEntry,
+  AgentMailPod,
+  AgentMailSettingsData,
+  AgentMailStatus,
+  AgentMailWorkspaceBinding,
 } from "../shared/types";
 import type {
   SubconsciousBrainSummary,
@@ -116,6 +151,7 @@ import type {
   MailboxApplyActionInput,
   MailboxAutomationRecord,
   MailboxAutomationStatus,
+  MailboxForwardRecipe,
   MailboxRuleRecipe,
   MailboxScheduleRecipe,
   MailboxBulkReviewResult,
@@ -631,6 +667,7 @@ interface BuiltinToolsSettings {
     skill: ToolCategoryConfig;
     shell: ToolCategoryConfig;
     image: ToolCategoryConfig;
+    chronicle: ToolCategoryConfig;
     computer_use: ToolCategoryConfig;
   };
   toolOverrides: Record<string, { enabled: boolean; priority?: "high" | "normal" | "low" }>;
@@ -1891,6 +1928,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_UPDATE_SCHEDULE, { id, patch }) as Promise<MailboxAutomationRecord | null>,
   deleteMailboxSchedule: (id: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_DELETE_SCHEDULE, id) as Promise<boolean>,
+  createMailboxForward: (recipe: MailboxForwardRecipe) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_CREATE_FORWARD, { recipe }) as Promise<MailboxAutomationRecord>,
+  updateMailboxForward: (
+    id: string,
+    patch: Partial<MailboxForwardRecipe> & { status?: MailboxAutomationStatus },
+  ) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_UPDATE_FORWARD, { id, patch }) as Promise<MailboxAutomationRecord | null>,
+  deleteMailboxForward: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_DELETE_FORWARD, id) as Promise<boolean>,
+  runMailboxForward: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_AUTOMATION_RUN_FORWARD, id) as Promise<string>,
   getMailboxDigest: (workspaceId?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GET_DIGEST, { workspaceId }) as Promise<MailboxDigestSnapshot>,
   summarizeMailboxThread: (threadId: string) =>
@@ -2013,7 +2061,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Task APIs
   createTask: (data: Any) => ipcRenderer.invoke(IPC_CHANNELS.TASK_CREATE, data),
   getTask: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_GET, id),
-  listTasks: (opts?: { limit?: number; offset?: number }) =>
+  listTasks: (opts?: { limit?: number; offset?: number; prioritizeSidebar?: boolean }) =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_LIST, opts),
   exportTasksJson: (query?: Any) => ipcRenderer.invoke(IPC_CHANNELS.TASK_EXPORT_JSON, query),
   toggleTaskPin: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_PIN, taskId),
@@ -2119,6 +2167,217 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Artifact APIs
   listArtifacts: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.ARTIFACT_LIST, taskId),
   previewArtifact: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.ARTIFACT_PREVIEW, id),
+
+  // Agents Hub APIs
+  listManagedAgents: (params?: {
+    limit?: number;
+    offset?: number;
+    status?: ManagedAgent["status"];
+  }) => ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_LIST_IPC, params) as Promise<ManagedAgent[]>,
+  getManagedAgent: (agentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_GET_IPC, agentId) as Promise<
+      { agent: ManagedAgent; currentVersion?: ManagedAgentVersion } | null
+    >,
+  getManagedAgentRuntimeToolCatalog: (agentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_RUNTIME_TOOL_CATALOG_IPC, agentId) as Promise<
+      ManagedAgentRuntimeToolCatalog
+    >,
+  createManagedAgent: (request: {
+    name: string;
+    description?: string;
+    systemPrompt: string;
+    executionMode: ManagedAgentVersion["executionMode"];
+    model?: ManagedAgentVersion["model"];
+    runtimeDefaults?: ManagedAgentVersion["runtimeDefaults"];
+    skills?: string[];
+    mcpServers?: string[];
+    teamTemplate?: ManagedAgentVersion["teamTemplate"];
+    metadata?: Record<string, unknown>;
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_CREATE_IPC, request) as Promise<{
+      agent: ManagedAgent;
+      version: ManagedAgentVersion;
+    }>,
+  updateManagedAgent: (request: {
+    agentId: string;
+    name?: string;
+    description?: string;
+    systemPrompt?: string;
+    executionMode?: ManagedAgentVersion["executionMode"];
+    model?: ManagedAgentVersion["model"];
+    runtimeDefaults?: ManagedAgentVersion["runtimeDefaults"];
+    skills?: string[];
+    mcpServers?: string[];
+    teamTemplate?: ManagedAgentVersion["teamTemplate"];
+    metadata?: Record<string, unknown>;
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_UPDATE_IPC, request) as Promise<{
+      agent: ManagedAgent;
+      version: ManagedAgentVersion;
+    }>,
+  archiveManagedAgent: (agentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_ARCHIVE_IPC, agentId) as Promise<
+      ManagedAgent | null
+    >,
+  publishManagedAgent: (agentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_PUBLISH_IPC, agentId) as Promise<
+      ManagedAgent | null
+    >,
+  suspendManagedAgent: (agentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_SUSPEND_IPC, agentId) as Promise<
+      ManagedAgent | null
+    >,
+  listManagedAgentRoutines: (agentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_ROUTINE_LIST_IPC, agentId) as Promise<
+      ManagedAgentRoutineRecord[]
+    >,
+  createManagedAgentRoutine: (request: CreateManagedAgentRoutineRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_ROUTINE_CREATE_IPC, request) as Promise<
+      ManagedAgentRoutineRecord
+    >,
+  updateManagedAgentRoutine: (request: UpdateManagedAgentRoutineRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_ROUTINE_UPDATE_IPC, request) as Promise<
+      ManagedAgentRoutineRecord
+    >,
+  deleteManagedAgentRoutine: (agentId: string, routineId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_ROUTINE_DELETE_IPC, {
+      agentId,
+      routineId,
+    }) as Promise<boolean>,
+  getManagedAgentInsights: (agentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_INSIGHTS_GET_IPC, agentId) as Promise<
+      ManagedAgentInsights
+    >,
+  listManagedAgentAuditEntries: (agentId: string, limit?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_AUDIT_LIST_IPC, {
+      agentId,
+      limit,
+    }) as Promise<ManagedAgentAuditEntry[]>,
+  getManagedAgentSlackDeploymentHealth: (agentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_SLACK_HEALTH_GET_IPC, agentId) as Promise<
+      ManagedAgentSlackDeploymentHealth
+    >,
+  convertAgentRoleToManagedAgent: (request: ConvertAgentRoleToManagedAgentRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_CONVERT_ROLE_IPC, request) as Promise<
+      ManagedAgentConversionResult
+    >,
+  convertAutomationProfileToManagedAgent: (
+    request: ConvertAutomationProfileToManagedAgentRequest,
+  ) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_AGENT_CONVERT_AUTOMATION_IPC, request) as Promise<
+      ManagedAgentConversionResult
+    >,
+  listManagedEnvironments: (params?: {
+    limit?: number;
+    offset?: number;
+    status?: ManagedEnvironment["status"];
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_ENVIRONMENT_LIST_IPC, params) as Promise<
+      ManagedEnvironment[]
+    >,
+  getManagedEnvironment: (environmentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_ENVIRONMENT_GET_IPC, environmentId) as Promise<
+      ManagedEnvironment | null
+    >,
+  createManagedEnvironment: (request: {
+    name: string;
+    kind?: ManagedEnvironment["kind"];
+    config: ManagedEnvironment["config"];
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_ENVIRONMENT_CREATE_IPC, request) as Promise<
+      ManagedEnvironment
+    >,
+  updateManagedEnvironment: (request: {
+    environmentId: string;
+    name?: string;
+    config?: Partial<ManagedEnvironment["config"]>;
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_ENVIRONMENT_UPDATE_IPC, request) as Promise<
+      ManagedEnvironment | null
+    >,
+  archiveManagedEnvironment: (environmentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_ENVIRONMENT_ARCHIVE_IPC, environmentId) as Promise<
+      ManagedEnvironment | null
+    >,
+  listManagedSessions: (params?: {
+    limit?: number;
+    offset?: number;
+    workspaceId?: string;
+    status?: ManagedSession["status"];
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_SESSION_LIST_IPC, params) as Promise<ManagedSession[]>,
+  getManagedSession: (sessionId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_SESSION_GET_IPC, sessionId) as Promise<
+      ManagedSession | null
+    >,
+  createManagedSession: (request: ManagedSessionCreateInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_SESSION_CREATE_IPC, request) as Promise<ManagedSession>,
+  resumeManagedSession: (sessionId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_SESSION_RESUME_IPC, sessionId) as Promise<{
+      resumed: boolean;
+      session?: ManagedSession;
+    }>,
+  cancelManagedSession: (sessionId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_SESSION_CANCEL_IPC, sessionId) as Promise<
+      ManagedSession | undefined
+    >,
+  listManagedSessionEvents: (sessionId: string, limit?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_SESSION_EVENTS_LIST_IPC, {
+      sessionId,
+      limit,
+    }) as Promise<ManagedSessionEvent[]>,
+  getManagedSessionWorkpaper: (sessionId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_SESSION_WORKPAPER_GET_IPC, sessionId) as Promise<
+      ManagedSessionWorkpaper
+    >,
+  listAgentTemplates: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENT_TEMPLATE_LIST) as Promise<AgentTemplate[]>,
+  listAgentWorkspaceMemberships: (workspaceId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENT_WORKSPACE_MEMBERSHIP_LIST_IPC, workspaceId) as Promise<
+      AgentWorkspaceMembership[]
+    >,
+  updateAgentWorkspaceMembership: (request: {
+    workspaceId: string;
+    principalId: string;
+    role: AgentWorkspaceMembership["role"];
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENT_WORKSPACE_MEMBERSHIP_UPDATE_IPC, request) as Promise<
+      AgentWorkspaceMembership
+    >,
+  getMyAgentWorkspacePermissions: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENT_WORKSPACE_PERMISSION_SNAPSHOT_IPC, {
+      workspaceId,
+    }) as Promise<AgentWorkspacePermissionSnapshot>,
+  listImageGenProfiles: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.IMAGE_GEN_PROFILE_LIST) as Promise<ImageGenProfile[]>,
+  createImageGenProfile: (request: {
+    name: string;
+    description?: string;
+    isDefault?: boolean;
+    referencePhotoPaths?: string[];
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.IMAGE_GEN_PROFILE_CREATE, request) as Promise<ImageGenProfile>,
+  updateImageGenProfile: (request: {
+    id: string;
+    name?: string;
+    description?: string;
+    isDefault?: boolean;
+    addReferencePhotoPaths?: string[];
+    removeReferencePhotoIds?: string[];
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.IMAGE_GEN_PROFILE_UPDATE, request) as Promise<
+      ImageGenProfile | null
+    >,
+  deleteImageGenProfile: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.IMAGE_GEN_PROFILE_DELETE, id) as Promise<boolean>,
+  generateManagedSessionAudioSummary: (
+    sessionId: string,
+    config?: Partial<AudioSummaryConfig>,
+  ) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MANAGED_SESSION_GENERATE_AUDIO_SUMMARY, {
+      sessionId,
+      config,
+    }) as Promise<AudioSummaryResult>,
 
   // Skill APIs
   listSkills: () => ipcRenderer.invoke(IPC_CHANNELS.SKILL_LIST),
@@ -2305,6 +2564,83 @@ contextBridge.exposeInMainWorld("electronAPI", {
     scopes?: string[];
     loginHint?: string;
   }) => ipcRenderer.invoke(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_GET_LINK, payload),
+
+  // AgentMail Settings APIs
+  getAgentMailSettings: () => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_GET_SETTINGS),
+  saveAgentMailSettings: (settings: Any) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_SAVE_SETTINGS, settings),
+  testAgentMailConnection: () => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_TEST_CONNECTION),
+  getAgentMailStatus: () => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_GET_STATUS),
+  listAgentMailPods: () => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_LIST_PODS),
+  getAgentMailWorkspaceBinding: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_GET_WORKSPACE_BINDING, workspaceId),
+  bindAgentMailWorkspacePod: (payload: { workspaceId: string; podId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_BIND_WORKSPACE_POD, payload),
+  createAgentMailWorkspacePod: (payload: { workspaceId: string; podName?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_CREATE_WORKSPACE_POD, payload),
+  listAgentMailInboxes: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_LIST_INBOXES, workspaceId),
+  createAgentMailInbox: (payload: {
+    workspaceId: string;
+    username?: string;
+    domain?: string;
+    displayName?: string;
+    clientId?: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_CREATE_INBOX, payload),
+  updateAgentMailInbox: (payload: {
+    workspaceId: string;
+    inboxId: string;
+    displayName: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_UPDATE_INBOX, payload),
+  deleteAgentMailInbox: (payload: { workspaceId: string; inboxId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_DELETE_INBOX, payload),
+  listAgentMailDomains: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_LIST_DOMAINS, workspaceId),
+  createAgentMailDomain: (payload: {
+    workspaceId: string;
+    domain: string;
+    feedbackEnabled?: boolean;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_CREATE_DOMAIN, payload),
+  verifyAgentMailDomain: (payload: { workspaceId: string; domainId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_VERIFY_DOMAIN, payload),
+  deleteAgentMailDomain: (payload: { workspaceId: string; domainId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_DELETE_DOMAIN, payload),
+  listAgentMailListEntries: (payload: {
+    workspaceId: string;
+    inboxId?: string;
+    direction?: AgentMailListEntry["direction"];
+    listType?: AgentMailListEntry["listType"];
+  }) => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_LIST_LIST_ENTRIES, payload),
+  createAgentMailListEntry: (payload: {
+    workspaceId: string;
+    inboxId?: string;
+    direction: AgentMailListEntry["direction"];
+    listType: AgentMailListEntry["listType"];
+    entry: string;
+    reason?: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_CREATE_LIST_ENTRY, payload),
+  deleteAgentMailListEntry: (payload: {
+    workspaceId: string;
+    inboxId?: string;
+    direction: AgentMailListEntry["direction"];
+    listType: AgentMailListEntry["listType"];
+    entry: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_DELETE_LIST_ENTRY, payload),
+  listAgentMailInboxApiKeys: (payload: { workspaceId: string; inboxId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_LIST_INBOX_API_KEYS, payload),
+  createAgentMailInboxApiKey: (payload: {
+    workspaceId: string;
+    inboxId: string;
+    name?: string;
+    permissions?: Record<string, boolean>;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_CREATE_INBOX_API_KEY, payload),
+  deleteAgentMailInboxApiKey: (payload: {
+    workspaceId: string;
+    inboxId: string;
+    apiKeyId: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_DELETE_INBOX_API_KEY, payload),
+  refreshAgentMailWorkspace: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AGENTMAIL_REFRESH_WORKSPACE, workspaceId),
 
   // Dropbox Settings APIs
   getDropboxSettings: () => ipcRenderer.invoke(IPC_CHANNELS.DROPBOX_GET_SETTINGS),
@@ -2575,6 +2911,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
   saveBuiltinToolsSettings: (settings: BuiltinToolsSettings) =>
     ipcRenderer.invoke(IPC_CHANNELS.BUILTIN_TOOLS_SAVE_SETTINGS, settings),
   getBuiltinToolsCategories: () => ipcRenderer.invoke(IPC_CHANNELS.BUILTIN_TOOLS_GET_CATEGORIES),
+  getChronicleSettings: () => ipcRenderer.invoke(IPC_CHANNELS.CHRONICLE_GET_SETTINGS),
+  saveChronicleSettings: (settings: Partial<ChronicleSettings>) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHRONICLE_SAVE_SETTINGS, settings),
+  getChronicleStatus: () => ipcRenderer.invoke(IPC_CHANNELS.CHRONICLE_GET_STATUS),
+  queryChronicleRecentContext: (input: {
+    query: string;
+    limit?: number;
+    useFallback?: boolean;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.CHRONICLE_QUERY_RECENT_CONTEXT, input),
+  listChronicleObservations: (input: { workspaceId: string; limit?: number }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHRONICLE_LIST_OBSERVATIONS, input),
+  deleteChronicleObservation: (input: { workspaceId: string; observationId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHRONICLE_DELETE_OBSERVATION, input),
+  clearChronicleObservations: (input: { workspaceId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHRONICLE_CLEAR_OBSERVATIONS, input),
 
   getComputerUseStatus: () => ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_USE_GET_STATUS),
   endComputerUseSession: () => ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_USE_END_SESSION),
@@ -3723,6 +4074,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getTriggerHistory: (triggerId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.TRIGGER_HISTORY, triggerId),
 
+  // Routines
+  listRoutines: () => ipcRenderer.invoke(IPC_CHANNELS.ROUTINE_LIST),
+  getRoutine: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.ROUTINE_GET, id),
+  listRoutineRuns: (routineId?: string, limit?: number) =>
+    ipcRenderer.invoke(IPC_CHANNELS.ROUTINE_LIST_RUNS, { routineId, limit }),
+  createRoutine: (data: Any) => ipcRenderer.invoke(IPC_CHANNELS.ROUTINE_CREATE, data),
+  updateRoutine: (id: string, updates: Any) =>
+    ipcRenderer.invoke(IPC_CHANNELS.ROUTINE_UPDATE, { id, updates }),
+  removeRoutine: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.ROUTINE_REMOVE, id),
+  runRoutineNow: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.ROUTINE_RUN_NOW, id),
+  regenerateRoutineApiToken: (routineId: string, triggerId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.ROUTINE_REGENERATE_API_TOKEN, { routineId, triggerId }),
+
   // Daily Briefing (extended)
   getLatestBriefing: (workspaceId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.BRIEFING_GET_LATEST, workspaceId),
@@ -3776,6 +4140,7 @@ export interface FileViewerResult {
       | "text"
       | "docx"
       | "pdf"
+      | "latex"
       | "image"
       | "video"
       | "pptx"
@@ -3788,6 +4153,19 @@ export interface FileViewerResult {
     pdfThumbnailDataUrl?: string;
     pdfDataBase64?: string;
     pdfReviewSummary?: PdfReviewSummary;
+    presentationPreview?: {
+      slideCount: number;
+      title?: string;
+      slides: Array<{
+        index: number;
+        title?: string;
+        text: string;
+        notes?: string;
+        imageDataUrl?: string;
+      }>;
+      renderStatus: "rendered" | "text_only" | "failed";
+      renderMessage?: string;
+    };
     playbackUrl?: string;
     mimeType?: string;
     durationMs?: number;
@@ -3919,6 +4297,13 @@ export interface ElectronAPI {
     patch: Partial<MailboxScheduleRecipe> & { status?: MailboxAutomationStatus },
   ) => Promise<MailboxAutomationRecord | null>;
   deleteMailboxSchedule: (id: string) => Promise<boolean>;
+  createMailboxForward: (recipe: MailboxForwardRecipe) => Promise<MailboxAutomationRecord>;
+  updateMailboxForward: (
+    id: string,
+    patch: Partial<MailboxForwardRecipe> & { status?: MailboxAutomationStatus },
+  ) => Promise<MailboxAutomationRecord | null>;
+  deleteMailboxForward: (id: string) => Promise<boolean>;
+  runMailboxForward: (id: string) => Promise<string>;
   getMailboxDigest: (workspaceId?: string) => Promise<MailboxDigestSnapshot>;
   summarizeMailboxThread: (threadId: string) => Promise<MailboxSummaryCard | null>;
   generateMailboxDraft: (
@@ -4028,7 +4413,7 @@ export interface ElectronAPI {
   ) => Promise<{ success: boolean; error?: string }>;
   createTask: (data: Any) => Promise<Any>;
   getTask: (id: string) => Promise<Any>;
-  listTasks: (opts?: { limit?: number; offset?: number }) => Promise<Any[]>;
+  listTasks: (opts?: { limit?: number; offset?: number; prioritizeSidebar?: boolean }) => Promise<Any[]>;
   exportTasksJson: (query?: Any) => Promise<Any>;
   toggleTaskPin: (taskId: string) => Promise<Any>;
   cancelTask: (id: string) => Promise<void>;
@@ -4114,6 +4499,117 @@ export interface ElectronAPI {
   }>;
   listArtifacts: (taskId: string) => Promise<Any[]>;
   previewArtifact: (id: string) => Promise<Any>;
+  listManagedAgents: (params?: {
+    limit?: number;
+    offset?: number;
+    status?: ManagedAgent["status"];
+  }) => Promise<ManagedAgent[]>;
+  getManagedAgent: (
+    agentId: string,
+  ) => Promise<{ agent: ManagedAgent; currentVersion?: ManagedAgentVersion } | null>;
+  getManagedAgentRuntimeToolCatalog: (agentId: string) => Promise<ManagedAgentRuntimeToolCatalog>;
+  createManagedAgent: (request: {
+    name: string;
+    description?: string;
+    systemPrompt: string;
+    executionMode: ManagedAgentVersion["executionMode"];
+    model?: ManagedAgentVersion["model"];
+    runtimeDefaults?: ManagedAgentVersion["runtimeDefaults"];
+    skills?: string[];
+    mcpServers?: string[];
+    teamTemplate?: ManagedAgentVersion["teamTemplate"];
+    metadata?: Record<string, unknown>;
+  }) => Promise<{ agent: ManagedAgent; version: ManagedAgentVersion }>;
+  updateManagedAgent: (request: {
+    agentId: string;
+    name?: string;
+    description?: string;
+    systemPrompt?: string;
+    executionMode?: ManagedAgentVersion["executionMode"];
+    model?: ManagedAgentVersion["model"];
+    runtimeDefaults?: ManagedAgentVersion["runtimeDefaults"];
+    skills?: string[];
+    mcpServers?: string[];
+    teamTemplate?: ManagedAgentVersion["teamTemplate"];
+    metadata?: Record<string, unknown>;
+  }) => Promise<{ agent: ManagedAgent; version: ManagedAgentVersion }>;
+  archiveManagedAgent: (agentId: string) => Promise<ManagedAgent | null>;
+  publishManagedAgent: (agentId: string) => Promise<ManagedAgent | null>;
+  suspendManagedAgent: (agentId: string) => Promise<ManagedAgent | null>;
+  listManagedAgentRoutines: (agentId: string) => Promise<ManagedAgentRoutineRecord[]>;
+  createManagedAgentRoutine: (
+    request: CreateManagedAgentRoutineRequest,
+  ) => Promise<ManagedAgentRoutineRecord>;
+  updateManagedAgentRoutine: (
+    request: UpdateManagedAgentRoutineRequest,
+  ) => Promise<ManagedAgentRoutineRecord>;
+  deleteManagedAgentRoutine: (agentId: string, routineId: string) => Promise<boolean>;
+  getManagedAgentInsights: (agentId: string) => Promise<ManagedAgentInsights>;
+  listManagedAgentAuditEntries: (agentId: string, limit?: number) => Promise<ManagedAgentAuditEntry[]>;
+  getManagedAgentSlackDeploymentHealth: (agentId: string) => Promise<ManagedAgentSlackDeploymentHealth>;
+  convertAgentRoleToManagedAgent: (
+    request: ConvertAgentRoleToManagedAgentRequest,
+  ) => Promise<ManagedAgentConversionResult>;
+  convertAutomationProfileToManagedAgent: (
+    request: ConvertAutomationProfileToManagedAgentRequest,
+  ) => Promise<ManagedAgentConversionResult>;
+  listManagedEnvironments: (params?: {
+    limit?: number;
+    offset?: number;
+    status?: ManagedEnvironment["status"];
+  }) => Promise<ManagedEnvironment[]>;
+  getManagedEnvironment: (environmentId: string) => Promise<ManagedEnvironment | null>;
+  createManagedEnvironment: (request: {
+    name: string;
+    kind?: ManagedEnvironment["kind"];
+    config: ManagedEnvironment["config"];
+  }) => Promise<ManagedEnvironment>;
+  updateManagedEnvironment: (request: {
+    environmentId: string;
+    name?: string;
+    config?: Partial<ManagedEnvironment["config"]>;
+  }) => Promise<ManagedEnvironment | null>;
+  archiveManagedEnvironment: (environmentId: string) => Promise<ManagedEnvironment | null>;
+  listManagedSessions: (params?: {
+    limit?: number;
+    offset?: number;
+    workspaceId?: string;
+    status?: ManagedSession["status"];
+  }) => Promise<ManagedSession[]>;
+  getManagedSession: (sessionId: string) => Promise<ManagedSession | null>;
+  createManagedSession: (request: ManagedSessionCreateInput) => Promise<ManagedSession>;
+  resumeManagedSession: (sessionId: string) => Promise<{ resumed: boolean; session?: ManagedSession }>;
+  cancelManagedSession: (sessionId: string) => Promise<ManagedSession | undefined>;
+  listManagedSessionEvents: (sessionId: string, limit?: number) => Promise<ManagedSessionEvent[]>;
+  getManagedSessionWorkpaper: (sessionId: string) => Promise<ManagedSessionWorkpaper>;
+  listAgentTemplates: () => Promise<AgentTemplate[]>;
+  listAgentWorkspaceMemberships: (workspaceId?: string) => Promise<AgentWorkspaceMembership[]>;
+  updateAgentWorkspaceMembership: (request: {
+    workspaceId: string;
+    principalId: string;
+    role: AgentWorkspaceMembership["role"];
+  }) => Promise<AgentWorkspaceMembership>;
+  getMyAgentWorkspacePermissions: (workspaceId: string) => Promise<AgentWorkspacePermissionSnapshot>;
+  listImageGenProfiles: () => Promise<ImageGenProfile[]>;
+  createImageGenProfile: (request: {
+    name: string;
+    description?: string;
+    isDefault?: boolean;
+    referencePhotoPaths?: string[];
+  }) => Promise<ImageGenProfile>;
+  updateImageGenProfile: (request: {
+    id: string;
+    name?: string;
+    description?: string;
+    isDefault?: boolean;
+    addReferencePhotoPaths?: string[];
+    removeReferencePhotoIds?: string[];
+  }) => Promise<ImageGenProfile | null>;
+  deleteImageGenProfile: (id: string) => Promise<boolean>;
+  generateManagedSessionAudioSummary: (
+    sessionId: string,
+    config?: Partial<AudioSummaryConfig>,
+  ) => Promise<AudioSummaryResult>;
   listSkills: () => Promise<Any[]>;
   getSkill: (id: string) => Promise<Any>;
   // LLM Settings
@@ -4433,6 +4929,93 @@ export interface ElectronAPI {
     scopes?: string[];
     loginHint?: string;
   }) => Promise<{ url: string }>;
+  // AgentMail Settings
+  getAgentMailSettings: () => Promise<AgentMailSettingsData>;
+  saveAgentMailSettings: (settings: Any) => Promise<{ success: boolean }>;
+  testAgentMailConnection: () => Promise<AgentMailConnectionTestResult>;
+  getAgentMailStatus: () => Promise<AgentMailStatus>;
+  listAgentMailPods: () => Promise<AgentMailPod[]>;
+  getAgentMailWorkspaceBinding: (workspaceId: string) => Promise<AgentMailWorkspaceBinding | null>;
+  bindAgentMailWorkspacePod: (payload: {
+    workspaceId: string;
+    podId: string;
+  }) => Promise<AgentMailWorkspaceBinding>;
+  createAgentMailWorkspacePod: (payload: {
+    workspaceId: string;
+    podName?: string;
+  }) => Promise<AgentMailWorkspaceBinding>;
+  listAgentMailInboxes: (workspaceId: string) => Promise<AgentMailInbox[]>;
+  createAgentMailInbox: (payload: {
+    workspaceId: string;
+    username?: string;
+    domain?: string;
+    displayName?: string;
+    clientId?: string;
+  }) => Promise<AgentMailInbox>;
+  updateAgentMailInbox: (payload: {
+    workspaceId: string;
+    inboxId: string;
+    displayName: string;
+  }) => Promise<AgentMailInbox>;
+  deleteAgentMailInbox: (payload: {
+    workspaceId: string;
+    inboxId: string;
+  }) => Promise<{ success: boolean }>;
+  listAgentMailDomains: (workspaceId: string) => Promise<AgentMailDomain[]>;
+  createAgentMailDomain: (payload: {
+    workspaceId: string;
+    domain: string;
+    feedbackEnabled?: boolean;
+  }) => Promise<AgentMailDomain>;
+  verifyAgentMailDomain: (payload: {
+    workspaceId: string;
+    domainId: string;
+  }) => Promise<AgentMailDomain | null>;
+  deleteAgentMailDomain: (payload: {
+    workspaceId: string;
+    domainId: string;
+  }) => Promise<{ success: boolean }>;
+  listAgentMailListEntries: (payload: {
+    workspaceId: string;
+    inboxId?: string;
+    direction?: AgentMailListEntry["direction"];
+    listType?: AgentMailListEntry["listType"];
+  }) => Promise<AgentMailListEntry[]>;
+  createAgentMailListEntry: (payload: {
+    workspaceId: string;
+    inboxId?: string;
+    direction: AgentMailListEntry["direction"];
+    listType: AgentMailListEntry["listType"];
+    entry: string;
+    reason?: string;
+  }) => Promise<AgentMailListEntry>;
+  deleteAgentMailListEntry: (payload: {
+    workspaceId: string;
+    inboxId?: string;
+    direction: AgentMailListEntry["direction"];
+    listType: AgentMailListEntry["listType"];
+    entry: string;
+  }) => Promise<{ success: boolean }>;
+  listAgentMailInboxApiKeys: (payload: {
+    workspaceId: string;
+    inboxId: string;
+  }) => Promise<AgentMailApiKeySummary[]>;
+  createAgentMailInboxApiKey: (payload: {
+    workspaceId: string;
+    inboxId: string;
+    name?: string;
+    permissions?: Record<string, boolean>;
+  }) => Promise<AgentMailApiKeySummary & { apiKey?: string }>;
+  deleteAgentMailInboxApiKey: (payload: {
+    workspaceId: string;
+    inboxId: string;
+    apiKeyId: string;
+  }) => Promise<{ success: boolean }>;
+  refreshAgentMailWorkspace: (workspaceId: string) => Promise<{
+    binding: AgentMailWorkspaceBinding;
+    inboxes: AgentMailInbox[];
+    domains: AgentMailDomain[];
+  }>;
   // Dropbox Settings
   getDropboxSettings: () => Promise<{
     enabled: boolean;
@@ -4976,11 +5559,35 @@ export interface ElectronAPI {
   getBuiltinToolsSettings: () => Promise<BuiltinToolsSettings>;
   saveBuiltinToolsSettings: (settings: BuiltinToolsSettings) => Promise<{ success: boolean }>;
   getBuiltinToolsCategories: () => Promise<Record<string, string[]>>;
+  getChronicleSettings: () => Promise<ChronicleSettings>;
+  saveChronicleSettings: (
+    settings: Partial<ChronicleSettings>,
+  ) => Promise<{ success: boolean; settings: ChronicleSettings }>;
+  getChronicleStatus: () => Promise<ChronicleCaptureStatus>;
+  queryChronicleRecentContext: (input: {
+    query: string;
+    limit?: number;
+    useFallback?: boolean;
+  }) => Promise<ChronicleResolvedContext[]>;
+  listChronicleObservations: (input: {
+    workspaceId: string;
+    limit?: number;
+  }) => Promise<Any[]>;
+  deleteChronicleObservation: (input: {
+    workspaceId: string;
+    observationId: string;
+  }) => Promise<{ success: boolean }>;
+  clearChronicleObservations: (input: {
+    workspaceId: string;
+  }) => Promise<{ success: boolean; deleted?: number }>;
   getComputerUseStatus: () => Promise<{
     activeTaskId: string | null;
+    helperPath: string;
+    sourcePath: string | null;
+    installed: boolean;
     accessibilityTrusted: boolean;
     screenCaptureStatus: string;
-    approvedApps: Array<{ appName: string; bundleId?: string; accessLevel: string }>;
+    error: string | null;
   }>;
   endComputerUseSession: () => Promise<{ success: boolean }>;
   openComputerUseAccessibilitySettings: () => Promise<{ success: boolean }>;
@@ -5067,6 +5674,14 @@ export interface ElectronAPI {
   startGmailWatcher: () => Promise<{ ok: boolean; error?: string }>;
   stopGmailWatcher: () => Promise<{ ok: boolean }>;
   onHooksEvent: (callback: (event: HooksEvent) => void) => () => void;
+  listRoutines: () => Promise<Any[]>;
+  getRoutine: (id: string) => Promise<Any | null>;
+  listRoutineRuns: (routineId?: string, limit?: number) => Promise<Any[]>;
+  createRoutine: (data: Any) => Promise<Any>;
+  updateRoutine: (id: string, updates: Any) => Promise<Any | null>;
+  removeRoutine: (id: string) => Promise<boolean>;
+  runRoutineNow: (id: string) => Promise<Any | null>;
+  regenerateRoutineApiToken: (routineId: string, triggerId: string) => Promise<Any | null>;
 
   // Control Plane (WebSocket Gateway)
   getControlPlaneSettings: () => Promise<ControlPlaneSettingsData>;

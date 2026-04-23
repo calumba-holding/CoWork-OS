@@ -5,9 +5,12 @@ type ScreenStatus = "granted" | "denied" | "not-determined" | "unknown";
 
 interface ComputerUseStatus {
   activeTaskId: string | null;
+  helperPath: string;
+  sourcePath: string | null;
+  installed: boolean;
   accessibilityTrusted: boolean;
   screenCaptureStatus: ScreenStatus;
-  approvedApps: Array<{ appName: string; bundleId?: string; accessLevel: string }>;
+  error: string | null;
 }
 
 function statusLabel(ok: boolean): string {
@@ -106,9 +109,9 @@ export function ComputerUseSettings() {
           Computer use
         </h3>
         <p className="settings-description">
-          Native desktop control (mouse, keyboard, screenshots) for macOS. The agent asks for{" "}
-          <strong>per-app</strong> access each session. Use browser and shell tools first for web and
-          file tasks.
+          Pi-style native desktop control for macOS. The agent targets one controlled window at a time
+          through `screenshot()`, and macOS permissions apply to the bundled helper binary rather than
+          to individual apps.
         </p>
       </div>
 
@@ -122,6 +125,16 @@ export function ComputerUseSettings() {
       ) : null}
 
       <div className="computer-use-status-grid">
+        <div className="computer-use-status-card">
+          <div className="computer-use-status-title">Helper</div>
+          <div className={`computer-use-status-value ${status?.installed ? "ok" : "bad"}`}>
+            {status?.installed ? "Installed" : "Not installed yet"}
+          </div>
+          <div className="computer-use-session-id">
+            <code>{status?.helperPath}</code>
+          </div>
+        </div>
+
         <div className="computer-use-status-card">
           <div className="computer-use-status-title">Accessibility</div>
           <div
@@ -151,10 +164,19 @@ export function ComputerUseSettings() {
 
       {isMac ? (
         <p className="computer-use-restart-hint">
-          After changing Screen Recording, macOS may require <strong>restarting CoWork</strong> before
-          capture works reliably.
+          Inline bootstrap will prompt for missing helper permissions at first use. After changing
+          Screen Recording, macOS may still require <strong>restarting CoWork</strong> before capture
+          works reliably.
         </p>
       ) : null}
+
+      {status?.sourcePath ? (
+        <div className="computer-use-platform-note">
+          Helper source bundle: <code>{status.sourcePath}</code>
+        </div>
+      ) : null}
+
+      {status?.error ? <div className="settings-error">{status.error}</div> : null}
 
       <div className="computer-use-active-row">
         <div>
@@ -189,25 +211,6 @@ export function ComputerUseSettings() {
         </div>
       </div>
 
-      {status && status.approvedApps.length > 0 ? (
-        <div className="computer-use-approved-apps">
-          <div className="computer-use-status-title">Approved apps (this session)</div>
-          <ul>
-            {status.approvedApps.map((a) => (
-              <li key={`${a.appName}-${a.bundleId ?? ""}-${a.accessLevel}`}>
-                <strong>{a.appName}</strong>
-                {a.bundleId ? (
-                  <>
-                    {" "}
-                    <code>{a.bundleId}</code>
-                  </>
-                ) : null}{" "}
-                — {a.accessLevel.replace(/_/g, " ")}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
     </div>
   );
 }
