@@ -149,6 +149,89 @@ function isSelfGeneratedSubconsciousTask(row: Any): boolean {
   return row?.source === "subconscious" && typeof row?.title === "string";
 }
 
+function isActionableHeartbeatPulseResult(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0 && value !== "idle";
+}
+
+function isLowSignalHeartbeatSummary(value: unknown): boolean {
+  if (typeof value !== "string") return true;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return true;
+  return [
+    "no actionable heartbeat state",
+    "dispatch already in flight",
+    "dispatch cooldown active",
+    "daily dispatch budget exhausted",
+  ].some((entry) => normalized.includes(entry));
+}
+
+function isActionableHeartbeatRun(row: Any): boolean {
+  const status = typeof row?.status === "string" ? row.status : "";
+  if (["failed", "cancelled", "interrupted"].includes(status)) return true;
+  if (status === "queued" || status === "running") {
+    const updatedAt = Number(row?.updated_at || 0);
+    return updatedAt > 0 && now() - updatedAt > 30 * 60 * 1000;
+  }
+  if (status !== "completed") return false;
+  if (row?.dispatch_kind) return true;
+  return !isLowSignalHeartbeatSummary(row?.summary || row?.reason);
+}
+
+function isActionableEvidenceSignal(evidence: SubconsciousEvidence): boolean {
+  const summary = evidence.summary.toLowerCase();
+  switch (evidence.type) {
+    case "code_failure":
+    case "pull_request_activity":
+      return true;
+    case "mailbox_event":
+      return /reply|respond|urgent|blocked|waiting|follow up|needs?/i.test(summary);
+    case "task_signal":
+      return /failed|blocked|paused|interrupted|cancelled|needs input|waiting|stale/i.test(summary);
+    case "heartbeat_signal":
+    case "heartbeat_run":
+      return !/idle|no actionable heartbeat state|completed$/i.test(summary);
+    case "event_trigger":
+    case "scheduled_task":
+    case "briefing":
+    case "memory_playbook":
+      return /failed|paused|disabled|blocked|stale|error|missing/i.test(summary);
+    default:
+      return false;
+  }
+}
+
+function scoreEvidenceUsefulness(evidence: SubconsciousEvidence[]): number {
+  if (!evidence.length) return 0;
+  const weights = evidence.map((item) => {
+    const actionable = isActionableEvidenceSignal(item);
+    switch (item.type) {
+      case "code_failure":
+        return 0.95;
+      case "pull_request_activity":
+        return 0.82;
+      case "mailbox_event":
+        return actionable ? 0.72 : 0.25;
+      case "task_signal":
+        return actionable ? 0.68 : 0.18;
+      case "heartbeat_run":
+      case "heartbeat_signal":
+        return actionable ? 0.58 : 0.12;
+      case "event_trigger":
+      case "scheduled_task":
+      case "briefing":
+        return actionable ? 0.5 : 0.1;
+      case "memory_playbook":
+        return actionable ? 0.42 : 0.08;
+      default:
+        return actionable ? 0.4 : 0.05;
+    }
+  });
+  const strongest = Math.max(...weights);
+  const actionableCount = evidence.filter(isActionableEvidenceSignal).length;
+  const densityBonus = Math.min(0.18, Math.max(0, actionableCount - 1) * 0.06);
+  return clamp(strongest + densityBonus, 0, 1);
+}
+
 const COWORK_OS_REPO_IDENTITY = "CoWork-OS/CoWork-OS";
 
 interface CodeWorkspaceTargetCandidate {
@@ -569,8 +652,8 @@ export class SubconsciousLoopService {
         summary: decision.winnerSummary,
         details: decision.recommendation,
       });
-      const backlog = this.materializeBacklog(target.key, decision, this.resolveDispatchKind(target.target));
-      const dispatchKind = this.resolveDispatchKind(target.target);
+      const dispatchKind = this.resolveDispatchKind(target.target, evidence);
+      const backlog = this.materializeBacklog(target.key, decision, dispatchKind);
       const policy = this.evaluatePolicy(target, decision, evidence, dispatchKind);
       this.runRepo.update(run.id, {
         confidence: policy.confidence,
@@ -1050,8 +1133,12 @@ export class SubconsciousLoopService {
     const newestEvidenceAt = Math.max(...evidence.map((item) => item.createdAt), 0);
     const ageHours = newestEvidenceAt ? (now() - newestEvidenceAt) / (60 * 60 * 1000) : 999;
     const evidenceFreshness = clamp(1 - ageHours / 72, 0, 1);
+    const usefulness = scoreEvidenceUsefulness(evidence);
     const confidence = clamp(
-      0.45 + Math.min(evidence.length, 5) * 0.08 + (decision.winnerSummary.length > 0 ? 0.08 : 0),
+      0.35 +
+        Math.min(evidence.filter(isActionableEvidenceSignal).length, 5) * 0.08 +
+        usefulness * 0.24 +
+        (decision.winnerSummary.length > 0 ? 0.08 : 0),
       0,
       0.98,
     );
@@ -1066,6 +1153,8 @@ export class SubconsciousLoopService {
       permissionDecision = settings.trustedTargetKeys.includes(target.key) ? "allowed" : "escalated";
     } else if (riskLevel === "medium" && settings.autonomyMode === "recommendation_first") {
       permissionDecision = "escalated";
+    } else if (usefulness < 0.45) {
+      permissionDecision = "blocked";
     } else if (confidence < 0.55 || evidenceFreshness < 0.2) {
       permissionDecision = "escalated";
     }
@@ -1626,33 +1715,53 @@ export class SubconsciousLoopService {
           agentRoleId: String(row.id),
           label,
         };
-        pushEvidence(target, {
-          type: "heartbeat_signal",
-          summary: `Heartbeat ${row.heartbeat_status || "idle"} for ${label}`,
-          details: row.heartbeat_last_pulse_result || undefined,
-          fingerprint: stableHash(["heartbeat", row.id, row.last_heartbeat_at, row.heartbeat_status]),
-          createdAt: Number(row.last_heartbeat_at || now()),
-        });
+        ensure(target);
+        const heartbeatStatus = String(row.heartbeat_status || "idle");
+        const pulseResult = row.heartbeat_last_pulse_result;
+        if (heartbeatStatus === "error" || isActionableHeartbeatPulseResult(pulseResult)) {
+          pushEvidence(target, {
+            type: "heartbeat_signal",
+            summary: `Heartbeat ${heartbeatStatus} for ${label}`,
+            details: typeof pulseResult === "string" ? pulseResult : undefined,
+            fingerprint: stableHash(["heartbeat", row.id, row.last_heartbeat_at, row.heartbeat_status, pulseResult]),
+            createdAt: Number(row.last_heartbeat_at || now()),
+          });
+        }
       }
     }
 
     if (this.hasTable("heartbeat_runs")) {
       const rows = this.db
         .prepare(
-          `SELECT id, workspace_id, agent_role_id, status, updated_at
+          `SELECT id, workspace_id, agent_role_id, run_type, dispatch_kind, reason, status, summary, error, updated_at
            FROM heartbeat_runs
            ORDER BY updated_at DESC
            LIMIT 50`,
         )
         .all() as Any[];
       for (const row of rows) {
+        if (!isActionableHeartbeatRun(row)) {
+          continue;
+        }
         const key = row.agent_role_id ? `agent_role:${row.agent_role_id}` : `workspace:${row.workspace_id}`;
         const target = collected.get(key)?.target;
         if (!target) continue;
         pushEvidence(target, {
           type: "heartbeat_run",
-          summary: `Heartbeat run ${row.status || "unknown"}`,
-          fingerprint: stableHash(["heartbeat_run", row.id, row.status, row.updated_at]),
+          summary: row.summary
+            ? `Heartbeat ${row.status || "unknown"}: ${row.summary}`
+            : `Heartbeat run ${row.status || "unknown"}`,
+          details: row.error || row.reason || undefined,
+          fingerprint: stableHash([
+            "heartbeat_run",
+            row.id,
+            row.status,
+            row.summary,
+            row.error,
+            row.reason,
+            row.dispatch_kind,
+            row.updated_at,
+          ]),
           createdAt: Number(row.updated_at || now()),
         });
       }
@@ -1832,8 +1941,8 @@ export class SubconsciousLoopService {
   }
 
   private isTargetActionable(target: SubconsciousTargetSummary): boolean {
-    const evidenceCount = this.latestEvidenceByTarget.get(target.key)?.length || 0;
-    if (evidenceCount > 0) return true;
+    const evidence = this.latestEvidenceByTarget.get(target.key) || [];
+    if (evidence.some(isActionableEvidenceSignal)) return true;
     if (target.backlogCount > 0) return this.hasFreshActionableEvidence(target);
     if (target.lastMeaningfulOutcome === "defer") return this.hasFreshActionableEvidence(target);
     return false;
@@ -1844,9 +1953,12 @@ export class SubconsciousLoopService {
     const latestEvidenceAt = evidence[0]?.createdAt || target.lastEvidenceAt || 0;
     const freshnessHours = latestEvidenceAt ? (now() - latestEvidenceAt) / (60 * 60 * 1000) : 9999;
     const freshnessBonus = latestEvidenceAt ? Math.max(0, 3 - Math.min(3, freshnessHours / 12)) : 0;
+    const actionableEvidenceCount = evidence.filter(isActionableEvidenceSignal).length;
+    const usefulnessBonus = scoreEvidenceUsefulness(evidence) * 4;
     return (
       target.backlogCount * 3 +
-      evidence.length * 2 +
+      actionableEvidenceCount * 2 +
+      usefulnessBonus +
       (target.health === "blocked" ? 4 : target.health === "watch" ? 1.5 : 0) +
       (target.lastMeaningfulOutcome === "defer" ? 1.5 : 0) +
       freshnessBonus
@@ -1878,7 +1990,7 @@ export class SubconsciousLoopService {
     const base: Array<Pick<SubconsciousHypothesis, "title" | "summary" | "rationale" | "confidence">> = [
       {
         title: `Respond directly to ${target.label}`,
-        summary: `Turn the dominant signal into a concrete ${humanizeDispatchKind(this.resolveDispatchKind(target))}.`,
+        summary: `Turn the dominant signal into a concrete ${humanizeDispatchKind(this.resolveDispatchKind(target, evidence))}.`,
         rationale: `The latest evidence points to a specific recurring need: ${seed || "fresh evidence is limited but actionable."}`,
         confidence: 0.84,
       },
@@ -1920,7 +2032,7 @@ export class SubconsciousLoopService {
     evidence: SubconsciousEvidence[],
     hypotheses: SubconsciousHypothesis[],
   ): SubconsciousCritique[] {
-    const executor = this.resolveDispatchKind(target);
+    const executor = this.resolveDispatchKind(target, evidence);
     return hypotheses.map((hypothesis, index) => {
       const weakEvidence = evidence.length < 2 && index > 0;
       const noExecutor = !executor && /dispatch|task|workflow|automation/i.test(hypothesis.summary);
@@ -1966,7 +2078,7 @@ export class SubconsciousLoopService {
     scored.sort((a, b) => b.score - a.score);
     const winner = scored[0]?.hypothesis || hypotheses[0];
     const rejected = scored.slice(1).map((item) => item.hypothesis.id);
-    const executor = this.resolveDispatchKind(target);
+    const executor = this.resolveDispatchKind(target, evidence);
     const nextBacklog = [
       `Preserve the winner for ${target.label} and measure whether the next evidence cluster gets narrower.`,
       `Reject overly broad paths unless they earn more evidence or a clearer executor mapping.`,
@@ -2011,8 +2123,24 @@ export class SubconsciousLoopService {
     return items;
   }
 
-  private resolveDispatchKind(target: SubconsciousTargetRef): SubconsciousDispatchKind | undefined {
-    return this.getSettings().dispatchDefaults.defaultKinds[target.kind];
+  private resolveDispatchKind(
+    target: SubconsciousTargetRef,
+    evidence?: SubconsciousEvidence[],
+  ): SubconsciousDispatchKind | undefined {
+    const settings = this.getSettings();
+    const configured = settings.dispatchDefaults.defaultKinds[target.kind];
+    const usefulness = evidence ? scoreEvidenceUsefulness(evidence) : 1;
+    if (configured === "task" && usefulness < 0.65) {
+      return "suggestion";
+    }
+    if (
+      target.kind === "agent_role" &&
+      configured === "task" &&
+      settings.autonomyMode !== "strong_autonomy"
+    ) {
+      return "suggestion";
+    }
+    return configured;
   }
 
   private async resolveDispatchWorkspace(target: SubconsciousTargetRef): Promise<Workspace | undefined> {
@@ -2068,7 +2196,7 @@ export class SubconsciousLoopService {
     decision: SubconsciousDecision,
     evidence: SubconsciousEvidence[],
   ): Promise<SubconsciousDispatchRecord | null> {
-    const dispatchKind = this.resolveDispatchKind(target);
+    const dispatchKind = this.resolveDispatchKind(target, evidence);
     if (!dispatchKind) {
       return null;
     }
