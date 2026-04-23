@@ -221,6 +221,7 @@
           "**/*.json",
           "**/SKILL.md",
           "**/references/**",
+          "**/assets/**",
           "**/scripts/**"
         ]
       },

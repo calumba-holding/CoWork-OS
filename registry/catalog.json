@@ -45,6 +45,27 @@
       "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/agentic-image-loop.json"
     },
     {
+      "id": "architecture-diagram",
+      "name": "Architecture Diagram",
+      "description": "Generate polished dark-themed architecture diagrams as standalone HTML files with inline SVG, semantic system grouping, and readable connection flows.",
+      "version": "1.0.0",
+      "author": "Cocoon AI, ported by CoWork OS",
+      "tags": [
+        "architecture",
+        "diagram",
+        "infrastructure",
+        "cloud",
+        "svg",
+        "html",
+        "system-design",
+        "visualization"
+      ],
+      "icon": "🏗️",
+      "category": "Engineering",
+      "updatedAt": "2026-04-15",
+      "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/architecture-diagram.json"
+    },
+    {
       "id": "analyze-csv",
       "name": "Analyze CSV",
       "description": "Load a CSV and provide insights",
@@ -736,6 +757,25 @@
       "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/goplaces.json"
     },
     {
+      "id": "gsap",
+      "name": "GSAP",
+      "description": "GSAP animation patterns for HyperFrames: tweens, timelines, easing, stagger, responsive motion, and performance-aware choreography.",
+      "version": "0.4.3",
+      "author": "HeyGen",
+      "tags": [
+        "gsap",
+        "animation",
+        "timelines",
+        "easing",
+        "video",
+        "hyperframes"
+      ],
+      "icon": "✨",
+      "category": "Creative",
+      "updatedAt": "2026-04-17",
+      "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/gsap.json"
+    },
+    {
       "id": "himalaya",
       "name": "Himalaya",
       "description": "CLI to manage emails via IMAP/SMTP. Use `himalaya` to list, read, write, reply, forward, search, and organize emails from the terminal. Supports multiple accounts and message composition with MML (MIME Meta Language).",
@@ -781,6 +821,64 @@
       "category": "Creative",
       "updatedAt": "2026-03-18",
       "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/humanizer.json"
+    },
+    {
+      "id": "hyperframes",
+      "name": "HyperFrames",
+      "description": "Create HTML-native video compositions, captions, voiceovers, transitions, and audio-reactive motion with the HyperFrames framework.",
+      "version": "0.4.3",
+      "author": "HeyGen",
+      "tags": [
+        "video",
+        "animation",
+        "html",
+        "gsap",
+        "captions",
+        "tts",
+        "creative"
+      ],
+      "icon": "🎥",
+      "category": "Creative",
+      "updatedAt": "2026-04-17",
+      "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/hyperframes.json"
+    },
+    {
+      "id": "hyperframes-cli",
+      "name": "HyperFrames CLI",
+      "description": "Scaffold, lint, preview, render, transcribe, and troubleshoot HyperFrames projects with the HyperFrames CLI.",
+      "version": "0.4.3",
+      "author": "HeyGen",
+      "tags": [
+        "video",
+        "cli",
+        "ffmpeg",
+        "rendering",
+        "tts",
+        "transcription"
+      ],
+      "icon": "🛠️",
+      "category": "Tools",
+      "updatedAt": "2026-04-17",
+      "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/hyperframes-cli.json"
+    },
+    {
+      "id": "hyperframes-registry",
+      "name": "HyperFrames Registry",
+      "description": "Install and wire reusable HyperFrames blocks and components with `hyperframes add`.",
+      "version": "0.4.3",
+      "author": "HeyGen",
+      "tags": [
+        "video",
+        "registry",
+        "components",
+        "blocks",
+        "html",
+        "creative"
+      ],
+      "icon": "🧩",
+      "category": "Creative",
+      "updatedAt": "2026-04-17",
+      "homepage": "https://github.com/CoWork-OS/CoWork-OS/blob/main/resources/skills/hyperframes-registry.json"
     },
     {
       "id": "idea-validation",
