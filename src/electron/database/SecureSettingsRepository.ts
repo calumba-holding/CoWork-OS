@@ -40,6 +40,7 @@ export type SettingsCategory =
   | "acp"
   | "voice"
   | "memory"
+  | "chronicle"
   | "llm"
   | "search"
   | "appearance"

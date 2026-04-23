@@ -737,6 +737,143 @@ describeWithSqlite("MailboxService", () => {
     ]);
     expect(normalized[0]?.messages[0]?.body).toBe("MSN Mail App, test\n\nReview this sign-in.");
     expect(normalized[0]?.messages[0]?.bodyHtml).toContain("<p>MSN Mail App, test</p>");
+    expect(normalized[0]?.messages[0]?.metadata).toMatchObject({
+      imapUid: 901,
+      rfcMessageId: "msg-901@example.com",
+    });
+  });
+
+  it("recovers a legacy IMAP message-id and marks the thread read", async () => {
+    db.prepare(
+      `INSERT INTO mailbox_accounts
+        (id, provider, address, display_name, status, capabilities_json, sync_cursor, last_synced_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "imap:user@msn.com",
+      "imap",
+      "user@msn.com",
+      "MSN Mail",
+      "connected",
+      JSON.stringify(["send", "mark_read"]),
+      null,
+      now,
+      now,
+      now,
+    );
+
+    db.prepare(
+      `INSERT INTO mailbox_threads
+        (id, account_id, provider_thread_id, provider, subject, snippet, participants_json, labels_json, category, priority_score, urgency_score, needs_reply, stale_followup, cleanup_candidate, handled, unread_count, message_count, last_message_at, last_synced_at, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "imap-thread:legacy-mark-read",
+      "imap:user@msn.com",
+      "legacy-mark-read",
+      "imap",
+      "Legacy IMAP thread",
+      "Unread message synced before UID metadata existed.",
+      JSON.stringify([{ email: "sender@example.com", name: "Sender" }]),
+      JSON.stringify([]),
+      "other",
+      35,
+      22,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+      now - 5 * 60 * 1000,
+      now,
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    const legacyMessageRowId = randomUUID();
+    db.prepare(
+      `INSERT INTO mailbox_messages
+        (id, thread_id, provider_message_id, direction, from_name, from_email, to_json, cc_json, bcc_json, subject, snippet, body_text, received_at, is_unread, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      legacyMessageRowId,
+      "imap-thread:legacy-mark-read",
+      "legacy-message-id@example.com",
+      "incoming",
+      "Sender",
+      "sender@example.com",
+      JSON.stringify([{ email: "user@msn.com", name: "MSN Mail" }]),
+      JSON.stringify([]),
+      JSON.stringify([]),
+      "Legacy IMAP thread",
+      "Unread message synced before UID metadata existed.",
+      "Please mark this thread as read.",
+      now - 5 * 60 * 1000,
+      1,
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    const findByTypeSpy = vi.spyOn((service as Any).channelRepo, "findByType").mockReturnValue({
+      id: "email-channel",
+      enabled: true,
+      config: {
+        protocol: "imap-smtp",
+      },
+    } as never);
+    const fetchRecentEmails = vi.fn().mockResolvedValue([
+      {
+        uid: 901,
+        messageId: "legacy-message-id@example.com",
+        from: { name: "Sender", address: "sender@example.com" },
+        to: [{ name: "MSN Mail", address: "user@msn.com" }],
+        cc: [],
+        subject: "Legacy IMAP thread",
+        text: "Please mark this thread as read.",
+        date: new Date(now - 5 * 60 * 1000),
+        isRead: false,
+        headers: new Map(),
+      },
+    ]);
+    const markAsRead = vi.fn().mockResolvedValue(undefined);
+    const createStandardEmailClientSpy = vi.spyOn(service as Any, "createStandardEmailClient").mockReturnValue({
+      fetchRecentEmails,
+      markAsRead,
+    } as never);
+
+    try {
+      await expect(
+        service.applyAction({
+          threadId: "imap-thread:legacy-mark-read",
+          type: "mark_read",
+        }),
+      ).resolves.toMatchObject({
+        success: true,
+        action: "mark_read",
+        threadId: "imap-thread:legacy-mark-read",
+      });
+
+      expect(fetchRecentEmails).toHaveBeenCalled();
+      expect(markAsRead).toHaveBeenCalledWith(901);
+
+      const messageRow = db
+        .prepare("SELECT is_unread, metadata_json FROM mailbox_messages WHERE id = ?")
+        .get(legacyMessageRowId) as { is_unread: number; metadata_json: string | null };
+      expect(messageRow.is_unread).toBe(0);
+      expect(JSON.parse(messageRow.metadata_json || "{}")).toMatchObject({
+        imapUid: 901,
+        rfcMessageId: "legacy-message-id@example.com",
+      });
+
+      const threadRow = db
+        .prepare("SELECT unread_count FROM mailbox_threads WHERE id = ?")
+        .get("imap-thread:legacy-mark-read") as { unread_count: number };
+      expect(threadRow.unread_count).toBe(0);
+    } finally {
+      createStandardEmailClientSpy.mockRestore();
+      findByTypeSpy.mockRestore();
+    }
   });
 
   it("does not treat onboarding or automated mail as priority follow-up", async () => {

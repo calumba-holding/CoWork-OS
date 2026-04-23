@@ -10,9 +10,10 @@ import { LLMProviderFactory } from "../agent/llm/provider-factory";
 import { recordLlmCallError, recordLlmCallSuccess } from "../agent/llm/usage-telemetry";
 import type { LLMMessage } from "../agent/llm/types";
 import { GoogleWorkspaceSettingsManager } from "../settings/google-workspace-manager";
+import { AgentMailSettingsManager } from "../settings/agentmail-manager";
 import { gmailRequest } from "../utils/gmail-api";
 import { googleCalendarRequest } from "../utils/google-calendar-api";
-import { EmailClient } from "../gateway/channels/email-client";
+import { EmailClient, type EmailMessage } from "../gateway/channels/email-client";
 import { LoomEmailClient } from "../gateway/channels/loom-client";
 import { assertSafeLoomMailboxFolder } from "../utils/loom";
 import { refreshMicrosoftEmailAccessToken } from "../utils/microsoft-email-oauth";
@@ -26,7 +27,10 @@ import { ControlPlaneCoreService } from "../control-plane/ControlPlaneCoreServic
 import { ContactIdentityService } from "../identity/ContactIdentityService";
 import { MailboxAutomationHub } from "./MailboxAutomationHub";
 import { MailboxAutomationRegistry } from "./MailboxAutomationRegistry";
+import { AgentMailClient } from "../agentmail/AgentMailClient";
+import { AgentMailAdminService } from "../agentmail/AgentMailAdminService";
 import { mailboxLlmQuickReplies, mailboxLlmSimilarThreadIds } from "./mailbox-inbox-product-llm";
+import { getMailboxForwardingServiceInstance } from "./mailbox-forwarding-singleton";
 import {
   ChannelPreferenceSummary,
   ContactIdentity,
@@ -52,6 +56,7 @@ import {
   MailboxEvent,
   MailboxEventType,
   MailboxAutomationRecord,
+  MailboxForwardRecipe,
   MailboxCompanyCandidate,
   MailboxMissionControlHandoffPreview,
   MailboxMissionControlHandoffRecord,
@@ -151,6 +156,12 @@ type MailboxMessageRow = {
   body_html: string | null;
   received_at: number;
   is_unread: number;
+  metadata_json: string | null;
+};
+
+type MailboxMessageMetadata = {
+  imapUid?: number;
+  rfcMessageId?: string;
 };
 
 type MailboxSummaryRow = {
@@ -490,6 +501,7 @@ type NormalizedThreadInput = {
   messages: Array<{
     id: string;
     providerMessageId: string;
+    metadata?: MailboxMessageMetadata;
     direction: "incoming" | "outgoing";
     from?: MailboxParticipant;
     to: MailboxParticipant[];
@@ -522,6 +534,30 @@ function asNumber(value: unknown): number | null {
 
 function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function parseTimestamp(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function parseMailboxMessageMetadata(value: string | null | undefined): MailboxMessageMetadata {
+  if (!value) return {};
+  try {
+    const parsed = asObject(JSON.parse(value));
+    return {
+      imapUid: asNumber(parsed?.imapUid) ?? undefined,
+      rfcMessageId: asString(parsed?.rfcMessageId) ?? undefined,
+    };
+  } catch {
+    return {};
+  }
 }
 
 function parseJsonArray<T>(value: string | null | undefined): T[] {
@@ -1236,7 +1272,21 @@ export class MailboxService {
   }
 
   isAvailable(): boolean {
-    return GoogleWorkspaceSettingsManager.loadSettings().enabled || this.hasEmailChannel();
+    const agentMailSettings = AgentMailSettingsManager.loadSettings();
+    return (
+      GoogleWorkspaceSettingsManager.loadSettings().enabled ||
+      this.hasEmailChannel() ||
+      Boolean(agentMailSettings.enabled && agentMailSettings.apiKey)
+    );
+  }
+
+  private getAgentMailClient(): AgentMailClient {
+    return new AgentMailClient(AgentMailSettingsManager.loadSettings());
+  }
+
+  private agentMailEnabled(): boolean {
+    const settings = AgentMailSettingsManager.loadSettings();
+    return Boolean(settings.enabled && settings.apiKey);
   }
 
   private isLoomEmailChannel(): boolean {
@@ -1316,7 +1366,7 @@ export class MailboxService {
       classificationPendingCount: countsRow.classification_pending_count || 0,
       statusLabel:
         accounts.length === 0
-          ? "Connect Gmail or Email channel"
+          ? "Connect AgentMail, Gmail, or the Email channel"
           : `${accounts.length} account${accounts.length === 1 ? "" : "s"} synced${
               this.syncInFlight && this.syncProgress?.label
                 ? ` · ${this.syncProgress.label}`
@@ -1413,6 +1463,13 @@ export class MailboxService {
     });
   }
 
+  async createMailboxForward(recipe: MailboxForwardRecipe): Promise<MailboxAutomationRecord> {
+    return MailboxAutomationRegistry.createForward({
+      ...recipe,
+      workspaceId: recipe.workspaceId || this.resolveDefaultWorkspaceId(),
+    });
+  }
+
   async updateMailboxSchedule(
     automationId: string,
     patch: Partial<MailboxScheduleRecipe> & { status?: MailboxAutomationStatus },
@@ -1420,8 +1477,27 @@ export class MailboxService {
     return MailboxAutomationRegistry.updateSchedule(automationId, patch);
   }
 
+  async updateMailboxForward(
+    automationId: string,
+    patch: Partial<MailboxForwardRecipe> & { status?: MailboxAutomationStatus },
+  ): Promise<MailboxAutomationRecord | null> {
+    return MailboxAutomationRegistry.updateForward(automationId, patch);
+  }
+
   async deleteMailboxSchedule(automationId: string): Promise<boolean> {
     return MailboxAutomationRegistry.deleteSchedule(automationId);
+  }
+
+  async deleteMailboxForward(automationId: string): Promise<boolean> {
+    return MailboxAutomationRegistry.deleteForward(automationId);
+  }
+
+  async runMailboxForward(automationId: string): Promise<string> {
+    const service = getMailboxForwardingServiceInstance();
+    if (!service) {
+      throw new Error("Mailbox forwarding service is not available");
+    }
+    return service.runNow(automationId);
   }
 
   async listMailboxAutomationHistory(automationId: string, limit = 25): Promise<Any[]> {
@@ -1780,6 +1856,20 @@ export class MailboxService {
     ];
     const params: unknown[] = [];
     if (workspaceId) {
+      conditions.push(
+        `(
+          ${threadAlias}.provider != 'agentmail'
+          OR EXISTS (
+            SELECT 1
+            FROM agentmail_inboxes ai
+            WHERE ai.workspace_id = ?
+              AND ('agentmail:' || ai.pod_id || ':' || ai.inbox_id) = ${threadAlias}.account_id
+          )
+        )`,
+      );
+      params.push(workspaceId);
+    }
+    if (workspaceId) {
       // A thread is hidden from inbox if it belongs to at least one view with
       // show_in_inbox=0, but does NOT also belong to any view with show_in_inbox=1.
       conditions.push(
@@ -2014,6 +2104,19 @@ export class MailboxService {
         }
       }
 
+      if (this.agentMailEnabled()) {
+        try {
+          const result = await this.syncAgentMail(limit);
+          if (result) {
+            accounts.push(...result.accounts);
+            syncedThreads += result.syncedThreads;
+            syncedMessages += result.syncedMessages;
+          }
+        } catch (error) {
+          syncErrors.push(`AgentMail sync failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
       if (this.hasEmailChannel()) {
         try {
           const result = await this.syncImap(limit);
@@ -2030,7 +2133,7 @@ export class MailboxService {
       if (accounts.length === 0) {
         throw new Error(
           syncErrors[0] ||
-            "No connected mailbox was found. Enable Google Workspace or configure the Email channel.",
+            "No connected mailbox was found. Enable AgentMail, Google Workspace, or configure the Email channel.",
         );
       }
 
@@ -2086,6 +2189,339 @@ export class MailboxService {
     } finally {
       this.syncInFlight = false;
     }
+  }
+
+  private buildAgentMailAccountId(podId: string, inboxId: string): string {
+    return `agentmail:${podId}:${inboxId}`;
+  }
+
+  private parseAgentMailAccountId(accountId?: string): { podId: string; inboxId: string } | null {
+    const raw = asString(accountId);
+    if (!raw || !raw.startsWith("agentmail:")) {
+      return null;
+    }
+    const parts = raw.split(":");
+    if (parts.length < 3) return null;
+    return {
+      podId: parts[1] || "",
+      inboxId: parts.slice(2).join(":"),
+    };
+  }
+
+  private getAgentMailBindings(): Array<{ workspace_id: string; pod_id: string }> {
+    return this.db
+      .prepare(
+        `SELECT workspace_id, pod_id
+         FROM agentmail_workspace_pods
+         ORDER BY updated_at DESC`,
+      )
+      .all() as Array<{ workspace_id: string; pod_id: string }>;
+  }
+
+  private buildAgentMailAccount(
+    podId: string,
+    inboxId: string,
+    address?: string,
+    displayName?: string,
+  ): MailboxAccount {
+    return {
+      id: this.buildAgentMailAccountId(podId, inboxId),
+      provider: "agentmail",
+      address: address || inboxId,
+      displayName,
+      status: "connected",
+      capabilities: ["archive", "trash", "mark_read", "label", "send_draft", "sync", "realtime"],
+      lastSyncedAt: Date.now(),
+    };
+  }
+
+  private normalizeAgentMailLabels(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((entry) => asString(entry))
+      .filter((entry): entry is string => Boolean(entry))
+      .map((entry) => entry.toLowerCase());
+  }
+
+  private normalizeAgentMailThread(
+    _workspaceId: string,
+    podId: string,
+    threadPayload: unknown,
+  ): NormalizedThreadInput | null {
+    const thread = asObject(threadPayload);
+    if (!thread) return null;
+
+    const inboxId = asString(thread.inbox_id);
+    const providerThreadId = asString(thread.thread_id);
+    if (!inboxId || !providerThreadId) {
+      return null;
+    }
+
+    const accountId = this.buildAgentMailAccountId(podId, inboxId);
+    const accountRow = this.db
+      .prepare("SELECT address FROM mailbox_accounts WHERE id = ?")
+      .get(accountId) as { address: string } | undefined;
+    const accountEmail = normalizeEmailAddress(accountRow?.address || inboxId) || inboxId.toLowerCase();
+    const threadLabels = this.normalizeAgentMailLabels(thread.labels);
+    const rawMessages = Array.isArray(thread.messages) ? thread.messages : [];
+
+    const normalizedMessages = rawMessages
+      .map<NormalizedMailboxMessage | null>((entry) => {
+        const message = asObject(entry);
+        if (!message) return null;
+        const providerMessageId = asString(message.message_id);
+        if (!providerMessageId) return null;
+        const from = parseAddressList(message.from)[0];
+        const to = parseAddressList(message.to);
+        const cc = parseAddressList(message.cc);
+        const bcc = parseAddressList(message.bcc);
+        const labels = this.normalizeAgentMailLabels(message.labels);
+        const bodyHtml = asString(message.html) || asString(message.body_html) || undefined;
+        const bodyText =
+          asString(message.text) ||
+          asString(message.body_text) ||
+          asString(message.body) ||
+          (bodyHtml ? stripHtml(bodyHtml) : "");
+        const receivedAt =
+          parseTimestamp(message.timestamp) ||
+          parseTimestamp(message.created_at) ||
+          parseTimestamp(message.updated_at) ||
+          Date.now();
+        const fromEmail = normalizeEmailAddress(from?.email);
+        const directionHint = asString(message.direction);
+        const outgoing =
+          directionHint === "outgoing" ||
+          directionHint === "sent" ||
+          fromEmail === accountEmail ||
+          labels.includes("sent");
+        const unread = labels.includes("unread") || threadLabels.includes("unread");
+
+        return {
+          id: `agentmail-message:${providerMessageId}`,
+          providerMessageId,
+          direction: outgoing ? ("outgoing" as const) : ("incoming" as const),
+          from,
+          to,
+          cc,
+          bcc,
+          subject:
+            asString(message.subject) ||
+            asString(thread.subject) ||
+            "Untitled thread",
+          snippet: normalizeWhitespace(
+            asString(message.preview) || bodyText || (bodyHtml ? stripHtml(bodyHtml) : ""),
+            240,
+          ),
+          body: normalizeWhitespace(bodyText, 12000),
+          bodyHtml,
+          receivedAt,
+          unread,
+          metadata: {
+            rfcMessageId:
+              asString(message.internet_message_id) ||
+              asString(message.message_id_header) ||
+              undefined,
+          },
+        };
+      })
+      .filter((message): message is NormalizedMailboxMessage => message !== null)
+      .sort((a, b) => a.receivedAt - b.receivedAt);
+
+    if (normalizedMessages.length === 0) {
+      return null;
+    }
+
+    const participants = uniqueParticipants(
+      [
+        ...parseAddressList(thread.senders),
+        ...parseAddressList(thread.recipients),
+        ...normalizedMessages.flatMap((message) => [
+          ...(message.from ? [message.from] : []),
+          ...message.to,
+          ...message.cc,
+          ...message.bcc,
+        ]),
+      ].filter((participant) => normalizeEmailAddress(participant.email) !== accountEmail),
+    );
+    const unreadCount = normalizedMessages.filter((message) => message.unread).length;
+    const lastMessage = normalizedMessages[normalizedMessages.length - 1]!;
+    const needsReply = normalizedMessages.some(
+      (message) => message.direction === "incoming" && message.unread,
+    );
+
+    return {
+      id: `agentmail-thread:${providerThreadId}`,
+      accountId,
+      provider: "agentmail",
+      providerThreadId,
+      subject:
+        asString(thread.subject) ||
+        lastMessage.subject ||
+        "Untitled thread",
+      snippet: normalizeWhitespace(
+        asString(thread.preview) ||
+          asString(thread.snippet) ||
+          lastMessage.snippet ||
+          lastMessage.body,
+        320,
+      ),
+      participants,
+      labels: threadLabels,
+      category: "other",
+      priorityScore: clampScore(needsReply ? 55 : unreadCount > 0 ? 35 : 10),
+      urgencyScore: clampScore(needsReply ? 30 : unreadCount > 0 ? 12 : 0),
+      needsReply,
+      staleFollowup: false,
+      cleanupCandidate: false,
+      handled: unreadCount === 0 && !needsReply,
+      unreadCount,
+      lastMessageAt:
+        parseTimestamp(thread.timestamp) ||
+        parseTimestamp(thread.received_timestamp) ||
+        parseTimestamp(thread.updated_at) ||
+        lastMessage.receivedAt,
+      messages: normalizedMessages,
+    };
+  }
+
+  async ingestAgentMailThread(
+    _workspaceId: string,
+    podId: string,
+    threadPayload: unknown,
+    options?: { classify?: boolean },
+  ): Promise<{ account: MailboxAccount; syncedMessages: number; isNewThread: boolean } | null> {
+    const normalized = this.normalizeAgentMailThread(_workspaceId, podId, threadPayload);
+    if (!normalized) return null;
+
+    const inboxParts = this.parseAgentMailAccountId(normalized.accountId);
+    const inboxRow = inboxParts
+      ? (this.db
+          .prepare(
+            `SELECT email, display_name
+             FROM agentmail_inboxes
+             WHERE pod_id = ? AND inbox_id = ?`,
+          )
+          .get(inboxParts.podId, inboxParts.inboxId) as
+          | { email: string | null; display_name: string | null }
+          | undefined)
+      : undefined;
+
+    const account = this.buildAgentMailAccount(
+      podId,
+      inboxParts?.inboxId || normalized.accountId,
+      inboxRow?.email || inboxParts?.inboxId,
+      inboxRow?.display_name || undefined,
+    );
+    this.upsertAccount(account);
+    const upsertResult = this.upsertThread(normalized);
+    if (upsertResult.shouldClassify && options?.classify !== false) {
+      await this.classifyMailboxThreadsForAccount(account.id, {
+        includeBackfill: true,
+        limit: Math.min(Math.max(normalized.messages.length, 1), MAILBOX_CLASSIFIER_MAX_BATCH),
+      });
+    }
+
+    this.db
+      .prepare("UPDATE mailbox_accounts SET last_synced_at = ?, updated_at = ? WHERE id = ?")
+      .run(Date.now(), Date.now(), account.id);
+
+    return {
+      account,
+      syncedMessages: normalized.messages.length,
+      isNewThread: upsertResult.isNewThread,
+    };
+  }
+
+  private async syncAgentMail(
+    limit: number,
+  ): Promise<{ accounts: MailboxAccount[]; syncedThreads: number; syncedMessages: number } | null> {
+    const bindings = this.getAgentMailBindings();
+    if (bindings.length === 0) {
+      return null;
+    }
+
+    const adminService = new AgentMailAdminService(this.db);
+    const client = this.getAgentMailClient();
+    const accountsById = new Map<string, MailboxAccount>();
+    const classificationCandidates = new Set<string>();
+    let processedThreads = 0;
+    let processedMessages = 0;
+
+    this.updateSyncProgress({
+      phase: "ingesting",
+      totalThreads: bindings.length * Math.min(Math.max(limit, 1), 50),
+      processedThreads: 0,
+      totalMessages: 0,
+      processedMessages: 0,
+      newThreads: 0,
+      classifiedThreads: 0,
+      skippedThreads: 0,
+      label: "Syncing AgentMail pods...",
+    });
+
+    for (const binding of bindings) {
+      const refreshed = await adminService.refreshWorkspace(binding.workspace_id);
+      for (const inbox of refreshed.inboxes) {
+        const account = this.buildAgentMailAccount(
+          inbox.podId,
+          inbox.inboxId,
+          inbox.email,
+          inbox.displayName,
+        );
+        this.upsertAccount(account);
+        accountsById.set(account.id, account);
+      }
+
+      const listResult = await client.listPodThreads(binding.pod_id, {
+        limit: Math.min(Math.max(limit * 3, limit), 100),
+        includeSpam: true,
+        includeBlocked: true,
+        includeTrash: true,
+      });
+      const threadRefs = Array.isArray(listResult.threads) ? listResult.threads : [];
+
+      for (const threadRef of threadRefs.slice(0, limit)) {
+        const providerThreadId = asString(asObject(threadRef)?.thread_id);
+        if (!providerThreadId) continue;
+        const thread = await client.getPodThread(binding.pod_id, providerThreadId);
+        const ingestResult = await this.ingestAgentMailThread(
+          binding.workspace_id,
+          binding.pod_id,
+          thread,
+          { classify: false },
+        );
+        if (!ingestResult) continue;
+        accountsById.set(ingestResult.account.id, ingestResult.account);
+        classificationCandidates.add(ingestResult.account.id);
+        processedThreads += 1;
+        processedMessages += ingestResult.syncedMessages;
+        this.updateSyncProgress({
+          phase: "ingesting",
+          accountId: ingestResult.account.id,
+          totalThreads: bindings.length * Math.min(Math.max(limit, 1), 50),
+          processedThreads,
+          totalMessages: Math.max(processedMessages, processedThreads),
+          processedMessages,
+          newThreads: processedThreads,
+          classifiedThreads: 0,
+          skippedThreads: 0,
+          label: `Syncing AgentMail ${processedThreads} thread${processedThreads === 1 ? "" : "s"} · ${processedMessages} message${processedMessages === 1 ? "" : "s"}`,
+        });
+      }
+    }
+
+    for (const accountId of classificationCandidates) {
+      await this.classifyMailboxThreadsForAccount(accountId, {
+        includeBackfill: true,
+        limit: MAILBOX_CLASSIFIER_MAX_BATCH,
+      });
+    }
+
+    return {
+      accounts: Array.from(accountsById.values()),
+      syncedThreads: processedThreads,
+      syncedMessages: processedMessages,
+    };
   }
 
   async reclassifyThread(threadId: string): Promise<MailboxReclassifyResult> {
@@ -4037,6 +4473,10 @@ export class MailboxService {
           return {
             id: `imap-message:${providerMessageId}`,
             providerMessageId,
+            metadata: {
+              imapUid: asNumber(message?.uid) ?? undefined,
+              rfcMessageId: asString(message?.messageId) || undefined,
+            },
             direction: fromEmail === accountEmail ? ("outgoing" as const) : ("incoming" as const),
             from: fromEmail
               ? {
@@ -4387,7 +4827,7 @@ export class MailboxService {
           encryptMailboxValue(message.bodyHtml || null),
           message.receivedAt,
           message.unread ? 1 : 0,
-          JSON.stringify({}),
+          JSON.stringify(message.metadata || {}),
           now,
           now,
         );
@@ -4988,7 +5428,8 @@ export class MailboxService {
            body_text,
            body_html,
            received_at,
-           is_unread
+           is_unread,
+           metadata_json
          FROM mailbox_messages
          WHERE thread_id = ?
          ORDER BY received_at ASC`,
@@ -5281,6 +5722,20 @@ export class MailboxService {
   }
 
   private resolveThreadWorkspaceId(_accountId?: string): string | undefined {
+    const agentMail = this.parseAgentMailAccountId(_accountId);
+    if (agentMail) {
+      const row = this.db
+        .prepare(
+          `SELECT workspace_id
+           FROM agentmail_inboxes
+           WHERE pod_id = ? AND inbox_id = ?
+           LIMIT 1`,
+        )
+        .get(agentMail.podId, agentMail.inboxId) as { workspace_id: string } | undefined;
+      if (row?.workspace_id) {
+        return row.workspace_id;
+      }
+    }
     return this.resolveDefaultWorkspaceId();
   }
 
@@ -5714,6 +6169,16 @@ export class MailboxService {
           removeLabelIds: ["INBOX"],
         },
       });
+    } else if (thread.provider === "agentmail") {
+      const account = this.parseAgentMailAccountId(thread.accountId);
+      const latestMessage = [...thread.messages].sort((a, b) => b.receivedAt - a.receivedAt)[0];
+      if (!account || !latestMessage) {
+        throw new Error("Unable to resolve AgentMail message for archive.");
+      }
+      await this.getAgentMailClient().updateMessage(account.inboxId, latestMessage.providerMessageId, {
+        addLabels: ["archived"],
+        removeLabels: ["inbox"],
+      });
     } else {
       throw new Error("Archive is not supported for the current IMAP adapter.");
     }
@@ -5738,6 +6203,15 @@ export class MailboxService {
         method: "POST",
         path: `/users/me/threads/${encodeURIComponent(thread.providerThreadId)}/trash`,
       });
+    } else if (thread.provider === "agentmail") {
+      const account = this.parseAgentMailAccountId(thread.accountId);
+      const latestMessage = [...thread.messages].sort((a, b) => b.receivedAt - a.receivedAt)[0];
+      if (!account || !latestMessage) {
+        throw new Error("Unable to resolve AgentMail message for trash.");
+      }
+      await this.getAgentMailClient().updateMessage(account.inboxId, latestMessage.providerMessageId, {
+        addLabels: ["trash"],
+      });
     } else {
       throw new Error("Trash is not supported for the current IMAP adapter.");
     }
@@ -5757,6 +6231,18 @@ export class MailboxService {
           removeLabelIds: ["UNREAD"],
         },
       });
+    } else if (thread.provider === "agentmail") {
+      const account = this.parseAgentMailAccountId(thread.accountId);
+      if (!account) {
+        throw new Error("Unable to resolve AgentMail inbox for mark_read.");
+      }
+      const unreadMessages = thread.messages.filter((message) => message.unread);
+      for (const message of unreadMessages) {
+        await this.getAgentMailClient().updateMessage(account.inboxId, message.providerMessageId, {
+          removeLabels: ["unread"],
+          addLabels: ["read"],
+        });
+      }
     } else {
       const channel = this.channelRepo.findByType("email");
       if (!channel) throw new Error("Email channel is not configured");
@@ -5785,9 +6271,8 @@ export class MailboxService {
         await client.markAsRead(uid);
       } else {
         const client = this.createStandardEmailClient(channel.id, cfg);
-        const latest = thread.messages.filter((message) => message.unread).slice(-1)[0];
-        const uid = Number(latest?.providerMessageId);
-        if (!Number.isFinite(uid)) {
+        const uid = await this.resolveImapUidForMarkRead(thread.id, client);
+        if (uid === null || !Number.isFinite(uid)) {
           throw new Error("Unable to resolve IMAP UID for mark_read");
         }
         await client.markAsRead(uid);
@@ -5800,21 +6285,134 @@ export class MailboxService {
       .run(Date.now(), thread.id);
   }
 
+  private extractStoredImapUid(row: Pick<MailboxMessageRow, "provider_message_id" | "metadata_json">): number | null {
+    const providerUid = Number(row.provider_message_id);
+    if (Number.isFinite(providerUid)) {
+      return providerUid;
+    }
+    const metadata = parseMailboxMessageMetadata(row.metadata_json);
+    return Number.isFinite(metadata.imapUid) ? metadata.imapUid || null : null;
+  }
+
+  private mailboxRowMatchesImapMessage(
+    row: Pick<MailboxMessageRow, "subject" | "from_email" | "received_at">,
+    message: EmailMessage,
+  ): boolean {
+    const rowSubject = normalizeWhitespace(row.subject || "", 160).toLowerCase();
+    const messageSubject = normalizeWhitespace(message.subject || "", 160).toLowerCase();
+    const rowFrom = normalizeEmailAddress(row.from_email || "");
+    const messageFrom = normalizeEmailAddress(message.from?.address || "");
+    return (
+      rowSubject.length > 0 &&
+      rowSubject === messageSubject &&
+      rowFrom !== null &&
+      rowFrom.length > 0 &&
+      rowFrom === messageFrom &&
+      Math.abs(message.date.getTime() - row.received_at) <= 5 * 60 * 1000
+    );
+  }
+
+  private persistResolvedImapMessageMetadata(
+    row: Pick<MailboxMessageRow, "id" | "metadata_json">,
+    message: EmailMessage,
+  ): void {
+    const previous = parseMailboxMessageMetadata(row.metadata_json);
+    this.db
+      .prepare("UPDATE mailbox_messages SET metadata_json = ?, updated_at = ? WHERE id = ?")
+      .run(
+        JSON.stringify({
+          ...previous,
+          imapUid: message.uid,
+          rfcMessageId: message.messageId,
+        }),
+        Date.now(),
+        row.id,
+      );
+  }
+
+  private async resolveImapUidForMarkRead(threadId: string, client: EmailClient): Promise<number | null> {
+    const rows = this.db
+      .prepare(
+        `SELECT
+           id,
+           provider_message_id,
+           subject,
+           from_email,
+           received_at,
+           is_unread,
+           metadata_json
+         FROM mailbox_messages
+         WHERE thread_id = ?
+         ORDER BY is_unread DESC, received_at DESC`,
+      )
+      .all(threadId) as Array<
+      Pick<
+        MailboxMessageRow,
+        "id" | "provider_message_id" | "subject" | "from_email" | "received_at" | "is_unread" | "metadata_json"
+      >
+    >;
+
+    for (const row of rows) {
+      const uid = this.extractStoredImapUid(row);
+      if (Number.isFinite(uid)) {
+        return uid;
+      }
+    }
+
+    const remoteMessages = await client.fetchRecentEmails(Math.min(Math.max(rows.length * 10, 25), 200));
+    const priorityRows = rows.some((row) => Boolean(row.is_unread))
+      ? rows.filter((row) => Boolean(row.is_unread))
+      : rows;
+
+    for (const row of priorityRows) {
+      const metadata = parseMailboxMessageMetadata(row.metadata_json);
+      const candidateIds = new Set(
+        [row.provider_message_id, metadata.rfcMessageId].filter((value): value is string => Boolean(value)),
+      );
+      const match =
+        remoteMessages.find((message) => candidateIds.has(message.messageId)) ||
+        remoteMessages.find((message) => this.mailboxRowMatchesImapMessage(row, message));
+      if (!match || !Number.isFinite(match.uid)) {
+        continue;
+      }
+      this.persistResolvedImapMessageMetadata(row, match);
+      mailboxLogger.warn("Recovered legacy IMAP UID for mailbox mark_read", {
+        threadId,
+        mailboxMessageId: row.id,
+        messageId: match.messageId,
+        uid: match.uid,
+      });
+      return match.uid;
+    }
+
+    return null;
+  }
+
   private async applyLabel(
     thread: MailboxThreadDetail | (MailboxThreadListItem & { messages: MailboxMessage[] }),
     label: string,
   ): Promise<void> {
-    if (thread.provider !== "gmail") {
-      throw new Error("Label actions are only supported for Gmail-backed threads.");
+    if (thread.provider === "agentmail") {
+      const account = this.parseAgentMailAccountId(thread.accountId);
+      const latestMessage = [...thread.messages].sort((a, b) => b.receivedAt - a.receivedAt)[0];
+      if (!account || !latestMessage) {
+        throw new Error("Unable to resolve AgentMail message for label update.");
+      }
+      await this.getAgentMailClient().updateMessage(account.inboxId, latestMessage.providerMessageId, {
+        addLabels: [label],
+      });
+    } else if (thread.provider !== "gmail") {
+      throw new Error("Label actions are only supported for Gmail- or AgentMail-backed threads.");
+    } else {
+      const settings = GoogleWorkspaceSettingsManager.loadSettings();
+      await gmailRequest(settings, {
+        method: "POST",
+        path: `/users/me/threads/${encodeURIComponent(thread.providerThreadId)}/modify`,
+        body: {
+          addLabelIds: [label],
+        },
+      });
     }
-    const settings = GoogleWorkspaceSettingsManager.loadSettings();
-    await gmailRequest(settings, {
-      method: "POST",
-      path: `/users/me/threads/${encodeURIComponent(thread.providerThreadId)}/modify`,
-      body: {
-        addLabelIds: [label],
-      },
-    });
 
     const labels = Array.from(new Set([...thread.labels, label]));
     this.db
@@ -5857,6 +6455,18 @@ export class MailboxService {
           raw,
           threadId: thread.providerThreadId,
         },
+      });
+    } else if (thread.provider === "agentmail") {
+      const account = this.parseAgentMailAccountId(thread.accountId);
+      const latestInbound = [...thread.messages]
+        .filter((message) => message.direction === "incoming")
+        .sort((a, b) => b.receivedAt - a.receivedAt)[0];
+      if (!account || !latestInbound) {
+        throw new Error("Unable to resolve AgentMail reply target.");
+      }
+      await this.getAgentMailClient().replyAllMessage(account.inboxId, latestInbound.providerMessageId, {
+        text: draft.body,
+        subject: draft.subject,
       });
     } else {
       const channel = this.channelRepo.findByType("email");

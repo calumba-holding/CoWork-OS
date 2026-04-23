@@ -1268,6 +1268,81 @@ export class DatabaseManager {
         last_seen_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS agentmail_workspace_pods (
+        workspace_id TEXT PRIMARY KEY,
+        pod_id TEXT NOT NULL UNIQUE,
+        pod_name TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS agentmail_inboxes (
+        workspace_id TEXT NOT NULL,
+        pod_id TEXT NOT NULL,
+        inbox_id TEXT NOT NULL,
+        email TEXT,
+        display_name TEXT,
+        client_id TEXT,
+        metadata_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (pod_id, inbox_id),
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS agentmail_domains (
+        domain_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        pod_id TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        status TEXT,
+        feedback_enabled INTEGER NOT NULL DEFAULT 0,
+        records_json TEXT,
+        client_id TEXT,
+        metadata_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS agentmail_lists (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        pod_id TEXT,
+        inbox_id TEXT,
+        direction TEXT NOT NULL,
+        list_type TEXT NOT NULL,
+        entry_value TEXT NOT NULL,
+        entry_type TEXT,
+        reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS agentmail_api_keys (
+        api_key_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        pod_id TEXT,
+        inbox_id TEXT,
+        name TEXT,
+        prefix TEXT NOT NULL,
+        permissions_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS agentmail_realtime_state (
+        id TEXT PRIMARY KEY,
+        connection_state TEXT NOT NULL,
+        last_event_at INTEGER,
+        last_error TEXT,
+        subscribed_inboxes_json TEXT,
+        updated_at INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS contact_identities (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -1434,6 +1509,10 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_mailbox_contacts_email ON mailbox_contacts(email);
       CREATE INDEX IF NOT EXISTS idx_mailbox_events_workspace ON mailbox_events(workspace_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_mailbox_events_thread ON mailbox_events(thread_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agentmail_inboxes_workspace ON agentmail_inboxes(workspace_id, pod_id);
+      CREATE INDEX IF NOT EXISTS idx_agentmail_domains_workspace ON agentmail_domains(workspace_id, pod_id);
+      CREATE INDEX IF NOT EXISTS idx_agentmail_lists_workspace ON agentmail_lists(workspace_id, inbox_id, direction, list_type);
+      CREATE INDEX IF NOT EXISTS idx_agentmail_api_keys_workspace ON agentmail_api_keys(workspace_id, inbox_id);
       CREATE INDEX IF NOT EXISTS idx_contact_identities_workspace ON contact_identities(workspace_id, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_contact_identities_email ON contact_identities(primary_email);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_identity_handles_unique

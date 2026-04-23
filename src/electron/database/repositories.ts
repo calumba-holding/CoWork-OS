@@ -516,16 +516,40 @@ export class TaskRepository {
     return this.findById(id);
   }
 
+  touch(id: string, timestamp = Date.now()): Task | undefined {
+    const before = this.findById(id);
+    const result = this.db
+      .prepare("UPDATE tasks SET updated_at = ? WHERE id = ?")
+      .run(timestamp, id);
+
+    if (result.changes === 0) {
+      return undefined;
+    }
+
+    const after = this.findById(id);
+    UsageInsightsProjector.getIfInitialized()?.enqueueTaskUpdate(before, after);
+    return after;
+  }
+
   findById(id: string): Task | undefined {
     const stmt = this.db.prepare("SELECT * FROM tasks WHERE id = ?");
     const row = stmt.get(id) as Any;
     return row ? this.mapRowToTask(row) : undefined;
   }
 
-  findAll(limit = 100, offset = 0): Task[] {
+  findAll(limit = 100, offset = 0, options?: { prioritizeSidebar?: boolean }): Task[] {
+    const orderBy = options?.prioritizeSidebar
+      ? `
+      ORDER BY
+        CASE WHEN COALESCE(is_pinned, 0) = 1 THEN 0 ELSE 1 END,
+        CASE WHEN status IN ('executing', 'planning', 'interrupted', 'paused', 'blocked') THEN 0 ELSE 1 END,
+        COALESCE(updated_at, created_at) DESC,
+        created_at DESC
+      `
+      : "ORDER BY COALESCE(updated_at, created_at) DESC, created_at DESC";
     const stmt = this.db.prepare(`
       SELECT * FROM tasks
-      ORDER BY created_at DESC
+      ${orderBy}
       LIMIT ? OFFSET ?
     `);
     const rows = stmt.all(limit, offset) as Any[];
@@ -3407,6 +3431,7 @@ export type MemoryType =
   | "decision"
   | "error"
   | "insight"
+  | "screen_context"
   | "summary"
   | "preference"
   | "constraint"
@@ -4055,6 +4080,12 @@ export class MemoryRepository {
   deleteByWorkspace(workspaceId: string): number {
     const stmt = this.db.prepare("DELETE FROM memories WHERE workspace_id = ?");
     const result = stmt.run(workspaceId);
+    return result.changes;
+  }
+
+  deleteByWorkspaceAndId(workspaceId: string, memoryId: string): number {
+    const stmt = this.db.prepare("DELETE FROM memories WHERE workspace_id = ? AND id = ?");
+    const result = stmt.run(workspaceId, memoryId);
     return result.changes;
   }
 

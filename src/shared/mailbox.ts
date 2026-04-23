@@ -1,4 +1,4 @@
-export type MailboxProvider = "gmail" | "imap";
+export type MailboxProvider = "gmail" | "imap" | "agentmail";
 
 export type MailboxThreadSortOrder = "priority" | "recent";
 export type MailboxThreadMailboxView = "inbox" | "sent" | "all";
@@ -30,7 +30,7 @@ export type MailboxProposalStatus = "suggested" | "approved" | "applied" | "dism
 
 export type MailboxCommitmentState = "suggested" | "accepted" | "done" | "dismissed";
 
-export type MailboxAutomationKind = "rule" | "schedule" | "reminder";
+export type MailboxAutomationKind = "rule" | "schedule" | "reminder" | "forward";
 
 export type MailboxAutomationStatus = "active" | "paused" | "error" | "deleted";
 
@@ -462,6 +462,32 @@ export interface MailboxScheduleRecipe {
   enabled?: boolean;
 }
 
+export interface MailboxForwardRecipe {
+  name: string;
+  description?: string;
+  workspaceId?: string;
+  threadId?: string;
+  providerThreadId?: string;
+  schedule: import("../electron/cron/types").CronSchedule;
+  targetEmail: string;
+  allowedSenders: string[];
+  allowedDomains: string[];
+  excludedSenders?: string[];
+  excludedDomains?: string[];
+  subjectKeywords?: string[];
+  attachmentKeywords?: string[];
+  attachmentExtensions?: string[];
+  dryRun?: boolean;
+  maxMessagesPerRun?: number;
+  backfillDays?: number;
+  lookbackMinutes?: number;
+  gmailQuery?: string;
+  forwardedLabelName?: string;
+  rejectedLabelName?: string;
+  candidateLabelName?: string;
+  enabled?: boolean;
+}
+
 export interface MailboxAutomationRecord {
   id: string;
   workspaceId: string;
@@ -473,6 +499,7 @@ export interface MailboxAutomationRecord {
   source: "mailbox_event" | "cron";
   rule?: MailboxRuleRecipe;
   schedule?: MailboxScheduleRecipe;
+  forward?: MailboxForwardRecipe;
   backingTriggerId?: string;
   backingCronJobId?: string;
   latestOutcome?: string;

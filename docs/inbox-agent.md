@@ -81,7 +81,34 @@ The main advantage of Inbox Agent is speed without losing context:
 - **Refresh intel** - re-runs the thread analysis and contact intelligence for the selected conversation
 - **Remind later** - snoozes a thread by creating a timed follow-up task
 - **Automation rule / schedule** - create inbox-native rules or patrol schedules from a thread or filter
+- **Auto-forward** - create a Gmail forwarding automation from the selected thread to route matching attachments to another mailbox
 - **Bulk archive / trash / mark read** - clears multiple threads at once
+
+## Gmail Forwarding Automations
+
+Inbox Agent can create native Gmail forwarding automations from the selected thread with `Auto-forward…`.
+
+What the flow does:
+
+- creates a mailbox automation with sender/domain filters, optional subject keywords, attachment extension filters, and a target recipient
+- stores the selected Gmail `providerThreadId` so thread-created automations stay scoped to that Gmail conversation instead of widening to the whole mailbox
+- supports `dry-run` mode first so you can label and audit candidate messages before enabling real sends
+- reconstructs and sends a new MIME email with the matched attachments instead of relying on Google Apps Script forwarding
+
+Current behavior:
+
+- **Gmail only** - the forwarding automation currently depends on Gmail API search, label mutation, attachment fetch, and send flows
+- **Attachment-driven** - the built-in thread action currently defaults to PDF forwarding, but the underlying automation supports configurable attachment extension and filename keyword filters
+- **Persistent scan watermark** - recurring runs track the last successful scan time and search with overlap, so a short app restart, laptop sleep, or delayed timer does not permanently drop matching mail
+- **Per-message dedupe** - already-sent messages are tracked in the local database by automation id and Gmail message id, so later mail in the same thread can still be evaluated independently
+- **Thread labels are status cues, not hard suppression** - candidate / rejected / forwarded Gmail labels are still applied for operator visibility, but they are not used as permanent search exclusions because later messages in the same thread may still qualify
+
+Operational notes:
+
+- `Run now` evaluates the automation immediately and then recomputes the next scheduled run from the current time
+- a successful non-dry-run execution advances the stored scan watermark; dry-run keeps the watermark unchanged so you can repeatedly inspect the same candidate set
+- thread-created automations keep the CoWork `threadId` for UI association and the Gmail `providerThreadId` for execution scoping
+- Gmail modify scope is required because the automation creates labels, updates thread labels, fetches attachments, and sends mail
 
 ## Event Pipeline
 

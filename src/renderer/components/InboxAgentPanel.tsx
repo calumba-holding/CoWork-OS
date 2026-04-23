@@ -25,6 +25,7 @@ import {
   MailboxAutomationRecord,
   MailboxCommitment,
   MailboxCompanyCandidate,
+  MailboxForwardRecipe,
   MailboxDigestSnapshot,
   MailboxConditionOperator,
   MailboxMissionControlHandoffPreview,
@@ -763,6 +764,25 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
   const gmailCleanupActionsEnabled = googleWorkspaceEnabled && gmailModifyScopeGranted;
   const selectedThreadNeedsGmailCleanupAttention =
     selectedThread?.provider === "gmail" && Boolean(gmailCleanupDisabledReason);
+  const selectedBulkThreads = useMemo(() => {
+    const threadById = new Map(threads.map((thread) => [thread.id, thread]));
+    if (selectedThread) {
+      threadById.set(selectedThread.id, selectedThread);
+    }
+    return selectedBulkThreadIds
+      .map((threadId) => threadById.get(threadId) || null)
+      .filter((thread): thread is NonNullable<typeof selectedThread> => Boolean(thread));
+  }, [selectedBulkThreadIds, selectedThread, threads]);
+  const bulkSelectionHasGmailThread = selectedBulkThreads.some((thread) => thread.provider === "gmail");
+  const bulkSelectionHasNonGmailThread = selectedBulkThreads.some((thread) => thread.provider !== "gmail");
+  const bulkArchiveTrashDisabledReason = bulkSelectionHasNonGmailThread
+    ? "Archive and Trash are currently supported only for Gmail threads."
+    : bulkSelectionHasGmailThread && gmailCleanupDisabledReason
+      ? gmailCleanupDisabledReason
+      : null;
+  const bulkMarkReadDisabledReason = bulkSelectionHasGmailThread && gmailCleanupDisabledReason
+    ? gmailCleanupDisabledReason
+    : null;
 
   const clearThreadSelection = () => {
     setSelectedThreadIds([]);
@@ -1190,14 +1210,18 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
 
   const handleBulkThreadAction = async (type: "archive" | "trash" | "mark_read") => {
     if (!selectedBulkThreadIds.length) return;
-    if (type !== "mark_read") {
-      if (!gmailCleanupActionsEnabled) {
-        setError(gmailCleanupDisabledReason || "Reconnect Google Workspace to archive or trash Gmail threads.");
+    if (type === "mark_read") {
+      if (bulkMarkReadDisabledReason) {
+        setError(bulkMarkReadDisabledReason);
         return;
       }
-      const selectedThreads = threads.filter((thread) => selectedBulkThreadIds.includes(thread.id));
-      if (selectedThreads.some((thread) => thread.provider !== "gmail")) {
+    } else {
+      if (bulkSelectionHasNonGmailThread) {
         setError("Archive and Trash are currently supported only for Gmail threads.");
+        return;
+      }
+      if (!gmailCleanupActionsEnabled) {
+        setError(gmailCleanupDisabledReason || "Reconnect Google Workspace to archive or trash Gmail threads.");
         return;
       }
     }
@@ -1254,6 +1278,89 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
         cooldownMs: 30 * 60 * 1000,
       });
       await reloadAll(thread?.id);
+    });
+  };
+
+  const createForwardAutomationFromCurrentContext = async () => {
+    if (!selectedThread) return;
+    if (selectedThread.provider !== "gmail") {
+      setError("Forwarding automations currently require a Gmail-backed thread.");
+      return;
+    }
+
+    const targetEmail = window.prompt("Forward matching Gmail messages to which email address?", "");
+    if (targetEmail === null) return;
+    const normalizedTarget = targetEmail.trim();
+    if (!normalizedTarget) {
+      setError("Target email is required.");
+      return;
+    }
+
+    const suggestedSenders = Array.from(
+      new Set(
+        selectedThread.messages
+          .filter((message) => message.direction === "incoming")
+          .map((message) => message.from?.email?.trim().toLowerCase())
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
+    const senderCsv = window.prompt(
+      "Allowed sender emails (comma-separated). Leave blank to use sender domains instead.",
+      suggestedSenders.join(", "),
+    );
+    if (senderCsv === null) return;
+    const allowedSenders = senderCsv
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const allowedDomains =
+      allowedSenders.length === 0
+        ? Array.from(
+            new Set(
+              suggestedSenders
+                .map((value) => value.split("@")[1]?.trim().toLowerCase())
+                .filter((value): value is string => Boolean(value)),
+            ),
+          )
+        : [];
+    if (allowedSenders.length === 0 && allowedDomains.length === 0) {
+      setError("At least one sender or sender domain is required.");
+      return;
+    }
+
+    const subjectKeywordsRaw = window.prompt(
+      "Optional subject keywords (comma-separated). Leave blank to match any PDF from the allowed sender(s).",
+      "",
+    );
+    if (subjectKeywordsRaw === null) return;
+    const subjectKeywords = subjectKeywordsRaw
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const dryRun = window.confirm(
+      "Create this forwarding automation in dry-run mode first?\n\nOK = dry-run only\nCancel = send matching emails for real",
+    );
+
+    await runAction(async () => {
+      const recipe: MailboxForwardRecipe = {
+        name: `Auto-forward: ${selectedThread.subject?.slice(0, 80) || "Gmail thread"}`,
+        description: `Forward Gmail messages matching ${selectedThread.subject || "this thread"} to ${normalizedTarget}.`,
+        threadId: selectedThread.id,
+        providerThreadId: selectedThread.providerThreadId,
+        schedule: { kind: "every", everyMs: 15 * 60 * 1000 },
+        targetEmail: normalizedTarget,
+        allowedSenders,
+        allowedDomains,
+        subjectKeywords,
+        attachmentExtensions: ["pdf"],
+        dryRun,
+        maxMessagesPerRun: 100,
+        backfillDays: 30,
+        lookbackMinutes: 20,
+        enabled: true,
+      };
+      await window.electronAPI.createMailboxForward(recipe);
+      await reloadAll(selectedThread.id);
     });
   };
 
@@ -2086,20 +2193,23 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
                   onClick={() => void handleBulkThreadAction("archive")}
                   icon={<Archive size={11} />}
                   label="Archive"
-                  disabled={busy}
+                  disabled={busy || Boolean(bulkArchiveTrashDisabledReason)}
+                  title={bulkArchiveTrashDisabledReason || undefined}
                 />
                 <ActionBtn
                   onClick={() => void handleBulkThreadAction("mark_read")}
                   icon={<MailOpen size={11} />}
                   label="Mark read"
-                  disabled={busy}
+                  disabled={busy || Boolean(bulkMarkReadDisabledReason)}
+                  title={bulkMarkReadDisabledReason || undefined}
                 />
                 <ActionBtn
                   onClick={() => void handleBulkThreadAction("trash")}
                   icon={<Trash2 size={11} />}
                   label="Trash"
                   variant="danger"
-                  disabled={busy}
+                  disabled={busy || Boolean(bulkArchiveTrashDisabledReason)}
+                  title={bulkArchiveTrashDisabledReason || undefined}
                 />
                 <ActionBtn
                   onClick={clearThreadSelection}
@@ -2680,6 +2790,21 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
                   >
                     {selectedThread.provider}
                   </span>
+                  {selectedThread.provider === "agentmail" && (
+                    <span
+                      style={{
+                        padding: "3px 8px",
+                        borderRadius: "999px",
+                        background: "rgba(14,165,233,0.10)",
+                        color: "#0369a1",
+                        fontSize: "0.68rem",
+                        border: "1px solid rgba(14,165,233,0.20)",
+                      }}
+                      title="Manage AgentMail pods, domains, lists, and inbox keys in Settings > Integrations > AgentMail."
+                    >
+                      Settings → Integrations → AgentMail
+                    </span>
+                  )}
                   <span
                     style={{
                       padding: "3px 8px",
@@ -3695,6 +3820,15 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "10px" }}>
                 <ActionBtn
+                  onClick={() => void createForwardAutomationFromCurrentContext()}
+                  icon={<Send size={13} />}
+                  label="Auto-forward…"
+                  disabled={busy || !selectedThread || selectedThread.provider !== "gmail"}
+                />
+                <div />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "10px" }}>
+                <ActionBtn
                   onClick={() => {
                     if (!selectedThread) return;
                     setLabelSimilarName(selectedThread.subject?.slice(0, 120) || "My saved view");
@@ -3818,36 +3952,62 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
                               {automation.kind}
                               {" · "}
                               {automation.status}
+                              {automation.forward?.dryRun ? " · dry-run" : ""}
                               {automation.latestOutcome ? ` · ${automation.latestOutcome}` : ""}
                               {automation.nextRunAt ? ` · Next ${formatFullTime(automation.nextRunAt)}` : ""}
                               {automation.latestFireAt ? ` · Fired ${formatFullTime(automation.latestFireAt)}` : ""}
                             </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void runAction(async () => {
-                                if (automation.kind === "rule") {
-                                  await window.electronAPI.deleteMailboxRule(automation.id);
-                                } else {
-                                  await window.electronAPI.deleteMailboxSchedule(automation.id);
+                          <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
+                            {automation.kind === "forward" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void runAction(async () => {
+                                    await window.electronAPI.runMailboxForward(automation.id);
+                                    await reloadAll(selectedThread.id);
+                                  })
                                 }
-                                await reloadAll(selectedThread.id);
-                              })
-                            }
-                            style={{
-                              border: "1px solid var(--color-border-subtle)",
-                              background: "var(--color-bg-secondary)",
-                              borderRadius: "999px",
-                              color: "var(--color-text-muted)",
-                              fontSize: "0.68rem",
-                              padding: "2px 8px",
-                              cursor: "pointer",
-                              flexShrink: 0,
-                            }}
-                          >
-                            Remove
-                          </button>
+                                style={{
+                                  border: "1px solid var(--color-border-subtle)",
+                                  background: "var(--color-bg-secondary)",
+                                  borderRadius: "999px",
+                                  color: "var(--color-text-muted)",
+                                  fontSize: "0.68rem",
+                                  padding: "2px 8px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Run now
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void runAction(async () => {
+                                  if (automation.kind === "rule") {
+                                    await window.electronAPI.deleteMailboxRule(automation.id);
+                                  } else if (automation.kind === "forward") {
+                                    await window.electronAPI.deleteMailboxForward(automation.id);
+                                  } else {
+                                    await window.electronAPI.deleteMailboxSchedule(automation.id);
+                                  }
+                                  await reloadAll(selectedThread.id);
+                                })
+                              }
+                              style={{
+                                border: "1px solid var(--color-border-subtle)",
+                                background: "var(--color-bg-secondary)",
+                                borderRadius: "999px",
+                                color: "var(--color-text-muted)",
+                                fontSize: "0.68rem",
+                                padding: "2px 8px",
+                                cursor: "pointer",
+                              }}
+                            >
+                              Remove
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))}

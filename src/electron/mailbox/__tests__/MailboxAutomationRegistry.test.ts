@@ -258,4 +258,61 @@ describeWithSqlite("MailboxAutomationRegistry", () => {
       expect(triggerService.removeTrigger).toHaveBeenCalledWith(created.backingTriggerId);
     });
   });
+
+  describe("forward automations", () => {
+    it("creates a forwarding automation with normalized defaults", async () => {
+      const { MailboxAutomationRegistry } = await import("../MailboxAutomationRegistry");
+      const automation = MailboxAutomationRegistry.createForward({
+        name: "Forward invoices",
+        schedule: { kind: "every", everyMs: 15 * 60 * 1000 },
+        targetEmail: "ops@example.com",
+        allowedSenders: ["Billing@Vendor.com"],
+        allowedDomains: [],
+      });
+
+      expect(automation.kind).toBe("forward");
+      expect(automation.status).toBe("active");
+      expect(automation.forward?.allowedSenders).toEqual(["billing@vendor.com"]);
+      expect(automation.forward?.attachmentExtensions).toEqual([]);
+      expect(typeof automation.nextRunAt).toBe("number");
+    });
+
+    it("updates a forwarding automation and recomputes next run", async () => {
+      const { MailboxAutomationRegistry } = await import("../MailboxAutomationRegistry");
+      const created = MailboxAutomationRegistry.createForward({
+        name: "Forward invoices",
+        schedule: { kind: "every", everyMs: 15 * 60 * 1000 },
+        targetEmail: "ops@example.com",
+        allowedSenders: ["billing@vendor.com"],
+        allowedDomains: [],
+      });
+
+      const updated = MailboxAutomationRegistry.updateForward(created.id, {
+        dryRun: false,
+        subjectKeywords: ["invoice"],
+      });
+
+      expect(updated?.forward?.dryRun).toBe(false);
+      expect(updated?.forward?.subjectKeywords).toEqual(["invoice"]);
+      expect(typeof updated?.nextRunAt).toBe("number");
+    });
+
+    it("soft-deletes a forwarding automation", async () => {
+      const { MailboxAutomationRegistry } = await import("../MailboxAutomationRegistry");
+      const created = MailboxAutomationRegistry.createForward({
+        name: "Forward invoices",
+        schedule: { kind: "every", everyMs: 15 * 60 * 1000 },
+        targetEmail: "ops@example.com",
+        allowedSenders: ["billing@vendor.com"],
+        allowedDomains: [],
+      });
+
+      expect(MailboxAutomationRegistry.deleteForward(created.id)).toBe(true);
+      expect(
+        MailboxAutomationRegistry.listAutomations({ workspaceId: "ws-default" }).find(
+          (item) => item.id === created.id,
+        ),
+      ).toBeUndefined();
+    });
+  });
 });

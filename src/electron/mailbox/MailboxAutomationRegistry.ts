@@ -1,11 +1,13 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { getCronService } from "../cron";
+import { computeNextRunAtMs } from "../cron/schedule";
 import type { CronEvent, CronJobCreate, CronJobPatch } from "../cron/types";
 import type { EventTriggerService } from "../triggers/EventTriggerService";
 import type { EventTrigger, TriggerCondition, TriggerEvent, TriggerHistoryEntry } from "../triggers/types";
 import type {
   MailboxAutomationRecord,
+  MailboxForwardRecipe,
   MailboxAutomationStatus,
   MailboxRuleRecipe,
   MailboxScheduleRecipe,
@@ -20,13 +22,16 @@ type MailboxAutomationAuditEvent =
   | "cron_updated"
   | "cron_started"
   | "cron_finished"
-  | "cron_removed";
+  | "cron_removed"
+  | "forward_run_started"
+  | "forward_run_finished";
 
 type MailboxAutomationRegistryDeps = {
   db: Database.Database;
   triggerService?: EventTriggerService | null;
   resolveDefaultWorkspaceId: () => string | undefined;
   log?: (...args: unknown[]) => void;
+  onMutation?: () => void;
 };
 
 type MailboxAutomationRow = {
@@ -84,6 +89,19 @@ function ruleTriggerName(recipe: MailboxRuleRecipe): string {
 
 function scheduleJobName(recipe: MailboxScheduleRecipe): string {
   return recipe.name.trim();
+}
+
+function forwardingJobName(recipe: MailboxForwardRecipe): string {
+  return recipe.name.trim();
+}
+
+function normalizeStringArray(values: unknown, lowercase = true): string[] {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => normalizeString(value))
+    .filter((value): value is string => Boolean(value))
+    .map((value) => (lowercase ? value.toLowerCase() : value))
+    .filter((value, index, array) => array.indexOf(value) === index);
 }
 
 export class MailboxAutomationRegistry {
@@ -294,6 +312,7 @@ export class MailboxAutomationRegistry {
         automationId,
       );
     this.appendAudit(automationId, record.workspaceId, "updated", { patch });
+    deps.onMutation?.();
     return this.listAutomations({ workspaceId: record.workspaceId }).find((item) => item.id === automationId) ?? null;
   }
 
@@ -306,6 +325,165 @@ export class MailboxAutomationRegistry {
       deps.triggerService.removeTrigger(record.backingTriggerId);
     }
     this.markDeleted(record.id, record.workspaceId, { backingTriggerId: record.backingTriggerId });
+    return true;
+  }
+
+  static createForward(recipe: MailboxForwardRecipe): MailboxAutomationRecord {
+    const deps = this.getDeps();
+    const workspaceId = recipe.workspaceId?.trim() || deps.resolveDefaultWorkspaceId();
+    if (!workspaceId) {
+      throw new Error("No default workspace available for mailbox automation");
+    }
+    if (!normalizeString(recipe.targetEmail)) {
+      throw new Error("Target email is required for forwarding automation");
+    }
+    const allowedSenders = normalizeStringArray(recipe.allowedSenders);
+    const allowedDomains = normalizeStringArray(recipe.allowedDomains);
+    if (allowedSenders.length === 0 && allowedDomains.length === 0) {
+      throw new Error("At least one allowed sender or domain is required");
+    }
+
+    const automationId = randomUUID();
+    const now = Date.now();
+    const normalizedRecipe: MailboxForwardRecipe = {
+      ...recipe,
+      workspaceId,
+      name: forwardingJobName(recipe),
+      targetEmail: recipe.targetEmail.trim(),
+      providerThreadId: normalizeString(recipe.providerThreadId),
+      allowedSenders,
+      allowedDomains,
+      excludedSenders: normalizeStringArray(recipe.excludedSenders),
+      excludedDomains: normalizeStringArray(recipe.excludedDomains),
+      subjectKeywords: normalizeStringArray(recipe.subjectKeywords),
+      attachmentKeywords: normalizeStringArray(recipe.attachmentKeywords),
+      attachmentExtensions: normalizeStringArray(recipe.attachmentExtensions),
+      dryRun: recipe.dryRun ?? true,
+      maxMessagesPerRun: Math.max(1, Math.min(500, Number(recipe.maxMessagesPerRun || 100))),
+      backfillDays: Math.max(1, Math.min(3650, Number(recipe.backfillDays || 30))),
+      lookbackMinutes: Math.max(1, Math.min(7 * 24 * 60, Number(recipe.lookbackMinutes || 20))),
+      forwardedLabelName: normalizeString(recipe.forwardedLabelName) || "cowork/forwarded",
+      rejectedLabelName: normalizeString(recipe.rejectedLabelName) || "cowork/rejected",
+      candidateLabelName: normalizeString(recipe.candidateLabelName) || "cowork/candidate",
+      gmailQuery: normalizeString(recipe.gmailQuery),
+      enabled: recipe.enabled ?? true,
+    };
+
+    const record: MailboxAutomationRecord = {
+      id: automationId,
+      workspaceId,
+      kind: "forward",
+      status: normalizedRecipe.enabled === false ? "paused" : "active",
+      name: normalizedRecipe.name,
+      description: normalizedRecipe.description,
+      threadId: normalizedRecipe.threadId,
+      source: "cron",
+      forward: normalizedRecipe,
+      nextRunAt: normalizedRecipe.enabled === false ? undefined : computeNextRunAtMs(normalizedRecipe.schedule, now),
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.insertRecord(record, {
+      automationId,
+      workspaceId,
+      eventType: "created",
+      detail: { kind: "forward" },
+    });
+    const created = this.fetchRow(automationId);
+    if (!created) {
+      throw new Error("Failed to persist forwarding automation");
+    }
+    return this.enrichRecord(created);
+  }
+
+  static updateForward(
+    automationId: string,
+    patch: Partial<MailboxForwardRecipe> & { status?: MailboxAutomationStatus },
+  ): MailboxAutomationRecord | null {
+    const deps = this.getDeps();
+    const row = this.fetchRow(automationId);
+    if (!row || row.kind !== "forward") return null;
+
+    const record = this.enrichRecord(row);
+    const nextForward: MailboxForwardRecipe = {
+      ...(record.forward || {
+        name: record.name,
+        schedule: { kind: "every", everyMs: 15 * 60 * 1000 },
+        targetEmail: "",
+        allowedSenders: [],
+        allowedDomains: [],
+      }),
+      ...patch,
+      workspaceId: record.workspaceId,
+      allowedSenders: normalizeStringArray(patch.allowedSenders ?? record.forward?.allowedSenders ?? []),
+      allowedDomains: normalizeStringArray(patch.allowedDomains ?? record.forward?.allowedDomains ?? []),
+      excludedSenders: normalizeStringArray(patch.excludedSenders ?? record.forward?.excludedSenders ?? []),
+      excludedDomains: normalizeStringArray(patch.excludedDomains ?? record.forward?.excludedDomains ?? []),
+      subjectKeywords: normalizeStringArray(patch.subjectKeywords ?? record.forward?.subjectKeywords ?? []),
+      attachmentKeywords: normalizeStringArray(patch.attachmentKeywords ?? record.forward?.attachmentKeywords ?? []),
+      attachmentExtensions: normalizeStringArray(patch.attachmentExtensions ?? record.forward?.attachmentExtensions ?? []),
+      targetEmail: normalizeString(patch.targetEmail ?? record.forward?.targetEmail) || "",
+      providerThreadId: normalizeString(patch.providerThreadId ?? record.forward?.providerThreadId),
+      forwardedLabelName:
+        normalizeString(patch.forwardedLabelName ?? record.forward?.forwardedLabelName) || "cowork/forwarded",
+      rejectedLabelName:
+        normalizeString(patch.rejectedLabelName ?? record.forward?.rejectedLabelName) || "cowork/rejected",
+      candidateLabelName:
+        normalizeString(patch.candidateLabelName ?? record.forward?.candidateLabelName) || "cowork/candidate",
+      gmailQuery: normalizeString(patch.gmailQuery ?? record.forward?.gmailQuery),
+      maxMessagesPerRun: Math.max(
+        1,
+        Math.min(500, Number(patch.maxMessagesPerRun ?? record.forward?.maxMessagesPerRun ?? 100)),
+      ),
+      backfillDays: Math.max(1, Math.min(3650, Number(patch.backfillDays ?? record.forward?.backfillDays ?? 30))),
+      lookbackMinutes: Math.max(
+        1,
+        Math.min(7 * 24 * 60, Number(patch.lookbackMinutes ?? record.forward?.lookbackMinutes ?? 20)),
+      ),
+      dryRun: patch.dryRun ?? record.forward?.dryRun ?? true,
+      enabled: patch.enabled ?? record.forward?.enabled ?? true,
+      name: normalizeString(patch.name ?? record.name) || record.name,
+    };
+
+    if (!nextForward.targetEmail) {
+      throw new Error("Target email is required for forwarding automation");
+    }
+    if (nextForward.allowedSenders.length === 0 && nextForward.allowedDomains.length === 0) {
+      throw new Error("At least one allowed sender or domain is required");
+    }
+
+    const nextStatus =
+      patch.status ??
+      (nextForward.enabled === false ? "paused" : record.status === "deleted" ? "deleted" : "active");
+    const nextRunAt =
+      nextStatus === "active" ? computeNextRunAtMs(nextForward.schedule, Date.now()) : null;
+    const now = Date.now();
+    deps.db
+      .prepare(
+        `UPDATE mailbox_automations
+         SET name = ?, description = ?, status = ?, thread_id = ?, recipe_json = ?, next_run_at = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        nextForward.name,
+        nextForward.description || null,
+        nextStatus,
+        nextForward.threadId || null,
+        stringifyJson(nextForward),
+        nextRunAt ?? null,
+        now,
+        automationId,
+      );
+    this.appendAudit(automationId, record.workspaceId, "updated", { patch });
+    deps.onMutation?.();
+    return this.listAutomations({ workspaceId: record.workspaceId }).find((item) => item.id === automationId) ?? null;
+  }
+
+  static deleteForward(automationId: string): boolean {
+    const row = this.fetchRow(automationId);
+    if (!row || row.kind !== "forward") return false;
+    this.markDeleted(row.id, row.workspace_id, {});
     return true;
   }
 
@@ -412,6 +590,7 @@ export class MailboxAutomationRegistry {
         automationId,
       );
     this.appendAudit(automationId, record.workspaceId, "updated", { patch });
+    deps.onMutation?.();
     return this.listAutomations({ workspaceId: record.workspaceId }).find((item) => item.id === automationId) ?? null;
   }
 
@@ -596,7 +775,7 @@ export class MailboxAutomationRegistry {
   }
 
   private static enrichRecord(row: MailboxAutomationRow): MailboxAutomationRecord {
-    const recipe = parseJson<MailboxRuleRecipe | MailboxScheduleRecipe | Record<string, unknown>>(
+    const recipe = parseJson<MailboxRuleRecipe | MailboxScheduleRecipe | MailboxForwardRecipe | Record<string, unknown>>(
       row.recipe_json,
       {},
     );
@@ -623,6 +802,10 @@ export class MailboxAutomationRegistry {
       schedule:
         row.kind === "schedule" || row.kind === "reminder"
           ? (recipe as MailboxScheduleRecipe)
+          : undefined,
+      forward:
+        row.kind === "forward"
+          ? (recipe as MailboxForwardRecipe)
           : undefined,
       backingTriggerId: row.backing_trigger_id || undefined,
       backingCronJobId: row.backing_cron_job_id || undefined,
@@ -656,7 +839,13 @@ export class MailboxAutomationRegistry {
         record.description || null,
         record.threadId || null,
         record.source,
-        stringifyJson(record.kind === "rule" ? record.rule || {} : record.schedule || {}),
+        stringifyJson(
+          record.kind === "rule"
+            ? record.rule || {}
+            : record.kind === "forward"
+              ? record.forward || {}
+              : record.schedule || {},
+        ),
         record.backingTriggerId || null,
         record.backingCronJobId || null,
         record.latestOutcome || null,
@@ -668,6 +857,7 @@ export class MailboxAutomationRegistry {
         record.updatedAt,
       );
     this.appendAudit(audit.automationId, audit.workspaceId, audit.eventType, audit.detail);
+    deps.onMutation?.();
   }
 
   private static insertScheduleRecord(input: {
@@ -737,5 +927,70 @@ export class MailboxAutomationRegistry {
       )
       .run(Date.now(), automationId);
     this.appendAudit(automationId, workspaceId, "deleted", detail);
+    deps.onMutation?.();
+  }
+
+  static markForwardRunStarted(automationId: string, runAtMs: number): void {
+    const deps = this.getDeps();
+    deps.db
+      .prepare(
+        `UPDATE mailbox_automations
+         SET latest_run_at = ?, latest_error = NULL, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(runAtMs, Date.now(), automationId);
+    const row = this.fetchRow(automationId);
+    if (row) {
+      this.appendAudit(automationId, row.workspace_id, "forward_run_started", { runAtMs });
+    }
+  }
+
+  static markForwardRunFinished(
+    automationId: string,
+    input: {
+      status: MailboxAutomationStatus;
+      latestOutcome?: string;
+      latestError?: string | null;
+      latestFireAt?: number;
+      nextRunAt?: number | null;
+    },
+  ): void {
+    const deps = this.getDeps();
+    deps.db
+      .prepare(
+        `UPDATE mailbox_automations
+         SET status = ?, latest_outcome = ?, latest_error = ?, latest_fire_at = ?, next_run_at = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        input.status,
+        input.latestOutcome || null,
+        input.latestError || null,
+        input.latestFireAt || null,
+        input.nextRunAt ?? null,
+        Date.now(),
+        automationId,
+      );
+    const row = this.fetchRow(automationId);
+    if (row) {
+      this.appendAudit(automationId, row.workspace_id, "forward_run_finished", {
+        status: input.status,
+        latestOutcome: input.latestOutcome,
+        latestError: input.latestError,
+        latestFireAt: input.latestFireAt,
+        nextRunAt: input.nextRunAt,
+      });
+    }
+  }
+
+  static setForwardNextRun(automationId: string, nextRunAt?: number): void {
+    const deps = this.getDeps();
+    deps.db
+      .prepare(
+        `UPDATE mailbox_automations
+         SET next_run_at = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(nextRunAt ?? null, Date.now(), automationId);
   }
 }
