@@ -68,7 +68,6 @@ import {
 } from "../utils/task-outputs";
 import { shouldShowPersistentNeedsUserActionBanner } from "../utils/task-completion-ux";
 import {
-  ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES,
   filterVerboseTimelineNoise,
   shouldShowTaskEventInStepFeed,
   shouldShowTaskEventInSummaryMode,
@@ -5991,7 +5990,6 @@ function MainContentComponent({
   }, []);
   // Collaborative team run detection for current task
   const [collaborativeRun, setCollaborativeRun] = useState<AgentTeamRun | null>(null);
-  const [showSteps, setShowSteps] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   // Track toggled events by ID for stable state across filtering
   const [toggledEvents, setToggledEvents] = useState<Set<string>>(new Set());
@@ -7603,21 +7601,8 @@ function MainContentComponent({
     if (!shouldShowTaskEventInStepFeed(event)) {
       return false;
     }
-    const showEvenWithoutSteps =
-      ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(event.type) ||
-      ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(effectiveType as EventType) ||
-      isImageFileEvent(event) ||
-      isHtmlFileEvent(event) ||
-      isVideoFileEvent(event) ||
-      isSpreadsheetFileEvent(event) ||
-      (effectiveType === "tool_result" && event.payload?.tool === "schedule_task");
-    return showSteps || showEvenWithoutSteps;
+    return true;
   }, [
-    isHtmlFileEvent,
-    isImageFileEvent,
-    isSpreadsheetFileEvent,
-    isVideoFileEvent,
-    showSteps,
     toolCallPairing.claimedResultIds,
   ]);
 
@@ -10556,74 +10541,71 @@ function MainContentComponent({
             </div>
           )}
 
-          {/* View steps toggle - show right after original prompt */}
+          {/* Timeline controls - show right after original prompt */}
           {hasNonConversationEvents && (
             <div className="timeline-controls">
-              <button
-                className={`view-steps-btn ${showSteps ? "expanded" : ""}`}
-                onClick={() => setShowSteps(!showSteps)}
-              >
-                {showSteps ? "Hide steps" : "View steps"}
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M9 18l6-6-6-6" />
-                </svg>
-              </button>
-              {showSteps && (
-                <>
-                  <button
-                    type="button"
-                    className="verbose-switch"
-                    role="switch"
-                    aria-checked={verboseSteps}
-                    aria-label={`Verbose mode ${verboseSteps ? "on" : "off"}`}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      toggleVerboseSteps();
-                    }}
-                    title={`Verbose mode ${verboseSteps ? "on" : "off"} (click to toggle)`}
-                  >
-                    <span className="goal-mode-toggle-switch-content">
-                      <span className="goal-mode-toggle-text">
-                        <span className="verbose-switch-label">Verbose</span>
-                      </span>
-                      <span
-                        className={`goal-mode-switch-track ${verboseSteps ? "on" : ""}`}
-                        aria-hidden="true"
-                      >
-                        <span className="goal-mode-switch-thumb" />
-                      </span>
-                    </span>
-                  </button>
-                  <button
-                    className={`verbose-toggle-btn ${codePreviewsExpanded ? "active" : ""}`}
-                    onClick={toggleCodePreviews}
-                    title={
-                      codePreviewsExpanded
-                        ? "Collapse code previews by default"
-                        : "Expand code previews by default"
-                    }
-                  >
-                    {codePreviewsExpanded ? "Code: Open" : "Code: Collapsed"}
-                  </button>
-                </>
-              )}
-              {replayControls &&
-                !replayControls.isReplayMode &&
-                (task?.status === "completed" ||
-                  task?.status === "failed" ||
-                  task?.status === "cancelled") && (
+              <span className="timeline-controls-label">Activity</span>
+              <div className="timeline-controls-actions">
                 <button
-                  className="replay-entry-btn"
-                  onClick={replayControls.startReplay}
-                  title="Replay this session step by step"
+                  type="button"
+                  className="verbose-switch"
+                  role="switch"
+                  aria-checked={verboseSteps}
+                  aria-label={`Verbose mode ${verboseSteps ? "on" : "off"}`}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleVerboseSteps();
+                  }}
+                  title={`Verbose mode ${verboseSteps ? "on" : "off"} (click to toggle)`}
                 >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="5 3 19 12 5 21 5 3" />
-                  </svg>
-                  Replay
+                  <span className="goal-mode-toggle-switch-content">
+                    <span className="goal-mode-toggle-text">
+                      <span className="verbose-switch-label">Verbose</span>
+                    </span>
+                    <span
+                      className={`goal-mode-switch-track ${verboseSteps ? "on" : ""}`}
+                      aria-hidden="true"
+                    >
+                      <span className="goal-mode-switch-thumb" />
+                    </span>
+                  </span>
                 </button>
-              )}
+                <button
+                  className={`verbose-toggle-btn ${codePreviewsExpanded ? "active" : ""}`}
+                  onClick={toggleCodePreviews}
+                  title={
+                    codePreviewsExpanded
+                      ? "Collapse code previews by default"
+                      : "Expand code previews by default"
+                  }
+                >
+                  {codePreviewsExpanded ? "Code: Open" : "Code: Collapsed"}
+                </button>
+                {replayControls &&
+                  !replayControls.isReplayMode &&
+                  (task?.status === "completed" ||
+                    task?.status === "failed" ||
+                    task?.status === "cancelled") && (
+                    <button
+                      className="replay-entry-btn"
+                      onClick={replayControls.startReplay}
+                      title="Replay this session step by step"
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <polygon points="5 3 19 12 5 21 5 3" />
+                      </svg>
+                      Replay
+                    </button>
+                  )}
+              </div>
             </div>
           )}
 

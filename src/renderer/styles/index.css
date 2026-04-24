@@ -5220,47 +5220,59 @@ a,
 .timeline-controls {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
+  width: 100%;
   margin-top: 8px;
+}
+
+.timeline-controls-label {
+  color: var(--color-text-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.timeline-controls-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.timeline-controls .verbose-switch-label,
+.timeline-controls .replay-entry-btn {
+  color: var(--color-text-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.timeline-controls .goal-mode-switch-track {
+  width: 26px;
+  height: 16px;
+}
+
+.timeline-controls .goal-mode-switch-thumb {
+  width: 10px;
+  height: 10px;
+}
+
+.timeline-controls .goal-mode-switch-track.on .goal-mode-switch-thumb {
+  left: 12px;
+}
+
+.timeline-controls .replay-entry-btn svg {
+  width: 12px;
+  height: 12px;
 }
 
 /* Timeline Section - Steps (smaller & dimmer) */
 .timeline-section {
   margin-top: 24px;
-}
-
-.view-steps-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 0;
-  background: transparent;
-  border: none;
-  color: var(--color-text-muted);
-  font-size: 12px;
-  cursor: pointer;
-  transition: color 0.15s ease;
-}
-
-.view-steps-btn:hover {
-  color: var(--color-text);
-}
-
-.view-steps-btn svg {
-  width: 14px;
-  height: 14px;
-  transition: transform 0.15s ease;
-}
-
-.view-steps-btn.expanded svg {
-  transform: rotate(90deg);
-}
-
-/* Timeline controls container */
-.timeline-controls {
-  display: flex;
-  align-items: center;
-  gap: 12px;
 }
 
 /* Verbose on/off toggle switch */
@@ -18168,13 +18180,6 @@ button {
 /* Timeline CLI Styles */
 .timeline-section {
   font-family: var(--font-mono);
-}
-
-.view-steps-btn {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .timeline-event {
@@ -35656,6 +35661,10 @@ button {
   font-size: 13px;
 }
 
+.density-focused .timeline-controls .verbose-switch-label {
+  font-size: 12px;
+}
+
 /* Hide talk mode button — advanced feature */
 .density-focused .talk-mode-btn {
   display: none;
@@ -35846,14 +35855,6 @@ button {
 .density-focused .timeline-controls {
   margin-top: 4px;
   margin-bottom: 4px;
-}
-
-.density-focused .view-steps-btn {
-  font-family: var(--font-ui);
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 6px;
-  padding: 5px 10px;
 }
 
 .density-focused .timeline-event {
