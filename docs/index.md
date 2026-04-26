@@ -18,6 +18,9 @@ hero:
       text: Core Automation
       link: /core-automation
     - theme: alt
+      text: Workflow Intelligence
+      link: /workflow-intelligence
+    - theme: alt
       text: 24/7 Learning Guide
       link: /continual-learning-in-cowork
     - theme: alt
@@ -90,11 +93,11 @@ features:
   - title: Latest Release 0.5.35
     details: Includes Managed Agents and Managed Sessions, optional Supermemory integration, the Task Trace Debugger, the bundled `novelist` skill, explicit-only turn-budget controls, and the latest renderer, briefing, and release-hardening updates.
   - title: Inbox Agent
-    details: Local-first email triage with AI classification, action-needed and commitment queues, draft review, and resync-safe background sync.
+    details: Local-first email workspace with Classic and Today modes, AI triage, Mailbox Ask, manual reply/reply-all/forward, editable AI drafts, commitment queues, sender cleanup, attachment indexing, and resync-safe background sync.
   - title: Managed Devices
     details: Connect local and remote CoWork nodes, inspect device summaries, browse remote workspaces, and launch tasks against selected machines from one Devices tab.
   - title: Core Automation
-    details: Memory, Heartbeat, and Subconscious now form a strict always-on core owned by automation profiles, with Mission Control as the cockpit and Digital Twins kept optional.
+    details: Workflow Intelligence now forms the strict always-on core: Memory is the source of truth, Heartbeat schedules reflection, Suggestions are reviewable outputs, and Mission Control remains the cockpit.
   - title: Automations
     details: The automations surface now separates core automation from trigger ingress, device routing, schedules, webhooks, and optional twin features.
   - title: Heartbeat V3
