@@ -64,20 +64,24 @@ jobs:
       - name: Install silently
         shell: pwsh
         run: |
-          $installDir = Join-Path $env:LOCALAPPDATA "Programs\CoWork OS"
-          if (Test-Path $installDir) {
-            Remove-Item -Recurse -Force $installDir
+          $programsDir = Join-Path $env:LOCALAPPDATA "Programs"
+          foreach ($dir in @("CoWork OS", "cowork-os")) {
+            $path = Join-Path $programsDir $dir
+            if (Test-Path $path) {
+              Remove-Item -Recurse -Force $path
+            }
           }
           $process = Start-Process -FilePath $env:installer -ArgumentList "/S" -Wait -PassThru
           if ($process.ExitCode -ne 0) {
             throw "Installer exited with code $($process.ExitCode)"
           }
-          $appExe = Join-Path $installDir "CoWork OS.exe"
-          if (-not (Test-Path $appExe)) {
-            throw "Installed app executable not found at $appExe"
+          $appExe = Get-ChildItem -Path $programsDir -Filter "CoWork OS.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $appExe) {
+            Get-ChildItem -Path $programsDir -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            throw "Installed app executable not found under $programsDir"
           }
-          "app_exe=$appExe" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Installed app: $appExe"
+          "app_exe=$($appExe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Installed app: $($appExe.FullName)"
 
       - name: Launch installed app briefly
         shell: pwsh
@@ -93,9 +97,10 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $uninstaller = Join-Path $env:LOCALAPPDATA "Programs\CoWork OS\Uninstall CoWork OS.exe"
-          if (Test-Path $uninstaller) {
-            $process = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
+          $programsDir = Join-Path $env:LOCALAPPDATA "Programs"
+          $uninstaller = Get-ChildItem -Path $programsDir -Filter "Uninstall CoWork OS.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($uninstaller) {
+            $process = Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru
             if ($process.ExitCode -ne 0) {
               throw "Uninstaller exited with code $($process.ExitCode)"
             }
