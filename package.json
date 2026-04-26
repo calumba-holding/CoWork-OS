@@ -99,6 +99,7 @@
     "release:smoke": "npm run build && node scripts/release-smoke-install.mjs",
     "package": "npm run build && node scripts/run_electron_builder.mjs --publish never && node scripts/release-artifact-names.mjs && node scripts/release-artifact-names.mjs --check",
     "package:mac": "node scripts/package-mac-with-env.mjs",
+    "package:mac:unsigned": "cross-env COWORK_MAC_UNSIGNED=1 node scripts/package-mac-with-env.mjs",
     "fmt": "oxfmt --write src",
     "fmt:check": "oxfmt --check src",
     "lint": "oxlint src -c .oxlintrc.json --tsconfig tsconfig.json",

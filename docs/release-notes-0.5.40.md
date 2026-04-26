@@ -32,7 +32,7 @@ Release `0.5.40` is a broad workflow release. It adds Chronicle desktop screen c
 - **Runtime visibility and tool policy**: executor visibility, destination hints, task pause messaging, awaiting-input messages, screen-context routing, private workspace path exclusions, and native-GUI tool policy were refined.
 - **LLM/provider behavior**: Azure OpenAI streaming, streamed tool calls, Responses API fallback handling, provider factory behavior, and reasoning-effort metadata were tightened.
 - **Developer and packaging docs**: build, setup, QA, skills-check, format, lint, type-check, dev logging, Kami validation, PPTX preview dependencies, and LaTeX compile troubleshooting guidance were expanded.
-- **Packaging**: packaged builds now include skill asset folders, computer-use helper resources, and refreshed app icons from `build/icon.png` and `build/icon.ico`.
+- **Packaging**: packaged builds now include skill asset folders, computer-use helper resources, and refreshed app icons from `build/icon.png` and `build/icon.ico`. macOS fallback builds can now be produced explicitly with `npm run package:mac:unsigned`, which disables accidental Developer ID auto-discovery.
 
 ## Fixes
 
@@ -58,6 +58,7 @@ Release `0.5.40` is a broad workflow release. It adds Chronicle desktop screen c
 - Routines are now the preferred saved-automation surface. Use Scheduled Tasks, Webhooks, and Event Triggers directly only when you need the lower-level engine.
 - Inbox Agent has a replacement-client foundation, but native new-mail compose, provider draft save/update, attachment upload, full outgoing queue draining, Microsoft Graph mail execution, folder/label navigation, and notification preferences remain future work.
 - The bundled Kami port ships open English font assets, but it does not ship the proprietary Chinese serif font used by upstream Kami.
+- macOS release artifacts are still distributed as unsigned fallback builds unless a release maintainer supplies an explicit Developer ID signing identity in `.env.mac`; first launch may require **Open Anyway** in System Settings.
 
 ## References
 

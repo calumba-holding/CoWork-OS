@@ -4,6 +4,12 @@
 
 CoWork OS is currently distributed as an unsigned build. On first launch, use **System Settings > Privacy & Security > Open Anyway** once.
 
+Release maintainers can create the unsigned macOS DMG/ZIP with:
+
+```bash
+npm run package:mac:unsigned
+```
+
 Terminal fallback:
 
 ```bash
