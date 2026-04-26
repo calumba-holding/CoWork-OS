@@ -260,14 +260,14 @@
       "gatekeeperAssess": true,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "icon": "resources/branding/cowork-os-sl-color-name.png",
+      "icon": "build/icon.png",
       "notarize": true
     },
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "resources/branding/cowork-os-sl-color-name.png"
+      "icon": "build/icon.ico"
     },
     "publish": {
       "provider": "github",
