@@ -70,6 +70,10 @@ coverage/
 .claude/
 CLAUDE.md
 
+# Local editor/tool output
+/.cursor/
+/.playwright-mcp/
+
 # Local Codex config
 .codex/
 
@@ -79,6 +83,7 @@ CLAUDE.md
 # Runtime-generated outputs
 artifacts/
 output/
+/resources/branding/images/
 
 # VM artifacts
 vm-bundle/
@@ -112,3 +117,5 @@ Mission_Control_Comparison_Recommendations.docx
 __pycache__/
 CoWork OS founder vault/
 AGENTS.md
+/Users/
+/solana-dapp/

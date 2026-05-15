@@ -1,3 +1,0 @@
-- generic [ref=e5]:
-  - heading "Desktop bridge unavailable" [level=2] [ref=e6]
-  - paragraph [ref=e7]: "CoWork OS is running without Electron preload APIs. Start it with `npm run dev` (not only `npm run dev:react`) or relaunch the desktop app."
