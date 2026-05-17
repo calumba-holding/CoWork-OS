@@ -32,6 +32,7 @@ describe("DocumentArtifactCard", () => {
       ["/workspace/notes.rtf", "Document · RTF"],
       ["/workspace/memo.odt", "Document · ODT"],
       ["/workspace/proposal.pages", "Document · Pages"],
+      ["/workspace/channels.md", "Document · MD"],
     ] as const;
 
     for (const [filePath, label] of cases) {
