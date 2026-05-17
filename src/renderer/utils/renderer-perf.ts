@@ -6,10 +6,13 @@ type MetricBucket = {
 type RenderBucket = {
   total: number;
   keys: Map<string, number>;
+  windowTotal: number;
+  windowKeys: Map<string, number>;
 };
 
 type CounterBucket = {
   value: number;
+  windowValue: number;
 };
 
 type PendingVisibleEvent = {
@@ -40,6 +43,7 @@ type StartupMark = {
 };
 
 type RendererPerfState = {
+  schemaVersion: number;
   metrics: Map<string, MetricBucket>;
   renders: Map<string, RenderBucket>;
   counters: Map<string, CounterBucket>;
@@ -72,6 +76,8 @@ const MAX_PENDING_VISIBLE_ATTEMPTS = 4;
 const PENDING_VISIBLE_TTL_MS = 5_000;
 const REPORT_INTERVAL_MS = 10_000;
 const TASK_EVENT_TTL_MS = 60_000;
+const MAX_ACTIONABLE_FRAME_GAP_MS = 1_000;
+const RENDERER_PERF_STATE_SCHEMA_VERSION = 2;
 
 function isRendererPerfEnabled(enabled?: boolean): boolean {
   return Boolean(enabled && typeof window !== "undefined" && typeof performance !== "undefined");
@@ -81,6 +87,7 @@ function getState(): RendererPerfState | null {
   if (typeof window === "undefined") return null;
   if (!window.__coworkRendererPerfState__) {
     window.__coworkRendererPerfState__ = {
+      schemaVersion: RENDERER_PERF_STATE_SCHEMA_VERSION,
       metrics: new Map(),
       renders: new Map(),
       counters: new Map(),
@@ -99,8 +106,17 @@ function getState(): RendererPerfState | null {
       longTaskObserverStarted: false,
       longTaskObserver: null,
     };
+  } else if (window.__coworkRendererPerfState__.schemaVersion !== RENDERER_PERF_STATE_SCHEMA_VERSION) {
+    migrateRendererPerfState(window.__coworkRendererPerfState__);
   }
   return window.__coworkRendererPerfState__;
+}
+
+function migrateRendererPerfState(state: RendererPerfState): void {
+  state.schemaVersion = RENDERER_PERF_STATE_SCHEMA_VERSION;
+  state.metrics.clear();
+  state.renders.clear();
+  state.counters.clear();
 }
 
 function percentile(sorted: number[], ratio: number): number {
@@ -114,8 +130,9 @@ function cleanupTaskEventTraces(state: RendererPerfState, nowMs: number): void {
     const ageMs = nowMs - (trace.appendedAtMs ?? trace.receivedAtMs);
     if (ageMs > TASK_EVENT_TTL_MS) {
       if (trace.renderable && !trace.visibleRecorded) {
-        const bucket = state.counters.get("task-event.visible_trace_expired_count") ?? { value: 0 };
+        const bucket = state.counters.get("task-event.visible_trace_expired_count") ?? { value: 0, windowValue: 0 };
         bucket.value += 1;
+        bucket.windowValue += 1;
         state.counters.set("task-event.visible_trace_expired_count", bucket);
       }
       state.taskEvents.delete(eventId);
@@ -224,28 +241,64 @@ function addRendererPerfSample(state: RendererPerfState, name: string, valueMs: 
   state.metrics.set(name, bucket);
 }
 
+function createRenderBucket(): RenderBucket {
+  return {
+    total: 0,
+    keys: new Map<string, number>(),
+    windowTotal: 0,
+    windowKeys: new Map<string, number>(),
+  };
+}
+
+function incrementRenderKey(keys: Map<string, number>, key: string): void {
+  keys.set(key, (keys.get(key) ?? 0) + 1);
+  if (keys.size <= MAX_RENDER_KEYS) return;
+  const sorted = [...keys.entries()].sort((a, b) => a[1] - b[1]);
+  const toDelete = sorted.slice(0, keys.size - MAX_RENDER_KEYS);
+  for (const [renderKey] of toDelete) {
+    keys.delete(renderKey);
+  }
+}
+
+function shouldRecordFrameGap(gapMs: number): boolean {
+  if (!Number.isFinite(gapMs) || gapMs <= 0) return false;
+  if (gapMs > MAX_ACTIONABLE_FRAME_GAP_MS) return false;
+  return !(typeof document !== "undefined" && document.hidden);
+}
+
 function flushRendererPerfReport(state: RendererPerfState): void {
-  const metricSummaries = [...state.metrics.entries()]
-    .filter(([, bucket]) => bucket.samples.length > 0)
-    .map(([name, bucket]) => {
-      const sorted = [...bucket.samples].sort((a, b) => a - b);
-      return `${name} n=${sorted.length} p50=${percentile(sorted, 0.5).toFixed(1)}ms p95=${percentile(sorted, 0.95).toFixed(1)}ms max=${sorted[sorted.length - 1]!.toFixed(1)}ms`;
-    });
+  const metricSummaries: string[] = [];
+  for (const [name, bucket] of state.metrics.entries()) {
+    if (bucket.samples.length === 0) continue;
+    const sorted = [...bucket.samples].sort((a, b) => a - b);
+    metricSummaries.push(
+      `${name} n=${sorted.length} p50=${percentile(sorted, 0.5).toFixed(1)}ms p95=${percentile(sorted, 0.95).toFixed(1)}ms max=${sorted[sorted.length - 1]!.toFixed(1)}ms`,
+    );
+    bucket.samples.length = 0;
+  }
 
-  const renderSummaries = [...state.renders.entries()]
-    .filter(([, bucket]) => bucket.total > 0)
-    .map(([name, bucket]) => {
-      const topKeys = [...bucket.keys.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([key, count]) => `${key}:${count}`)
-        .join(", ");
-      return `${name} total=${bucket.total} unique=${bucket.keys.size}${topKeys ? ` top=[${topKeys}]` : ""}`;
-    });
+  const renderSummaries: string[] = [];
+  for (const [name, bucket] of state.renders.entries()) {
+    if (bucket.windowTotal <= 0) continue;
+    const topKeys = [...bucket.windowKeys.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([key, count]) => `${key}:${count}`)
+      .join(", ");
+    renderSummaries.push(
+      `${name} renders=${bucket.windowTotal} unique=${bucket.windowKeys.size}${topKeys ? ` top=[${topKeys}]` : ""}`,
+    );
+    bucket.windowTotal = 0;
+    bucket.windowKeys.clear();
+  }
 
-  const counterSummaries = [...state.counters.entries()]
-    .filter(([, bucket]) => bucket.value > 0)
-    .map(([name, bucket]) => `${name} count=${bucket.value}`);
+  const counterSummaries: string[] = [];
+  for (const [name, bucket] of state.counters.entries()) {
+    const windowValue = bucket.windowValue ?? 0;
+    if (windowValue <= 0) continue;
+    counterSummaries.push(`${name} count=${windowValue}`);
+    bucket.windowValue = 0;
+  }
 
   if (metricSummaries.length === 0 && renderSummaries.length === 0 && counterSummaries.length === 0) {
     return;
@@ -284,11 +337,11 @@ function startRendererPerfMonitors(state: RendererPerfState): void {
           state.frameMonitorFrame = null;
           if (state.lastFrameAtMs != null) {
             const gapMs = nowMs - state.lastFrameAtMs;
-            if (gapMs > 50) {
+            if (gapMs > 50 && shouldRecordFrameGap(gapMs)) {
               recordRendererPerfSample("renderer.frame_gap_ms", gapMs, true);
-            }
-            if (gapMs > 80) {
-              incrementRendererPerfCounter("renderer.frame_gap_count", true);
+              if (gapMs > 80) {
+                incrementRendererPerfCounter("renderer.frame_gap_count", true);
+              }
             }
           }
           state.lastFrameAtMs = nowMs;
@@ -389,16 +442,11 @@ export function recordRendererRender(
   if (!isRendererPerfEnabled(enabled)) return;
   const state = getState();
   if (!state) return;
-  const bucket = state.renders.get(name) ?? { total: 0, keys: new Map<string, number>() };
+  const bucket = state.renders.get(name) ?? createRenderBucket();
   bucket.total += 1;
-  bucket.keys.set(key, (bucket.keys.get(key) ?? 0) + 1);
-  if (bucket.keys.size > MAX_RENDER_KEYS) {
-    const sorted = [...bucket.keys.entries()].sort((a, b) => a[1] - b[1]);
-    const toDelete = sorted.slice(0, bucket.keys.size - MAX_RENDER_KEYS);
-    for (const [renderKey] of toDelete) {
-      bucket.keys.delete(renderKey);
-    }
-  }
+  bucket.windowTotal += 1;
+  incrementRenderKey(bucket.keys, key);
+  incrementRenderKey(bucket.windowKeys, key);
   state.renders.set(name, bucket);
   scheduleRendererPerfReport(state);
 }
@@ -411,8 +459,9 @@ export function incrementRendererPerfCounter(
   if (!isRendererPerfEnabled(enabled) || !Number.isFinite(delta) || delta <= 0) return;
   const state = getState();
   if (!state) return;
-  const bucket = state.counters.get(name) ?? { value: 0 };
+  const bucket = state.counters.get(name) ?? { value: 0, windowValue: 0 };
   bucket.value += delta;
+  bucket.windowValue = (bucket.windowValue ?? 0) + delta;
   state.counters.set(name, bucket);
   scheduleRendererPerfReport(state);
 }
