@@ -1,17 +1,18 @@
 # Everything Workbench
 
-CoWork OS is a local-first personal agentic OS and everything app. It is meant to cover more than office-style files: coding, research, web design, documents, spreadsheets, decks, PDFs, automations, inbox work, channels, devices, skills, and long-running tasks all live in one governed workspace.
+CoWork OS is the GUI-first local AI super app and everything app for everyday work. It is meant to cover more than office-style files: coding, email, research, web design, documents, spreadsheets, decks, PDFs, agent spawning and management, automations, inbox work, channels, devices, skills, and long-running tasks all live in one governed workspace.
 
-The Everything Workbench is one major surface inside that broader OS. Its goal is fewer context switches for generated knowledge work: ask for an artifact, open it in-place, review or edit it, then ask the agent for follow-up changes without leaving the task. CoWork does not try to clone every advanced native feature in Word, Excel, PowerPoint, Keynote, Numbers, Pages, or a browser IDE. It gives generated work a first-class in-app workspace, with external-open actions when a specialized native app is still the better tool.
+The Everything Workbench is the proof point for that positioning: ask for an artifact, open it in-place, review or edit it, then ask the agent for follow-up changes without leaving the task. For everyday work, CoWork should be the app you reach for instead of a separate coding app, mail app, browser preview, Word processor, spreadsheet tool, or slide deck editor. External-open actions remain available when a specialized native app is still the better tool for advanced edge cases.
 
 ## Broader Positioning
 
 Use CoWork OS as the app where personal agentic work starts and stays:
 
 - code, review repositories, and run local project tasks
+- create reusable agents, spawn parallel work, and monitor agent runs from visual surfaces
 - research, summarize, draft, and maintain knowledge
 - design and revise web pages and frontend experiences
-- create and work with documents, spreadsheets, presentations, PDFs, and local files
+- create and work with Word-style documents, Excel-style spreadsheets, PowerPoint-style decks, PDFs, and local files
 - automate recurring work across channels, connectors, devices, and schedules
 - coordinate long-running personal or company operations with memory, skills, approvals, and runtime visibility
 
@@ -45,7 +46,7 @@ This keeps the agent next to the work product. A spreadsheet can be selected and
 
 ## Positioning Boundary
 
-Use CoWork OS as the first stop for generated knowledge work:
+Use CoWork OS as the default app for everyday generated knowledge work:
 
 - draft and revise reports, memos, summaries, one-pagers, and DOCX files
 - create and adjust spreadsheets, CSVs, tables, and lightweight workbook outputs
@@ -54,14 +55,14 @@ Use CoWork OS as the first stop for generated knowledge work:
 - test live websites and local web apps in the in-app browser while watching the agent click, type, scroll, inspect the page, and validate responsive breakpoints
 - keep the task timeline, artifact, and follow-up request in one context
 
-Use external apps when the work needs advanced native behavior:
+Use external apps only when the work needs advanced native behavior:
 
 - Excel pivot tables, complex charting, macros, and deep workbook modeling
 - Word track changes, comments, embedded objects, and high-fidelity layout repair
 - Keynote/PowerPoint direct slide authoring beyond review and agent-requested edits
 - Pages, Numbers, Google Docs, Google Sheets, or Google Slides native cloud behavior
 
-The product promise is not "replace every office app." The promise is "reduce the need to switch apps for generated work by making artifacts editable, reviewable, and agent-revisable inside CoWork OS."
+The product promise is "one app for the everyday work most people currently split across coding tools, mail clients, browsers, Word, Excel, PowerPoint, and chat." CoWork keeps specialized external-open paths for advanced native workflows, but the default loop is create, review, edit, test, and revise in one place with the agent beside the work.
 
 ## Related Docs
 
