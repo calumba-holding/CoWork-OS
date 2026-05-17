@@ -5,6 +5,7 @@ import { PlaybookService } from "../PlaybookService";
 import { MemoryService } from "../MemoryService";
 import { KnowledgeGraphService } from "../../knowledge-graph/KnowledgeGraphService";
 import { InputSanitizer } from "../../agent/security/input-sanitizer";
+import { UserProfileService } from "../UserProfileService";
 
 vi.mock("../CuratedMemoryService", () => ({
   CuratedMemoryService: {
@@ -34,6 +35,13 @@ vi.mock("../UserProfileService", () => ({
           value: "Preferred name: Alice",
           confidence: 0.95,
           lastUpdatedAt: Date.now() - 60_000,
+        },
+        {
+          id: "f2",
+          category: "operating",
+          value: "Pushback: challenge weak ideas with evidence.",
+          confidence: 0.9,
+          lastUpdatedAt: Date.now() - 20_000,
         },
       ],
       updatedAt: Date.now(),
@@ -150,6 +158,47 @@ describe("MemorySynthesizer", () => {
 
     expect(result.text).toContain("Curated Hot Memory");
     expect(result.sourceAttribution.curated_memory).toBeGreaterThan(0);
+  });
+
+  it("renders operating-profile facts as a personal operating manual", () => {
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
+
+    expect(result.text).toContain("Personal Operating Manual");
+    expect(result.text).toContain("[Operating style] Pushback: challenge weak ideas with evidence.");
+    expect(result.text).toContain("You & the User");
+    expect(result.text).toContain("[Identity] Preferred name: Alice");
+  });
+
+  it("keeps low-confidence conversation-derived operating facts out of hot prompt injection", () => {
+    vi.mocked(UserProfileService.getProfile).mockReturnValueOnce({
+      facts: [
+        {
+          id: "f1",
+          category: "identity",
+          value: "Preferred name: Alice",
+          confidence: 0.95,
+          source: "conversation",
+          firstSeenAt: Date.now() - 60_000,
+          lastUpdatedAt: Date.now() - 60_000,
+        },
+        {
+          id: "f2",
+          category: "operating",
+          value: "Pushback: challenge weak ideas with evidence.",
+          confidence: 0.82,
+          source: "conversation",
+          firstSeenAt: Date.now() - 20_000,
+          lastUpdatedAt: Date.now() - 20_000,
+        },
+      ],
+      updatedAt: Date.now(),
+    });
+
+    const result = MemorySynthesizer.synthesize("ws1", "/workspace", "Deploy the API");
+
+    expect(result.text).not.toContain("Personal Operating Manual");
+    expect(result.text).not.toContain("Pushback: challenge weak ideas with evidence.");
+    expect(result.text).toContain("[Identity] Preferred name: Alice");
   });
 
   it("omits L0 hot memory when curated memory is disabled even with wake-up layers on", () => {
