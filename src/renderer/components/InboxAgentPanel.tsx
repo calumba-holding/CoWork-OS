@@ -1382,7 +1382,7 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
         !currentStatus.lastSyncedAt ||
         Date.now() - currentStatus.lastSyncedAt >= MAILBOX_AUTO_SYNC_INTERVAL_MS;
       if (!stale) return;
-      await window.electronAPI.syncMailbox(MAILBOX_AUTO_SYNC_LIMIT);
+      await window.electronAPI.syncMailbox(MAILBOX_AUTO_SYNC_LIMIT, "auto");
       await Promise.all([loadStatus(), loadDigest(), loadThreads()]);
       const nextId = selectedThreadId;
       if (nextId) {
@@ -1410,7 +1410,7 @@ export function InboxAgentPanel(props: InboxAgentPanelProps = {}) {
       void loadStatus();
     }, 600);
     try {
-      await window.electronAPI.syncMailbox(MAILBOX_AUTO_SYNC_LIMIT);
+      await window.electronAPI.syncMailbox(MAILBOX_AUTO_SYNC_LIMIT, "manual");
       await Promise.all([loadStatus(), loadDigest(), loadThreads()]);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
