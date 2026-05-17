@@ -4090,6 +4090,26 @@ a,
   text-align: right;
 }
 
+.cli-task-automation-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--color-text-muted);
+  opacity: 0.78;
+}
+
+.cli-task-automation-icon svg {
+  display: block;
+}
+
+.cli-task-item.task-item-selected .cli-task-automation-icon {
+  color: var(--color-text-secondary);
+  opacity: 0.9;
+}
+
 .cli-task-awaiting-badge {
   flex-shrink: 0;
   border-radius: 999px;
@@ -25143,6 +25163,10 @@ a,
   }
 
   .cli-task-time {
+    display: none;
+  }
+
+  .cli-task-automation-icon {
     display: none;
   }
 
