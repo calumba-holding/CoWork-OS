@@ -319,6 +319,32 @@ export function BuiltinToolsSettings() {
     }
   };
 
+  const handleToolToggle = async (tool: string, enabled: boolean) => {
+    if (!settings) return;
+
+    const newSettings = {
+      ...settings,
+      toolOverrides: {
+        ...settings.toolOverrides,
+        [tool]: {
+          ...(settings.toolOverrides?.[tool] || {}),
+          enabled,
+        },
+      },
+    };
+
+    setSettings(newSettings);
+
+    try {
+      setSaving(true);
+      await window.electronAPI.saveBuiltinToolsSettings(newSettings);
+    } catch (error) {
+      console.error("Failed to save settings:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading) {
     return <div className="settings-loading">Loading settings...</div>;
   }
@@ -496,11 +522,27 @@ export function BuiltinToolsSettings() {
 
               {expandedCategory === category && tools.length > 0 && (
                 <div className="builtin-tool-list">
-                  {tools.map((tool) => (
-                    <div key={tool} className="builtin-tool-item">
-                      <code>{tool}</code>
-                    </div>
-                  ))}
+                  {tools.map((tool) => {
+                    const toolOverride = settings.toolOverrides?.[tool];
+                    const toolEnabled = toolOverride
+                      ? toolOverride.enabled
+                      : config.enabled;
+
+                    return (
+                      <div key={tool} className="builtin-tool-item">
+                        <code>{tool}</code>
+                        <label className="builtin-tool-toggle">
+                          <input
+                            type="checkbox"
+                            checked={toolEnabled}
+                            onChange={(e) => handleToolToggle(tool, e.target.checked)}
+                            disabled={!config.enabled || saving}
+                          />
+                          <span className="builtin-tool-toggle-slider"></span>
+                        </label>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
