@@ -19,6 +19,10 @@ import {
   WorkspacePathAliasPolicy,
   WorkerRoleKind,
 } from "../../../shared/types";
+import {
+  allowsStructuredHumanInput,
+  resolveHumanInputPolicy,
+} from "../../../shared/human-input-policy";
 import { AgentDaemon } from "../daemon";
 import { FileTools } from "./file-tools";
 import { SkillTools } from "./skill-tools";
@@ -82,6 +86,7 @@ import { evaluateMontyToolPolicy } from "../../security/monty-tool-policy";
 import { BuiltinToolsSettingsManager } from "./builtin-settings";
 import { getCustomSkillLoader } from "../custom-skill-loader";
 import { SkillProposalService } from "../skills/SkillProposalService";
+import { SkillEvalService, type SkillEvalCase } from "../skills/SkillEvalService";
 import { PersonalityManager } from "../../settings/personality-manager";
 import {
   PersonalityId,
@@ -1713,7 +1718,11 @@ export class ToolRegistry {
     register(
       "write_file",
       async ({ request }) =>
-        this.fileTools.writeFile(request.input.path, request.input.content),
+        this.fileTools.writeFile(request.input.path, request.input.content, {
+          signal: request.runtime?.signal instanceof AbortSignal ? request.runtime.signal : undefined,
+          timeoutMs:
+            typeof request.runtime?.timeoutMs === "number" ? request.runtime.timeoutMs : undefined,
+        }),
       exclusiveSchedulerSpec,
     );
     register(
@@ -1839,6 +1848,8 @@ export class ToolRegistry {
     register("search_quotes", async ({ request }) => this.systemTools.searchQuotes(request.input), readParallelSchedulerSpec);
     register("search_sessions", async ({ request }) => this.systemTools.searchSessions(request.input), readParallelSchedulerSpec);
     register("memory_topics_load", async ({ request }) => this.systemTools.loadMemoryTopics(request.input), readParallelSchedulerSpec);
+    register("context_grep", async ({ request }) => this.systemTools.contextGrep(request.input), readParallelSchedulerSpec);
+    register("context_describe", async ({ request }) => this.systemTools.contextDescribe(request.input), readParallelSchedulerSpec);
     register("memory_save", async ({ request }) => this.memoryTools.save(request.input));
     register("memory_curate", async ({ request }) => this.memoryTools.curate(request.input), exclusiveSchedulerSpec);
     register("memory_curated_read", async ({ request }) => this.memoryTools.readCurated(request.input), readParallelSchedulerSpec);
@@ -2641,6 +2652,15 @@ export class ToolRegistry {
         'Tool "request_user_input" is only available in plan or debug mode. Switch mode to plan or debug and retry.',
       );
     }
+    const humanInputPolicy = resolveHumanInputPolicy({
+      agentConfig: currentTask?.agentConfig,
+      executionMode: mode,
+    });
+    if (!allowsStructuredHumanInput(humanInputPolicy)) {
+      throw new Error(
+        'Tool "request_user_input" is disabled for this task. Use a safe default when possible, or report the concrete blocker.',
+      );
+    }
 
     const rawQuestions = Array.isArray(input?.questions) ? input.questions : [];
     if (rawQuestions.length < 1) {
@@ -2958,7 +2978,7 @@ Skill Management (create, modify, duplicate skills):
 - skill_duplicate: Duplicate an existing skill with modifications (great for variations)
 - skill_update: Update an existing skill (managed/workspace only, not bundled)
 - skill_delete: Delete a skill (managed/workspace only, not bundled)
-- skill_proposal: Create/list/approve/reject approval-gated skill proposals (no auto-mutation)
+- skill_proposal: Create/list/evaluate/approve/reject approval-gated skill proposals (no auto-mutation)
 Skills are stored in ~/Library/Application Support/cowork-os/skills/ (managed) or workspace/skills/ (workspace).
 
 Code Tools (PREFERRED for code navigation and editing):
@@ -3311,7 +3331,11 @@ ${skillDescriptions}`;
         globTools: this.globTools,
         fileTools: this.fileTools,
       });
-    if (name === "write_file") return await this.fileTools.writeFile(input.path, input.content);
+    if (name === "write_file")
+      return await this.fileTools.writeFile(input.path, input.content, {
+        signal: _runtime?.signal instanceof AbortSignal ? _runtime.signal : undefined,
+        timeoutMs: typeof _runtime?.timeoutMs === "number" ? _runtime.timeoutMs : undefined,
+      });
     if (name === "copy_file")
       return await this.fileTools.copyFile(input.sourcePath, input.destPath);
     if (name === "list_directory") return await this.fileTools.listDirectory(input.path);
@@ -3498,6 +3522,8 @@ ${skillDescriptions}`;
     if (name === "search_quotes") return await this.systemTools.searchQuotes(input);
     if (name === "search_sessions") return await this.systemTools.searchSessions(input);
     if (name === "memory_topics_load") return await this.systemTools.loadMemoryTopics(input);
+    if (name === "context_grep") return await this.systemTools.contextGrep(input);
+    if (name === "context_describe") return await this.systemTools.contextDescribe(input);
     if (name === "memory_save") return await this.memoryTools.save(input);
     if (name === "memory_curate") return await this.memoryTools.curate(input);
     if (name === "memory_curated_read") return await this.memoryTools.readCurated(input);
@@ -5195,7 +5221,7 @@ ${skillDescriptions}`;
    * Manage approval-gated skill proposals
    */
   private async executeSkillProposal(input: {
-    action?: "create" | "list" | "approve" | "reject";
+    action?: "create" | "list" | "approve" | "reject" | "eval";
     proposal_id?: string;
     status?: "pending" | "approved" | "rejected" | "all";
     problem_statement?: string;
@@ -5212,6 +5238,7 @@ ${skillDescriptions}`;
       parameters?: Any[];
       enabled?: boolean;
     };
+    eval_cases?: SkillEvalCase[];
     rejection_reason?: string;
   }): Promise<Any> {
     const action = input.action || "list";
@@ -5443,6 +5470,64 @@ ${skillDescriptions}`;
         action,
         proposal: rejected,
         message: "Skill proposal rejected.",
+      };
+    }
+
+    if (action === "eval") {
+      const proposalId = String(input.proposal_id || "").trim();
+      if (!proposalId) {
+        return {
+          success: false,
+          action,
+          message: "proposal_id is required for eval",
+        };
+      }
+
+      const proposal = await proposalService.get(proposalId);
+      if (!proposal) {
+        return {
+          success: false,
+          action,
+          message: `Proposal '${proposalId}' not found`,
+        };
+      }
+
+      const evalCases = Array.isArray(input.eval_cases)
+        ? input.eval_cases
+            .map((testCase) => ({
+              id: String(testCase?.id || "").trim(),
+              prompt: String(testCase?.prompt || "").trim(),
+              expectedSignals: Array.isArray(testCase?.expectedSignals)
+                ? testCase.expectedSignals.map((signal) => String(signal || "").trim()).filter(Boolean)
+                : undefined,
+              forbiddenSignals: Array.isArray(testCase?.forbiddenSignals)
+                ? testCase.forbiddenSignals.map((signal) => String(signal || "").trim()).filter(Boolean)
+                : undefined,
+              requiredTools: Array.isArray(testCase?.requiredTools)
+                ? testCase.requiredTools.map((tool) => String(tool || "").trim()).filter(Boolean)
+                : undefined,
+            }))
+            .filter((testCase) => testCase.id && testCase.prompt)
+        : [];
+      if (evalCases.length === 0) {
+        return {
+          success: false,
+          action,
+          message: "eval_cases must include at least one case with id and prompt",
+        };
+      }
+
+      const report = await new SkillEvalService(this.workspace.path).runProposalEval(
+        proposal,
+        evalCases,
+      );
+      return {
+        success: true,
+        action,
+        report,
+        message: report.passed
+          ? "Skill proposal eval passed."
+          : "Skill proposal eval completed with failures.",
       };
     }
 
@@ -6210,14 +6295,14 @@ ${skillDescriptions}`;
       {
         name: "skill_proposal",
         description:
-          "Manage approval-gated skill proposals. Create proposals for missing capabilities, list pending proposals, and approve/reject proposals. " +
+          "Manage approval-gated skill proposals. Create proposals for missing capabilities, list pending proposals, evaluate drafts, and approve/reject proposals. " +
           "Skill mutations happen only after explicit approve.",
         input_schema: {
           type: "object",
           properties: {
             action: {
               type: "string",
-              enum: ["create", "list", "approve", "reject"],
+              enum: ["create", "list", "eval", "approve", "reject"],
               description: "Proposal action to execute",
             },
             proposal_id: {
@@ -6252,6 +6337,15 @@ ${skillDescriptions}`;
               description:
                 "Draft skill payload to materialize on approve (id, name, description, prompt, optional parameters/icon/category/enabled).",
               additionalProperties: true,
+            },
+            eval_cases: {
+              type: "array",
+              description:
+                "Evaluation cases for eval action. Each case supports id, prompt, expectedSignals, forbiddenSignals, and requiredTools.",
+              items: {
+                type: "object",
+                additionalProperties: true,
+              },
             },
             rejection_reason: {
               type: "string",
