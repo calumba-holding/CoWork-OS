@@ -99,6 +99,11 @@ describe("BuiltinToolsSettingsManager - webfetch category", () => {
       const category = BuiltinToolsSettingsManager.getToolCategory("web_search");
       expect(category).toBe("search");
     });
+
+    it("should map x_search to search category", () => {
+      const category = BuiltinToolsSettingsManager.getToolCategory("x_search");
+      expect(category).toBe("search");
+    });
   });
 
   describe("tool priority", () => {
@@ -116,6 +121,11 @@ describe("BuiltinToolsSettingsManager - webfetch category", () => {
       const priority = BuiltinToolsSettingsManager.getToolPriority("web_search");
       expect(priority).toBe("normal");
     });
+
+    it("should return normal priority for x_search", () => {
+      const priority = BuiltinToolsSettingsManager.getToolPriority("x_search");
+      expect(priority).toBe("normal");
+    });
   });
 
   describe("tool enabled status", () => {
@@ -127,6 +137,11 @@ describe("BuiltinToolsSettingsManager - webfetch category", () => {
     it("should return true for browser_navigate by default", () => {
       const enabled = BuiltinToolsSettingsManager.isToolEnabled("browser_navigate");
       expect(enabled).toBe(true);
+    });
+
+    it("should keep x_search disabled by default for opt-in", () => {
+      const enabled = BuiltinToolsSettingsManager.isToolEnabled("x_search");
+      expect(enabled).toBe(false);
     });
   });
 
@@ -152,6 +167,7 @@ describe("BuiltinToolsSettingsManager - webfetch category", () => {
 
       expect(toolsByCategory.search).toBeDefined();
       expect(toolsByCategory.search).toContain("web_search");
+      expect(toolsByCategory.search).toContain("x_search");
     });
 
     it("should include Pi-style computer-use tools in computer_use category", () => {
