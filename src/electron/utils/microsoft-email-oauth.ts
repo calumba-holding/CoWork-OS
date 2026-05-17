@@ -4,6 +4,7 @@ import { URL } from "url";
 import {
   MICROSOFT_EMAIL_DEFAULT_TENANT,
   MICROSOFT_EMAIL_OAUTH_DEFAULT_SCOPES,
+  normalizeMicrosoftEmailReadScopes,
 } from "../../shared/microsoft-email";
 
 export interface MicrosoftEmailOAuthRequest {
@@ -12,6 +13,7 @@ export interface MicrosoftEmailOAuthRequest {
   tenant?: string;
   scopes?: string[];
   loginHint?: string;
+  prompt?: "select_account" | "consent";
 }
 
 export interface MicrosoftEmailOAuthResult {
@@ -106,6 +108,7 @@ interface MicrosoftEmailAuthorizeUrlOptions {
   state: string;
   codeChallenge: string;
   loginHint?: string;
+  prompt?: "select_account" | "consent";
 }
 
 export function buildMicrosoftEmailAuthorizeUrl(
@@ -120,9 +123,7 @@ export function buildMicrosoftEmailAuthorizeUrl(
   authUrl.searchParams.set("state", options.state);
   authUrl.searchParams.set("code_challenge", options.codeChallenge);
   authUrl.searchParams.set("code_challenge_method", "S256");
-  // Microsoft accepts a single prompt value here. Prefer account selection and
-  // allow the service to trigger consent when the requested scopes require it.
-  authUrl.searchParams.set("prompt", "select_account");
+  authUrl.searchParams.set("prompt", options.prompt || "select_account");
   if (options.loginHint) {
     authUrl.searchParams.set("login_hint", options.loginHint);
   }
@@ -265,7 +266,7 @@ export async function startMicrosoftEmailOAuth(
   const tenant = resolveTenant(request.tenant);
   const scopes =
     request.scopes && request.scopes.length > 0
-      ? request.scopes
+      ? normalizeMicrosoftEmailReadScopes(request.scopes)
       : [...MICROSOFT_EMAIL_OAUTH_DEFAULT_SCOPES];
 
   const { redirectUri, waitForCode, state } = await startOAuthCallbackServer();
@@ -279,6 +280,7 @@ export async function startMicrosoftEmailOAuth(
     state,
     codeChallenge,
     loginHint: request.loginHint,
+    prompt: request.prompt,
   });
 
   await openExternalUrl(authUrl.toString());
