@@ -122,7 +122,9 @@ const DEFAULT_SETTINGS: BuiltinToolsSettings = {
       description: "Computer use tools (native mouse, keyboard, screenshot control — macOS and Windows)",
     },
   },
-  toolOverrides: {},
+  toolOverrides: {
+    x_search: { enabled: false },
+  },
   toolTimeouts: {},
   toolAutoApprove: {},
   runCommandApprovalMode: "single_bundle",
@@ -194,6 +196,7 @@ const TOOL_CATEGORIES: Record<string, keyof BuiltinToolsSettings["categories"]> 
   browser_close: "browser",
   // Search tools
   web_search: "search",
+  x_search: "search",
   // System tools
   system_info: "system",
   read_clipboard: "system",
@@ -382,7 +385,10 @@ export class BuiltinToolsSettingsManager {
         ...defaults.categories,
         ...settings.categories,
       },
-      toolOverrides: settings.toolOverrides || {},
+      toolOverrides: {
+        ...defaults.toolOverrides,
+        ...(settings.toolOverrides || {}),
+      },
       toolTimeouts: settings.toolTimeouts || {},
       toolAutoApprove: settings.toolAutoApprove || {},
       runCommandApprovalMode:
