@@ -1426,6 +1426,7 @@ export type ToolType =
   | "get_app_paths"
   // Network/Browser tools
   | "web_search"
+  | "x_search"
   | "voice_call"
   | "browser_navigate"
   | "browser_screenshot"
@@ -1624,6 +1625,7 @@ export const TOOL_GROUPS = {
   // Network operations - requires network permission
   "group:network": [
     "web_search",
+    "x_search",
     "voice_call",
     "x_action",
     "notion_action",
@@ -1769,6 +1771,7 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   generate_image: "network",
   analyze_image: "network",
   web_search: "network",
+  x_search: "network",
   voice_call: "network",
   browser_navigate: "network",
   browser_screenshot: "network",
