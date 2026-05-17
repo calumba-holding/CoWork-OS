@@ -33,6 +33,7 @@ export interface ConnectorOAuthRequest {
   teamDomain?: string; // Slack only
   tenant?: string; // Microsoft email only
   loginHint?: string; // Google / Microsoft email
+  prompt?: "select_account" | "consent"; // Microsoft email only
 }
 
 export interface JiraResource {
@@ -120,6 +121,7 @@ async function startMicrosoftEmailConnectorOAuth(
     tenant: request.tenant,
     scopes: request.scopes,
     loginHint: request.loginHint,
+    prompt: request.prompt,
   });
 
   return {
