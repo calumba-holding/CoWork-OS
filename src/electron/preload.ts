@@ -3,7 +3,10 @@ import { contextBridge, ipcRenderer } from "electron";
 import * as fs from "fs";
 import * as os from "os";
 import { randomBytes } from "crypto";
-import { IPC_CHANNELS as SHARED_IPC_CHANNELS } from "../shared/types";
+import {
+  IPC_CHANNELS as SHARED_IPC_CHANNELS,
+  isTempWorkspaceId,
+} from "../shared/types";
 import type {
   ApplyOnboardingProfileRequest,
   ApplyOnboardingProfileResult,
@@ -141,6 +144,16 @@ import type {
   SymphonyStatus,
   IntegrationMentionOption,
   IntegrationMentionSelection,
+  EverydayActionPreview,
+  EverydayActionPreviewInput,
+  EverydayActionReceipt,
+  EverydayAgentApproveActionRequest,
+  EverydayAgentClearDataRequest,
+  EverydayAgentListReceiptsRequest,
+  EverydayAgentProfileResult,
+  EverydayAgentUpdateProfileRequest,
+  EverydayCapabilityBundle,
+  EverydayPauseScope,
 } from "../shared/types";
 import type {
   SubconsciousBrainSummary,
@@ -273,6 +286,24 @@ const normalizeAttachmentName = (value: unknown): string => {
     .replace(/^\.+|\.{2,}/g, "_")
     .slice(0, 80);
   return sanitized || "image";
+};
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const isUuidLike = (value: unknown): value is string =>
+  typeof value === "string" && UUID_PATTERN.test(value);
+
+const isWorkspaceIdLike = (value: unknown): value is string =>
+  isUuidLike(value) || (typeof value === "string" && isTempWorkspaceId(value));
+
+const hasInvalidCoreMemoryCandidateScope = (request: unknown): boolean => {
+  if (!request || typeof request !== "object") return false;
+  const candidate = request as { profileId?: unknown; workspaceId?: unknown };
+  return (
+    (candidate.profileId !== undefined && !isUuidLike(candidate.profileId)) ||
+    (candidate.workspaceId !== undefined && !isUuidLike(candidate.workspaceId))
+  );
 };
 
 const writeBase64ImageToTempFile = (
@@ -959,6 +990,9 @@ type UserFactCategory =
   | "bio"
   | "work"
   | "goal"
+  | "operating"
+  | "voice"
+  | "accountability"
   | "constraint"
   | "other";
 
@@ -2038,7 +2072,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getMailboxSyncStatus: () => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GET_SYNC_STATUS),
   getMailboxClientState: () =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_CLIENT_STATE) as Promise<MailboxClientState>,
-  syncMailbox: (limit?: number) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SYNC, { limit }),
+  syncMailbox: (limit?: number, source: "auto" | "manual" = "manual") =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SYNC, { limit, source }),
   listMailboxThreads: (query?: MailboxListThreadsInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_LIST_THREADS, query),
   getMailboxThread: (threadId: string) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GET_THREAD, threadId),
@@ -2630,6 +2665,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.LLM_GET_GROQ_MODELS, apiKey, baseUrl),
   getXAIModels: (apiKey?: string, baseUrl?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.LLM_GET_XAI_MODELS, apiKey, baseUrl),
+  xaiOAuthStart: () => ipcRenderer.invoke(IPC_CHANNELS.LLM_XAI_OAUTH_START),
+  xaiOAuthLogout: () => ipcRenderer.invoke(IPC_CHANNELS.LLM_XAI_OAUTH_LOGOUT),
   getDeepSeekModels: (apiKey?: string, baseUrl?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.LLM_GET_DEEPSEEK_MODELS, apiKey, baseUrl),
   getKimiModels: (apiKey?: string, baseUrl?: string) =>
@@ -2647,7 +2684,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   stopLocalAIServer: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_STOP_SERVER),
   getLocalAIServerStatus: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_GET_SERVER_STATUS),
   getLocalAIServerLog: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_GET_SERVER_LOG),
-  openaiOAuthStart: () => ipcRenderer.invoke(IPC_CHANNELS.LLM_OPENAI_OAUTH_START),
+  openaiOAuthStart: (options?: { persist?: boolean }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.LLM_OPENAI_OAUTH_START, options),
   openaiOAuthLogout: () => ipcRenderer.invoke(IPC_CHANNELS.LLM_OPENAI_OAUTH_LOGOUT),
   getBedrockModels: (config?: {
     region?: string;
@@ -3916,6 +3954,48 @@ contextBridge.exposeInMainWorld("electronAPI", {
   checkPackPolicy: (packId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.ADMIN_POLICIES_CHECK_PACK, packId),
 
+  // Everyday Agent APIs
+  everydayAgentGetProfile: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_GET_PROFILE) as Promise<
+      EverydayAgentProfileResult
+    >,
+  everydayAgentUpdateProfile: (updates: EverydayAgentUpdateProfileRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_UPDATE_PROFILE, updates) as Promise<
+      EverydayAgentProfileResult
+    >,
+  everydayAgentAcceptConsent: (request?: {
+    enabled?: boolean;
+    workspaceId?: string;
+    accepted?: boolean;
+  }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_ACCEPT_CONSENT, request) as Promise<
+      EverydayAgentProfileResult
+    >,
+  everydayAgentPause: (scope: Partial<EverydayPauseScope>) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_PAUSE, scope) as Promise<
+      EverydayAgentProfileResult
+    >,
+  everydayAgentRevokeCapability: (capability: EverydayCapabilityBundle) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_REVOKE_CAPABILITY, capability) as Promise<
+      EverydayAgentProfileResult
+    >,
+  everydayAgentListReceipts: (request?: EverydayAgentListReceiptsRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_LIST_RECEIPTS, request) as Promise<
+      EverydayActionReceipt[]
+    >,
+  everydayAgentClearData: (request?: EverydayAgentClearDataRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_CLEAR_DATA, request) as Promise<
+      EverydayAgentProfileResult
+    >,
+  everydayAgentPreviewAction: (input: EverydayActionPreviewInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_PREVIEW_ACTION, input) as Promise<
+      EverydayActionPreview
+    >,
+  everydayAgentApproveAction: (request: EverydayAgentApproveActionRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EVERYDAY_AGENT_APPROVE_ACTION, request) as Promise<
+      EverydayActionReceipt
+    >,
+
   // Agent Teams APIs
   listTeams: (workspaceId: string, includeInactive?: boolean) =>
     ipcRenderer.invoke(IPC_CHANNELS.TEAM_LIST, workspaceId, includeInactive),
@@ -4091,8 +4171,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
     >,
   listCoreLearnings: (request?: import("../shared/types").ListCoreLearningsRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.CORE_LEARNINGS_LIST, request) as Promise<CoreLearningsEntry[]>,
-  listCoreMemoryCandidates: (request?: import("../shared/types").ListCoreMemoryCandidatesRequest) =>
-    ipcRenderer.invoke(IPC_CHANNELS.CORE_MEMORY_LIST_CANDIDATES, request) as Promise<CoreMemoryCandidate[]>,
+  listCoreMemoryCandidates: (request?: import("../shared/types").ListCoreMemoryCandidatesRequest) => {
+    if (hasInvalidCoreMemoryCandidateScope(request)) {
+      return Promise.resolve([]);
+    }
+    return ipcRenderer.invoke(
+      IPC_CHANNELS.CORE_MEMORY_LIST_CANDIDATES,
+      request,
+    ) as Promise<CoreMemoryCandidate[]>;
+  },
   reviewCoreMemoryCandidate: (request: import("../shared/types").ReviewCoreMemoryCandidateRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.CORE_MEMORY_REVIEW_CANDIDATE, request) as Promise<
       CoreMemoryCandidate | undefined
@@ -4221,8 +4308,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // Task Label APIs
-  listTaskLabels: (query: TaskLabelListQuery) =>
-    ipcRenderer.invoke(IPC_CHANNELS.TASK_LABEL_LIST, query),
+  listTaskLabels: (query: TaskLabelListQuery) => {
+    if (!isWorkspaceIdLike(query?.workspaceId)) {
+      return Promise.resolve([]);
+    }
+    return ipcRenderer.invoke(IPC_CHANNELS.TASK_LABEL_LIST, query);
+  },
   createTaskLabel: (request: CreateTaskLabelRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_LABEL_CREATE, request),
   updateTaskLabel: (id: string, request: UpdateTaskLabelRequest) =>
@@ -4712,7 +4803,7 @@ export interface ElectronAPI {
   startDocumentEditTask: (data: DocumentEditRequest) => Promise<Any>;
   getMailboxSyncStatus: () => Promise<MailboxSyncStatus>;
   getMailboxClientState: () => Promise<MailboxClientState>;
-  syncMailbox: (limit?: number) => Promise<MailboxSyncResult>;
+  syncMailbox: (limit?: number, source?: "auto" | "manual") => Promise<MailboxSyncResult>;
   listMailboxThreads: (query?: MailboxListThreadsInput) => Promise<MailboxThreadListItem[]>;
   getMailboxThread: (threadId: string) => Promise<MailboxThreadDetail | null>;
   listMailboxEvents: (limit?: number, threadId?: string) => Promise<MailboxEvent[]>;
@@ -5161,6 +5252,8 @@ export interface ElectronAPI {
     baseUrl?: string,
   ) => Promise<Array<{ id: string; name: string }>>;
   getXAIModels: (apiKey?: string, baseUrl?: string) => Promise<Array<{ id: string; name: string }>>;
+  xaiOAuthStart: () => Promise<{ success: boolean; error?: string }>;
+  xaiOAuthLogout: () => Promise<{ success: boolean; error?: string }>;
   getDeepSeekModels: (
     apiKey?: string,
     baseUrl?: string,
@@ -5202,7 +5295,18 @@ export interface ElectronAPI {
     state: "idle" | "downloading" | "loading" | "ready" | "error";
     downloadingFile?: string;
   }>;
-  openaiOAuthStart: () => Promise<{ success: boolean; error?: string }>;
+  openaiOAuthStart: (options?: { persist?: boolean }) => Promise<{
+    success: boolean;
+    error?: string;
+    email?: string;
+    tokens?: {
+      accessToken: string;
+      refreshToken: string;
+      tokenExpiresAt: number;
+      accountId?: string;
+      email?: string;
+    };
+  }>;
   openaiOAuthLogout: () => Promise<{ success: boolean }>;
   getBedrockModels: (config?: {
     region?: string;
@@ -6727,6 +6831,8 @@ export interface ElectronAPI {
       }>;
       state: string;
       enabled: boolean;
+      policyBlocked?: boolean;
+      policyRequired?: boolean;
       securityReport?: import("../shared/types").CapabilitySecurityReport;
     }>
   >;
@@ -6757,6 +6863,8 @@ export interface ElectronAPI {
     }>;
     state: string;
     enabled: boolean;
+    policyBlocked?: boolean;
+    policyRequired?: boolean;
     securityReport?: import("../shared/types").CapabilitySecurityReport;
   } | null>;
   togglePluginPack: (
@@ -6850,6 +6958,18 @@ export interface ElectronAPI {
     packs: { allowed: string[]; blocked: string[]; required: string[] };
     connectors: { blocked: string[] };
     agents: { maxHeartbeatFrequencySec: number; maxConcurrentAgents: number };
+    everydayAgent: {
+      blocked: boolean;
+      blockedBundles: EverydayCapabilityBundle[];
+      forceReviewOnly: boolean;
+      maxHeartbeatCadenceMinutes: number;
+      maxConcurrentBackgroundWork: number;
+      activeHours: {
+        enabled: boolean;
+        timezone?: string;
+        windows: Array<{ days: number[]; start: string; end: string }>;
+      };
+    };
     general: {
       allowCustomPacks: boolean;
       allowGitInstall: boolean;
@@ -6864,6 +6984,18 @@ export interface ElectronAPI {
     packs: { allowed: string[]; blocked: string[]; required: string[] };
     connectors: { blocked: string[] };
     agents: { maxHeartbeatFrequencySec: number; maxConcurrentAgents: number };
+    everydayAgent: {
+      blocked: boolean;
+      blockedBundles: EverydayCapabilityBundle[];
+      forceReviewOnly: boolean;
+      maxHeartbeatCadenceMinutes: number;
+      maxConcurrentBackgroundWork: number;
+      activeHours: {
+        enabled: boolean;
+        timezone?: string;
+        windows: Array<{ days: number[]; start: string; end: string }>;
+      };
+    };
     general: {
       allowCustomPacks: boolean;
       allowGitInstall: boolean;
@@ -6875,6 +7007,35 @@ export interface ElectronAPI {
   checkPackPolicy: (
     packId: string,
   ) => Promise<{ packId: string; allowed: boolean; required: boolean }>;
+
+  // Everyday Agent
+  everydayAgentGetProfile: () => Promise<EverydayAgentProfileResult>;
+  everydayAgentUpdateProfile: (
+    updates: EverydayAgentUpdateProfileRequest,
+  ) => Promise<EverydayAgentProfileResult>;
+  everydayAgentAcceptConsent: (request?: {
+    enabled?: boolean;
+    workspaceId?: string;
+    accepted?: boolean;
+  }) => Promise<EverydayAgentProfileResult>;
+  everydayAgentPause: (
+    scope: Partial<EverydayPauseScope>,
+  ) => Promise<EverydayAgentProfileResult>;
+  everydayAgentRevokeCapability: (
+    capability: EverydayCapabilityBundle,
+  ) => Promise<EverydayAgentProfileResult>;
+  everydayAgentListReceipts: (
+    request?: EverydayAgentListReceiptsRequest,
+  ) => Promise<EverydayActionReceipt[]>;
+  everydayAgentClearData: (
+    request?: EverydayAgentClearDataRequest,
+  ) => Promise<EverydayAgentProfileResult>;
+  everydayAgentPreviewAction: (
+    input: EverydayActionPreviewInput,
+  ) => Promise<EverydayActionPreview>;
+  everydayAgentApproveAction: (
+    request: EverydayAgentApproveActionRequest,
+  ) => Promise<EverydayActionReceipt>;
 
   // Agent Teams
   listTeams: (workspaceId: string, includeInactive?: boolean) => Promise<AgentTeam[]>;
