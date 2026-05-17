@@ -2,7 +2,7 @@ import { InputSanitizer } from "../agent/security/input-sanitizer";
 import { buildRoleKitSection } from "../context/kit-injection";
 import { redactSensitiveMarkdownContent } from "../memory/MarkdownMemoryIndexService";
 
-const ROLE_FILE_ORDER = ["IDENTITY.md", "RULES.md", "SOUL.md", "VIBES.md"] as const;
+const ROLE_FILE_ORDER = ["IDENTITY.md", "RULES.md", "SOUL.md", "MEMORY.md", "VIBES.md"] as const;
 const TOTAL_ROLE_PROFILE_FILES = ROLE_FILE_ORDER.length;
 const MAX_FILE_CHARS = 4000;
 
