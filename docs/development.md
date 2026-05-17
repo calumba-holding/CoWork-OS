@@ -7,7 +7,7 @@
 - `sqlite3` CLI (required for eval corpus/replay scripts)
 - macOS: Xcode Command Line Tools (needed for `better-sqlite3`): `xcode-select --install`
 - Windows: Visual Studio Build Tools 2022 (C++) and Python 3 (needed for native module builds)
-- LLM provider credentials are optional — the app defaults to OpenRouter's free model router
+- LLM provider credentials are optional for development, but AI task execution still needs a working route: ChatGPT sign-in, local Ollama, or provider credentials.
 
 ## Build from Source
 
@@ -117,6 +117,20 @@ npm run dev:log
 | `npm run skills:audit` | Generate skill audit scorecards in `tmp/qa/` |
 | `npm run skills:check` | Run full skill quality gate (routing + content + audit + eval) |
 
+## macOS Dev Electron Bundle
+
+On macOS, `npm run dev` brands the local `node_modules/electron/dist/Electron.app` display name and icon as CoWork OS by default. The branding script preserves `CFBundleName=Electron` and `CFBundleIdentifier=com.github.Electron` so development safeStorage continues to use the Electron identity.
+
+Use these overrides only when you explicitly need them:
+
+```bash
+COWORK_DEV_BRAND_APP=0 npm run dev
+COWORK_CODESIGN_ENABLE=1 node scripts/codesign_electron_dev.mjs
+COWORK_CODESIGN_IDENTITY="Apple Development: Name (TEAMID)" node scripts/codesign_electron_dev.mjs
+```
+
+Development codesigning remains opt-in. Without `COWORK_CODESIGN_ENABLE=1` or `COWORK_CODESIGN_IDENTITY`, `scripts/codesign_electron_dev.mjs` reports that signing is skipped.
+
 ## Renderer Bundle Size
 
 The renderer startup bundle is intentionally kept separate from secondary product surfaces and heavyweight renderers.
@@ -164,7 +178,7 @@ Implementation contract:
 - The task title/three-dot menu lives in `src/renderer/components/MainContent.tsx`.
 - The modal is `TaskAutomationModal` in the same file so task-derived defaults stay local to task view.
 - Saving must call `window.electronAPI.addCronJob`; do not create a parallel automation store for this flow.
-- Default run mode is `Chat`, with `shellAccess: false` and `allowUserInput: false`.
+- Default run mode is `Chat`, with `shellAccess: false`, `allowUserInput: false`, and no clarifying check-ins. Execute-mode tasks use hard-blocker-only human input by default; Plan/Debug can opt into structured `request_user_input`.
 - `Local` sets `shellAccess: true`.
 - `Worktree` should remain disabled until the cron creation payload can preserve a task worktree execution context.
 - Saved prompts should include a source task title, task ID, and `cowork://tasks/<taskId>` deeplink so future runs remain traceable.
@@ -221,6 +235,20 @@ npm run type-check
 ```
 
 The native SQLite test file can skip locally when `better-sqlite3` is unavailable. Keep the mock-level suite passing because it covers startup backfill behavior, failed metadata-write accounting, workspace-scoped soft-delete, and prompt-recall suppression without native SQLite.
+
+## Durable Runtime Context QA
+
+Run focused durable-context checks when touching active-task recall, compaction-summary persistence, Memory Hub durable-context settings, `context_grep`, `context_describe`, or memory clearing:
+
+```bash
+npx vitest run src/electron/agent/tools/__tests__/system-tools-new.test.ts src/electron/settings/__tests__/memory-features-manager.test.ts src/electron/agent/__tests__/executor-chat-mode.test.ts
+npx vitest run src/electron/memory/__tests__/DurableContextService.test.ts
+npm run type-check
+```
+
+The durable-service suite uses native SQLite and may skip locally when `better-sqlite3` is unavailable. The tool-level suite should still run because it covers disabled behavior, tool exposure, active-task scope enforcement, and the explicit-user-request override without needing native SQLite.
+
+See [Durable Runtime Context](durable-runtime-context.md) for test prompts, expected behavior, and implementation landmarks.
 
 ## Skills QA Workflow
 
