@@ -176,6 +176,59 @@ describe("Sidebar top-level destinations", () => {
     );
   });
 
+  it("marks automated task rows with a distinct icon before the session time", () => {
+    const now = Date.now();
+    const markup = renderToStaticMarkup(
+      React.createElement(Sidebar, {
+        workspace: { id: "ws-1", name: "Workspace", path: "/workspace" } as Any,
+        tasks: [
+          {
+            id: "task-1",
+            title: "Manual parent",
+            prompt: "Manual parent",
+            status: "completed",
+            source: "manual",
+            workspaceId: "ws-1",
+            createdAt: now - 5 * 60 * 1000,
+            updatedAt: now - 5 * 60 * 1000,
+          },
+          {
+            id: "task-2",
+            parentTaskId: "task-1",
+            title: "Update AGENTS.md",
+            prompt: "Update AGENTS.md",
+            status: "completed",
+            source: "cron",
+            workspaceId: "ws-1",
+            createdAt: now - 7 * 60 * 60 * 1000,
+            updatedAt: now - 7 * 60 * 60 * 1000,
+          },
+        ] as Any,
+        selectedTaskId: null,
+        onSelectTask: () => {},
+        onOpenHome: () => {},
+        onOpenIdeas: () => {},
+        onOpenInboxAgent: () => {},
+        onOpenAgents: () => {},
+        onOpenEverydayAgent: () => {},
+        onOpenHealth: () => {},
+        onNewSession: () => {},
+        onOpenSettings: () => {},
+        onOpenMissionControl: () => {},
+        onOpenDevices: () => {},
+        onTasksChanged: () => {},
+      }),
+    );
+
+    expect(markup).toContain("cli-task-automation-icon");
+    expect(markup).toContain("Automated task");
+    const automatedIconIndex = markup.indexOf("cli-task-automation-icon");
+    expect(automatedIconIndex).toBeGreaterThan(markup.indexOf("Update AGENTS.md"));
+    expect(automatedIconIndex).toBeLessThan(
+      markup.indexOf("class=\"cli-task-time\"", automatedIconIndex),
+    );
+  });
+
   it("uses compact container-query rules when the sidebar is narrow", () => {
     const source = readFileSync(stylesPath, "utf8");
 
