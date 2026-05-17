@@ -62,9 +62,8 @@ const PROVIDERS: {
   { id: "openrouter", name: "OpenRouter", requiresKey: true, badge: "Free" },
   { id: "anthropic", name: "Claude", requiresKey: true },
   { id: "openai", name: "OpenAI", requiresKey: true },
-  { id: "gemini", name: "Gemini", requiresKey: true },
-  { id: "ollama", name: "Ollama", requiresKey: false },
-  { id: "groq", name: "Groq", requiresKey: true },
+  { id: "gemini", name: "Gemini", requiresKey: true, badge: "Free" },
+  { id: "groq", name: "Groq", requiresKey: true, badge: "Free" },
   { id: "xai", name: "Grok", requiresKey: true },
   { id: "deepseek", name: "DeepSeek", requiresKey: true },
   { id: "kimi", name: "Kimi", requiresKey: true },
@@ -146,48 +145,6 @@ interface OnboardingUiDraft {
 }
 
 const ONBOARDING_UI_DRAFT_KEY = "cowork:onboarding:ui:v1";
-const ONBOARDING_UI_DRAFT_VERSION = 1;
-const ONBOARDING_UI_DRAFT_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 14;
-
-const loadOnboardingUiDraft = (): OnboardingUiDraft | null => {
-  if (typeof window === "undefined") return null;
-
-  try {
-    const raw = localStorage.getItem(ONBOARDING_UI_DRAFT_KEY);
-    if (!raw) return null;
-
-    const parsed = JSON.parse(raw) as Partial<OnboardingUiDraft>;
-    if (!parsed || typeof parsed !== "object") return null;
-    if (parsed.version !== ONBOARDING_UI_DRAFT_VERSION) return null;
-    if (typeof parsed.savedAt !== "number") return null;
-    if (Date.now() - parsed.savedAt > ONBOARDING_UI_DRAFT_MAX_AGE_MS) return null;
-    if (parsed.inputMode !== "voice" && parsed.inputMode !== "keyboard") return null;
-
-    return {
-      version: ONBOARDING_UI_DRAFT_VERSION,
-      savedAt: parsed.savedAt,
-      inputValue: typeof parsed.inputValue === "string" ? parsed.inputValue : "",
-      inputMode: parsed.inputMode,
-      musicEnabled: !!parsed.musicEnabled,
-      showControlHints: parsed.showControlHints !== false,
-      confidencePrompt: typeof parsed.confidencePrompt === "string" ? parsed.confidencePrompt : "",
-      confidenceResponse:
-        typeof parsed.confidenceResponse === "string" ? parsed.confidenceResponse : "",
-    };
-  } catch {
-    return null;
-  }
-};
-
-const persistOnboardingUiDraft = (draft: OnboardingUiDraft): void => {
-  if (typeof window === "undefined") return;
-
-  try {
-    localStorage.setItem(ONBOARDING_UI_DRAFT_KEY, JSON.stringify(draft));
-  } catch {
-    // Ignore persistence failures
-  }
-};
 
 const clearOnboardingUiDraft = (): void => {
   if (typeof window === "undefined") return;
@@ -223,7 +180,7 @@ const buildConfidenceResponse = (
 };
 
 export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
-  const uiDraftRef = useRef<OnboardingUiDraft | null>(loadOnboardingUiDraft());
+  const uiDraftRef = useRef<OnboardingUiDraft | null>(null);
   const [inputValue, setInputValue] = useState(uiDraftRef.current?.inputValue ?? "");
   const [inputMode, setInputMode] = useState<"voice" | "keyboard">(
     uiDraftRef.current?.inputMode ?? "keyboard",
@@ -291,31 +248,8 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
       return;
     }
 
-    if (onboarding.state === "transitioning") {
-      clearOnboardingUiDraft();
-      return;
-    }
-
-    persistOnboardingUiDraft({
-      version: ONBOARDING_UI_DRAFT_VERSION,
-      savedAt: Date.now(),
-      inputValue: isSensitiveInputState ? "" : inputValue,
-      inputMode,
-      musicEnabled,
-      showControlHints,
-      confidencePrompt,
-      confidenceResponse,
-    });
-  }, [
-    onboarding.state,
-    inputValue,
-    inputMode,
-    musicEnabled,
-    showControlHints,
-    confidencePrompt,
-    confidenceResponse,
-    isSensitiveInputState,
-  ]);
+    clearOnboardingUiDraft();
+  }, [onboarding.state]);
 
   useEffect(() => {
     if (isSensitiveInputState) {
@@ -1012,7 +946,7 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
         />
       </div>
       <div className="onboarding-form-group">
-        <label className="onboarding-form-label">What fills most of your day?</label>
+        <label className="onboarding-form-label">Work context (optional)</label>
         <textarea
           className="onboarding-textarea"
           placeholder="Describe your work, current focus, or what usually needs help."
@@ -1025,7 +959,7 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
         <button
           className="onboarding-btn onboarding-btn-primary"
           onClick={() => onboarding.submitUserProfile(profileNameDraft, profileContextDraft)}
-          disabled={!profileContextDraft.trim()}
+          disabled={!profileNameDraft.trim()}
         >
           Continue
         </button>
@@ -1246,6 +1180,15 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
           </span>
         ))}
       </div>
+      {onboarding.showIntroContinue && (
+        <button
+          type="button"
+          className="onboarding-btn-primary onboarding-intro-continue"
+          onClick={onboarding.continueFromIntro}
+        >
+          Continue
+        </button>
+      )}
     </div>
   );
 
@@ -1321,8 +1264,10 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
   const renderPersonalizedRecap = () => {
     const workspaceSummary = buildOnboardingWorkspaceSummary(onboarding.data);
     const providerName = onboarding.data.selectedProvider
-      ? PROVIDERS.find((provider) => provider.id === onboarding.data.selectedProvider)?.name ||
-        onboarding.data.selectedProvider
+      ? onboarding.data.selectedProvider === "openai" && !onboarding.data.apiKey
+        ? "ChatGPT"
+        : PROVIDERS.find((provider) => provider.id === onboarding.data.selectedProvider)?.name ||
+          onboarding.data.selectedProvider
       : "Not configured yet";
     const workStyleLabel =
       onboarding.data.workStyle === "planner"
@@ -1337,142 +1282,180 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
         : onboarding.data.voiceEnabled
           ? "Enabled"
           : "Disabled";
+    const timeDrains = getTimeDrainTitles(onboarding.data);
+    const priorities = getPriorityTitles(onboarding.data);
+    const hasWorkContext = Boolean(
+      onboarding.data.userContext.trim() || onboarding.data.workflowTools.trim(),
+    );
+    const hasFocusMap = timeDrains.length > 0 || priorities.length > 0;
+    const hasResponseGuidance = Boolean(
+      onboarding.data.responseStyle !== "depends" || onboarding.data.additionalGuidance.trim(),
+    );
+    const hasOperatingMode = Boolean(
+      onboarding.data.workStyle || onboarding.data.voiceEnabled !== null,
+    );
+
+    const renderEditButton = (
+      label: string,
+      target: Parameters<typeof onboarding.editRecapSection>[0],
+    ) => (
+      <button
+        type="button"
+        className="onboarding-recap-edit-btn"
+        onClick={() => onboarding.editRecapSection(target)}
+      >
+        {label}
+      </button>
+    );
 
     return (
       <div className="onboarding-recap">
-        <p className="onboarding-recap-summary">
-          I&apos;ll use this as your default working profile across CoWork.
-        </p>
+        <div className="onboarding-recap-hero">
+          <div className="onboarding-recap-header">
+            <span className="onboarding-recap-eyebrow">Ready to start</span>
+            <h2>
+              {providerName === "ChatGPT" ? "ChatGPT is connected." : "Your setup is ready."}
+            </h2>
+            <p>Review the essentials, tune anything that feels off, then start working.</p>
+          </div>
+          <div className="onboarding-recap-provider-badge" aria-label={`Provider: ${providerName}`}>
+            <span aria-hidden="true" />
+            {providerName}
+          </div>
+        </div>
 
-        <div className="onboarding-recap-list onboarding-recap-grid">
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Assistant setup</span>
-              <span className="onboarding-recap-item-value">
-                {onboarding.data.assistantName || "CoWork"}
-              </span>
-              <span className="onboarding-recap-item-note">{workspaceSummary.assistantStyle}</span>
-              <span className="onboarding-recap-item-note">Model: {providerName}</span>
+        <div className="onboarding-recap-scroll" tabIndex={0}>
+          <div className="onboarding-recap-status-grid" aria-label="Setup status">
+            <div className="onboarding-recap-status-item">
+              <span>Assistant</span>
+              <strong>{onboarding.data.assistantName || "CoWork"}</strong>
             </div>
-            <div className="onboarding-recap-edit-actions">
-              <button className="onboarding-recap-edit-btn" onClick={() => onboarding.editRecapSection("name")}>
-                Name
-              </button>
-              <button
-                className="onboarding-recap-edit-btn"
-                onClick={() => onboarding.editRecapSection("assistant_traits")}
-              >
-                Traits
-              </button>
-              <button
-                className="onboarding-recap-edit-btn"
-                onClick={() => onboarding.editRecapSection("model")}
-              >
-                Model
-              </button>
+            <div className="onboarding-recap-status-item">
+              <span>Memory</span>
+              <strong>{memoryLabel}</strong>
+            </div>
+            <div className="onboarding-recap-status-item">
+              <span>Mode</span>
+              <strong>{workStyleLabel}</strong>
             </div>
           </div>
 
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Work context</span>
-              <span className="onboarding-recap-item-value">
-                {onboarding.data.userName || "User"}
-              </span>
-              <span className="onboarding-recap-item-note">
-                {onboarding.data.userContext || "No work context captured yet."}
-              </span>
-              <span className="onboarding-recap-item-note">
-                Tools: {onboarding.data.workflowTools || "Not set yet"}
-              </span>
-            </div>
-            <div className="onboarding-recap-edit-actions">
-              <button
-                className="onboarding-recap-edit-btn"
-                onClick={() => onboarding.editRecapSection("user_profile")}
-              >
-                Profile
-              </button>
-              <button
-                className="onboarding-recap-edit-btn"
-                onClick={() => onboarding.editRecapSection("tools")}
-              >
-                Tools
-              </button>
-            </div>
+          <div className="onboarding-recap-card-grid" aria-label="Onboarding setup recap">
+            <section className="onboarding-recap-card onboarding-recap-card-featured">
+              <div className="onboarding-recap-card-copy">
+                <span className="onboarding-recap-row-label">Assistant</span>
+                <strong>{onboarding.data.assistantName || "CoWork"}</strong>
+                <p>{workspaceSummary.assistantStyle}</p>
+              </div>
+              <div className="onboarding-recap-edit-actions">
+                {renderEditButton("Name", "name")}
+                {renderEditButton("Traits", "assistant_traits")}
+              </div>
+            </section>
+
+            <section className="onboarding-recap-card">
+              <div className="onboarding-recap-card-copy">
+                <span className="onboarding-recap-row-label">AI provider</span>
+                <strong>{providerName}</strong>
+                <p>
+                  {onboarding.data.selectedProvider
+                    ? "Ready for reasoning and task execution."
+                    : "You can add a provider later in Settings."}
+                </p>
+              </div>
+              <div className="onboarding-recap-edit-actions">
+                {renderEditButton("Change", "model")}
+              </div>
+            </section>
+
+            <section className="onboarding-recap-card">
+              <div className="onboarding-recap-card-copy">
+                <span className="onboarding-recap-row-label">Memory</span>
+                <strong>{memoryLabel}</strong>
+                <p>
+                  {onboarding.data.memoryEnabled
+                    ? "Preferences and context can carry across conversations."
+                    : "No memory will be stored until you turn it on."}
+                </p>
+              </div>
+              <div className="onboarding-recap-edit-actions">
+                {renderEditButton("Change", "memory")}
+              </div>
+            </section>
+
+            {hasWorkContext && (
+              <section className="onboarding-recap-card">
+                <div className="onboarding-recap-card-copy">
+                  <span className="onboarding-recap-row-label">Work context</span>
+                  <strong>{onboarding.data.userName || "User"}</strong>
+                  <p>{onboarding.data.userContext || onboarding.data.workflowTools}</p>
+                </div>
+                <div className="onboarding-recap-edit-actions">
+                  {renderEditButton("Profile", "user_profile")}
+                  {renderEditButton("Tools", "tools")}
+                </div>
+              </section>
+            )}
+
+            {hasFocusMap && (
+              <section className="onboarding-recap-card">
+                <div className="onboarding-recap-card-copy">
+                  <span className="onboarding-recap-row-label">Focus</span>
+                  <strong>{priorities.join(", ") || "Priorities"}</strong>
+                  <p>
+                    {timeDrains.length > 0
+                      ? `Time drains: ${timeDrains.join(", ")}`
+                      : "Priorities are ready."}
+                  </p>
+                </div>
+                <div className="onboarding-recap-edit-actions">
+                  {renderEditButton("Drains", "time_drains")}
+                  {renderEditButton("Priorities", "priorities")}
+                </div>
+              </section>
+            )}
+
+            {(hasResponseGuidance || hasOperatingMode) && (
+              <section className="onboarding-recap-card">
+                <div className="onboarding-recap-card-copy">
+                  <span className="onboarding-recap-row-label">Working style</span>
+                  <strong>
+                    {hasResponseGuidance
+                      ? getResolvedResponseStyleLabel(onboarding.data)
+                      : workStyleLabel}
+                  </strong>
+                  <p>
+                    {[
+                      hasOperatingMode ? `Work style: ${workStyleLabel}` : null,
+                      onboarding.data.voiceEnabled !== null ? `Voice: ${voiceLabel}` : null,
+                      onboarding.data.additionalGuidance.trim() || null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </p>
+                </div>
+                <div className="onboarding-recap-edit-actions">
+                  {renderEditButton("Style", "response_style")}
+                  {renderEditButton("Voice", "voice")}
+                </div>
+              </section>
+            )}
           </div>
 
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Focus map</span>
-              <span className="onboarding-recap-item-note">
-                Drains: {getTimeDrainTitles(onboarding.data).join(", ") || "Not set yet"}
-              </span>
-              <span className="onboarding-recap-item-note">
-                Priorities: {getPriorityTitles(onboarding.data).join(", ") || "Not set yet"}
-              </span>
+          {(!hasWorkContext || !hasFocusMap || !hasResponseGuidance || !hasOperatingMode) && (
+            <div className="onboarding-recap-optional">
+              <div>
+                <span className="onboarding-recap-row-label">Optional personalization</span>
+                <p>Add more context now, or start with ChatGPT and fill this in later.</p>
+              </div>
+              <div className="onboarding-recap-edit-actions">
+                {!hasWorkContext && renderEditButton("Add profile", "user_profile")}
+                {!hasFocusMap && renderEditButton("Add priorities", "priorities")}
+                {!hasResponseGuidance && renderEditButton("Set style", "response_style")}
+                {!hasOperatingMode && renderEditButton("Work mode", "style")}
+              </div>
             </div>
-            <div className="onboarding-recap-edit-actions">
-              <button
-                className="onboarding-recap-edit-btn"
-                onClick={() => onboarding.editRecapSection("time_drains")}
-              >
-                Drains
-              </button>
-              <button
-                className="onboarding-recap-edit-btn"
-                onClick={() => onboarding.editRecapSection("priorities")}
-              >
-                Priorities
-              </button>
-            </div>
-          </div>
-
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Response profile</span>
-              <span className="onboarding-recap-item-value">
-                {getResolvedResponseStyleLabel(onboarding.data)}
-              </span>
-              <span className="onboarding-recap-item-note">
-                {onboarding.data.additionalGuidance || "No additional always-on guidance yet."}
-              </span>
-            </div>
-            <div className="onboarding-recap-edit-actions">
-              <button
-                className="onboarding-recap-edit-btn"
-                onClick={() => onboarding.editRecapSection("response_style")}
-              >
-                Style
-              </button>
-              <button
-                className="onboarding-recap-edit-btn"
-                onClick={() => onboarding.editRecapSection("guidance")}
-              >
-                Guidance
-              </button>
-            </div>
-          </div>
-
-          <div className="onboarding-recap-item">
-            <div className="onboarding-recap-item-content">
-              <span className="onboarding-recap-item-label">Operating mode</span>
-              <span className="onboarding-recap-item-note">Work style: {workStyleLabel}</span>
-              <span className="onboarding-recap-item-note">Memory: {memoryLabel}</span>
-              <span className="onboarding-recap-item-note">Voice: {voiceLabel}</span>
-            </div>
-            <div className="onboarding-recap-edit-actions">
-              <button className="onboarding-recap-edit-btn" onClick={() => onboarding.editRecapSection("style")}>
-                Work style
-              </button>
-              <button className="onboarding-recap-edit-btn" onClick={() => onboarding.editRecapSection("memory")}>
-                Memory
-              </button>
-              <button className="onboarding-recap-edit-btn" onClick={() => onboarding.editRecapSection("voice")}>
-                Voice
-              </button>
-            </div>
-          </div>
+          )}
         </div>
 
         <div className="onboarding-actions onboarding-recap-actions">
@@ -1646,6 +1629,50 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
   // Render provider selection
   const renderProviders = () => (
     <div className={`onboarding-setup-section ${onboarding.showProviders ? "visible" : ""}`}>
+      <div className="onboarding-ai-primary-grid">
+        <button
+          type="button"
+          className="onboarding-ai-primary-card"
+          onClick={onboarding.signInWithChatGPT}
+          disabled={onboarding.chatGptSignInLoading}
+        >
+          <span className="onboarding-ai-primary-title">
+            {onboarding.chatGptSignInLoading ? "Opening ChatGPT..." : "Sign in with ChatGPT"}
+          </span>
+          <span className="onboarding-ai-primary-copy">
+            Easiest if you already use ChatGPT. No API key required.
+          </span>
+        </button>
+        {onboarding.data.detectedOllamaModel ? (
+          <button
+            type="button"
+            className="onboarding-ai-primary-card"
+            onClick={() => onboarding.acceptOllamaDetection()}
+          >
+            <span className="onboarding-ai-primary-title">Use local Ollama</span>
+            <span className="onboarding-ai-primary-copy">
+              Found {onboarding.data.detectedOllamaModel} on this computer. Runs privately.
+            </span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="onboarding-ai-primary-card muted"
+            disabled
+          >
+            <span className="onboarding-ai-primary-title">Use local Ollama</span>
+            <span className="onboarding-ai-primary-copy">
+              No local model detected. Install Ollama and pull a model, then run setup again.
+            </span>
+          </button>
+        )}
+      </div>
+      {onboarding.chatGptSignInError && (
+        <div className="onboarding-test-result error">
+          <span>{onboarding.chatGptSignInError}</span>
+        </div>
+      )}
+      <div className="onboarding-provider-heading">Use an API key or advanced provider</div>
       <div className="onboarding-provider-pills">
         {PROVIDERS.map((provider) => (
           <button
@@ -1655,7 +1682,7 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
             }`}
             onClick={() => onboarding.selectProvider(provider.id)}
           >
-            {provider.name}
+            <span className="onboarding-provider-name">{provider.name}</span>
             {provider.badge && <span className="onboarding-provider-badge">{provider.badge}</span>}
           </button>
         ))}
@@ -1665,7 +1692,7 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
           className="onboarding-btn onboarding-btn-secondary"
           onClick={onboarding.skipLLMSetup}
         >
-          Skip for now
+          Explore without AI
         </button>
       </div>
     </div>
@@ -2002,7 +2029,7 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
         />
 
         {/* Text */}
-        {onboarding.currentText && onboarding.state !== "dormant" && (
+        {onboarding.currentText && onboarding.state !== "dormant" && onboarding.state !== "recap" && (
           <TypewriterText
             text={onboarding.currentText}
             speed={40}
@@ -2022,7 +2049,6 @@ export function Onboarding({ onComplete, workspaceId }: OnboardingProps) {
               onboarding.state !== "ollama_detected" &&
               onboarding.state !== "llm_setup" &&
               onboarding.state !== "llm_api_key" &&
-              onboarding.state !== "recap" &&
               onboarding.state !== "final_try"
             }
           />
