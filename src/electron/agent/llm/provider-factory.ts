@@ -671,6 +671,9 @@ function normalizeProviderConfig(config: LLMProviderConfig): LLMProviderConfig {
     groqApiKey: normalizeSecret(config.groqApiKey),
     groqBaseUrl: normalizeOptionalString(config.groqBaseUrl),
     xaiApiKey: normalizeSecret(config.xaiApiKey),
+    xaiAccessToken: normalizeSecret(config.xaiAccessToken),
+    xaiRefreshToken: normalizeSecret(config.xaiRefreshToken),
+    xaiTokenEndpoint: normalizeOptionalString(config.xaiTokenEndpoint),
     xaiBaseUrl: normalizeOptionalString(config.xaiBaseUrl),
     kimiApiKey: normalizeSecret(config.kimiApiKey),
     kimiBaseUrl: normalizeOptionalString(config.kimiBaseUrl),
@@ -815,6 +818,9 @@ function sanitizeSettings(settings: LLMSettings): LLMSettings {
     sanitized.xai = {
       ...sanitized.xai,
       apiKey: decryptSecret(sanitized.xai.apiKey),
+      accessToken: decryptSecret(sanitized.xai.accessToken),
+      refreshToken: decryptSecret(sanitized.xai.refreshToken),
+      idToken: decryptSecret(sanitized.xai.idToken),
     };
   }
 
@@ -948,6 +954,12 @@ export interface LLMSettings {
   } & ProviderRoutingSettings;
   xai?: {
     apiKey?: string;
+    accessToken?: string;
+    refreshToken?: string;
+    tokenExpiresAt?: number;
+    tokenEndpoint?: string;
+    idToken?: string;
+    authMethod?: "api_key" | "oauth";
     model?: string;
     baseUrl?: string;
   } & ProviderRoutingSettings;
@@ -1239,6 +1251,8 @@ export class LLMProviderFactory {
         return Boolean(settings.groq?.apiKey);
       case "xai":
         return Boolean(settings.xai?.apiKey);
+      case "xai-oauth":
+        return Boolean(settings.xai?.accessToken && settings.xai?.refreshToken);
       case "kimi":
         return Boolean(settings.kimi?.apiKey);
       case "pi":
@@ -1317,6 +1331,7 @@ export class LLMProviderFactory {
         if (!settings.groq && createIfMissing) settings.groq = {};
         return settings.groq;
       case "xai":
+      case "xai-oauth":
         if (!settings.xai && createIfMissing) settings.xai = {};
         return settings.xai;
       case "kimi":
@@ -1923,6 +1938,9 @@ export class LLMProviderFactory {
     if (settings.groq?.apiKey) {
       return "groq";
     }
+    if (settings.xai?.accessToken && settings.xai?.refreshToken) {
+      return "xai-oauth";
+    }
     if (settings.xai?.apiKey) {
       return "xai";
     }
@@ -2135,6 +2153,30 @@ export class LLMProviderFactory {
       // xAI config - from settings only
       xaiApiKey:
         normalizeSecret(overrideConfig?.xaiApiKey) || settings.xai?.apiKey,
+      xaiAccessToken:
+        normalizeSecret(overrideConfig?.xaiAccessToken) ||
+        settings.xai?.accessToken,
+      xaiRefreshToken:
+        normalizeSecret(overrideConfig?.xaiRefreshToken) ||
+        settings.xai?.refreshToken,
+      xaiTokenExpiresAt:
+        overrideConfig?.xaiTokenExpiresAt || settings.xai?.tokenExpiresAt,
+      xaiTokenEndpoint:
+        overrideConfig?.xaiTokenEndpoint || settings.xai?.tokenEndpoint,
+      xaiOAuthTokenUpdater: overrideConfig?.xaiOAuthTokenUpdater || (async (tokens) => {
+        const latestSettings = this.loadSettings();
+        latestSettings.xai = {
+          ...latestSettings.xai,
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          tokenExpiresAt: tokens.expires_at,
+          tokenEndpoint: tokens.token_endpoint,
+          idToken: tokens.id_token,
+          authMethod: "oauth",
+        };
+        this.saveSettings(latestSettings);
+        this.clearCache();
+      }),
       xaiBaseUrl: overrideConfig?.xaiBaseUrl || settings.xai?.baseUrl,
       // Kimi config - from settings only
       kimiApiKey:
@@ -2206,6 +2248,7 @@ export class LLMProviderFactory {
         provider = new GroqProvider(config);
         break;
       case "xai":
+      case "xai-oauth":
         provider = new XAIProvider(config);
         break;
       case "kimi":
@@ -2299,8 +2342,8 @@ export class LLMProviderFactory {
     }
 
     // For xAI, use the specific model if provided or default
-    if (providerType === "xai") {
-      return xaiModel || "grok-4-fast-non-reasoning";
+    if (providerType === "xai" || providerType === "xai-oauth") {
+      return xaiModel || "grok-4.3";
     }
 
     // For Kimi, use the specific model if provided or default
@@ -2445,8 +2488,13 @@ export class LLMProviderFactory {
       },
       {
         type: "xai" as LLMProviderType,
-        name: "xAI (Grok)",
+        name: "xAI API",
         configured: !!settings.xai?.apiKey,
+      },
+      {
+        type: "xai-oauth" as LLMProviderType,
+        name: "Grok OAuth",
+        configured: !!(settings.xai?.accessToken && settings.xai?.refreshToken),
       },
       {
         type: "kimi" as LLMProviderType,
@@ -2953,8 +3001,9 @@ export class LLMProviderFactory {
         };
       }
 
-      case "xai": {
-        const currentModel = settings.xai?.model || "grok-4-fast-non-reasoning";
+      case "xai":
+      case "xai-oauth": {
+        const currentModel = settings.xai?.model || "grok-4.3";
         const modelList =
           settings.cachedXaiModels && settings.cachedXaiModels.length > 0
             ? settings.cachedXaiModels
@@ -3115,6 +3164,7 @@ export class LLMProviderFactory {
         updated.groq = { ...settings.groq, model: modelKey };
         break;
       case "xai":
+      case "xai-oauth":
         updated.xai = { ...settings.xai, model: modelKey };
         break;
       case "kimi":
@@ -3224,6 +3274,7 @@ export class LLMProviderFactory {
       case "groq":
         return patchProviderRouting("groq");
       case "xai":
+      case "xai-oauth":
         return patchProviderRouting("xai");
       case "kimi":
         return patchProviderRouting("kimi");
@@ -4005,9 +4056,10 @@ export class LLMProviderFactory {
     const resolvedBaseUrl = normalizedBaseUrl || settings.xai?.baseUrl;
 
     const defaultModels = [
-      { id: "grok-4", name: "Grok 4" },
-      { id: "grok-4-fast-non-reasoning", name: "Grok 4 Fast (Non-Reasoning)" },
-      { id: "grok-4-fast-reasoning", name: "Grok 4 Fast (Reasoning)" },
+      { id: "grok-4.3", name: "Grok 4.3" },
+      { id: "grok-4.20-0309-reasoning", name: "Grok 4.20 Reasoning" },
+      { id: "grok-4.20-0309-non-reasoning", name: "Grok 4.20 Non-Reasoning" },
+      { id: "grok-4.20-multi-agent-0309", name: "Grok 4.20 Multi-Agent" },
     ];
 
     if (!key) {
