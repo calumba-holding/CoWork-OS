@@ -34,6 +34,13 @@ import type {
   SSHTunnelConfig,
   SSHTunnelStatus,
   Task,
+  EverydayActionPreviewInput,
+  EverydayAgentApproveActionRequest,
+  EverydayAgentClearDataRequest,
+  EverydayAgentListReceiptsRequest,
+  EverydayAgentUpdateProfileRequest,
+  EverydayCapabilityBundle,
+  EverydayPauseScope,
 } from "../../shared/types";
 import { ControlPlaneServer, ControlPlaneSettingsManager } from "./index";
 import { Methods, Events, ErrorCodes } from "./protocol";
@@ -89,6 +96,7 @@ import {
 } from "./fleet-manager";
 import { ManagedAccountManager } from "../accounts/managed-account-manager";
 import { ManagedSessionService } from "../managed/ManagedSessionService";
+import { EverydayAgentService } from "../everyday-agent/EverydayAgentService";
 import {
   normalizeImagesForRemote,
   sanitizeTaskMessageParams,
@@ -117,6 +125,7 @@ export interface ControlPlaneMethodDeps {
 let controlPlaneDeps: ControlPlaneMethodDeps | null = null;
 let detachAgentDaemonBridge: (() => void) | null = null;
 let managedSessionService: ManagedSessionService | null = null;
+let everydayAgentService: EverydayAgentService | null = null;
 
 function getManagedSessionService(deps: ControlPlaneMethodDeps): ManagedSessionService {
   if (!managedSessionService) {
@@ -125,6 +134,13 @@ function getManagedSessionService(deps: ControlPlaneMethodDeps): ManagedSessionS
     });
   }
   return managedSessionService;
+}
+
+function getEverydayAgentService(deps: ControlPlaneMethodDeps): EverydayAgentService {
+  if (!everydayAgentService) {
+    everydayAgentService = new EverydayAgentService(deps.dbManager.getDatabase());
+  }
+  return everydayAgentService;
 }
 
 function toNodePlatform(platform?: string): "ios" | "android" | "macos" | "linux" | "windows" {
@@ -175,6 +191,10 @@ function requireScope(client: any, scope: "admin" | "read" | "write" | "operator
   if (!client?.hasScope?.(scope)) {
     throw { code: ErrorCodes.UNAUTHORIZED, message: `Missing required scope: ${scope}` };
   }
+}
+
+export function requireEverydayAgentReceiptAccess(client: any): void {
+  requireScope(client, "admin");
 }
 
 export function redactManagedEnvironmentForRead(environment: any) {
@@ -2671,6 +2691,7 @@ function registerTaskAndWorkspaceMethods(
   const approvalRepo = new ApprovalRepository(db);
   const eventRepo = new TaskEventRepository(db);
   const managedSessions = getManagedSessionService(deps);
+  const everydayAgent = getEverydayAgentService(deps);
   const agentDaemon = deps.agentDaemon;
   const channelGateway = deps.channelGateway;
   const isAdminClient = (client: any) => !!client?.hasScope?.("admin");
@@ -2810,6 +2831,57 @@ function registerTaskAndWorkspaceMethods(
         message: error?.message || `Failed to list directory: ${relativePath}`,
       };
     }
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_GET_PROFILE, async (client) => {
+    requireScope(client, "read");
+    return everydayAgent.getProfile();
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_UPDATE_PROFILE, async (client, params) => {
+    requireScope(client, "admin");
+    return everydayAgent.updateProfile((params || {}) as EverydayAgentUpdateProfileRequest);
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_ACCEPT_CONSENT, async (client, params) => {
+    requireScope(client, "admin");
+    return everydayAgent.acceptConsent(
+      (params || {}) as { enabled?: boolean; workspaceId?: string; accepted?: boolean },
+    );
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_PAUSE, async (client, params) => {
+    requireScope(client, "admin");
+    return everydayAgent.pause((params || { kind: "global" }) as Partial<EverydayPauseScope>);
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_REVOKE_CAPABILITY, async (client, params) => {
+    requireScope(client, "admin");
+    const p = (params || {}) as { capability?: string };
+    if (!p.capability) {
+      throw { code: ErrorCodes.INVALID_PARAMS, message: "capability is required" };
+    }
+    return everydayAgent.revokeCapability(p.capability as EverydayCapabilityBundle);
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_LIST_RECEIPTS, async (client, params) => {
+    requireEverydayAgentReceiptAccess(client);
+    return { receipts: everydayAgent.listReceipts((params || {}) as EverydayAgentListReceiptsRequest) };
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_CLEAR_DATA, async (client, params) => {
+    requireScope(client, "admin");
+    return everydayAgent.clearData((params || {}) as EverydayAgentClearDataRequest);
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_PREVIEW_ACTION, async (client, params) => {
+    requireScope(client, "admin");
+    return { preview: everydayAgent.previewAction(params as EverydayActionPreviewInput) };
+  });
+
+  server.registerMethod(Methods.EVERYDAY_AGENT_APPROVE_ACTION, async (client, params) => {
+    requireScope(client, "admin");
+    return { receipt: everydayAgent.approveAction(params as EverydayAgentApproveActionRequest) };
   });
 
   server.registerMethod(Methods.MANAGED_AGENT_LIST, async (client, params) => {
