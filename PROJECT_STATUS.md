@@ -2,10 +2,12 @@
 
 ## Production-Ready Implementation
 
-CoWork OS is a **security-first personal AI assistant platform** with multi-channel messaging support, comprehensive guardrails, and extensive test coverage.
+CoWork OS is a **security-first, GUI-first local AI super app and everything app** with multi-channel messaging support, visual agent management, comprehensive guardrails, and extensive test coverage.
 
 ### What CoWork OS Is
 
+- **Personal AI Super App**: Code, email, research, create documents, work with spreadsheets and decks, test web pages, automate work, and manage agents from one app
+- **GUI-first Agent Management**: Create reusable agents, spawn many runs, inspect timelines, assign work, and monitor teams through Agents Hub, Mission Control, task boards, and approval dialogs
 - **Personal AI Gateway**: Connect your AI assistant to WhatsApp, Telegram, Discord, Slack, and iMessage
 - **Managed Device Control Surface**: Run and inspect work across local and remote CoWork machines from a dedicated Devices tab
 - **Automation Operating Surface**: Task Queue, Self-Improve, Scheduled Tasks, Webhooks, Event Triggers, and Daily Briefing are grouped under Automations
@@ -549,17 +551,18 @@ Expected behavior:
 
 ## Summary
 
-**CoWork OS is a production-ready, security-first personal AI assistant platform:**
+**CoWork OS is a production-ready, security-first, GUI-first local AI super app and everything app:**
 
 ### Core Strengths
-- **Security**: 4,500+ automated tests, configurable guardrails, approval workflows, brute-force protection
+- **Security**: 4,932 automated tests across 390 test files, configurable guardrails, approval workflows, brute-force protection
 - **Multi-Channel**: WhatsApp, Telegram, Discord, Slack, iMessage integration
-- **Multi-Provider**: 30+ LLM providers and compatible gateways, including Claude, GPT, Gemini, Bedrock, OpenRouter, and Ollama
+- **Multi-Provider**: 35 LLM provider options and compatible gateways, including Claude, GPT, Gemini, Bedrock, OpenRouter, Ollama, and Grok
+- **GUI-first Agents**: Agents Hub, Mission Control, visual task timelines, boards, and approval dialogs for creating, spawning, assigning, and monitoring many agents
 - **Local-First**: Your data stays on your machine, BYOK model
-- **Extensible**: MCP support (Client, Host, Registry), 139 built-in skills, and plugin packs
+- **Extensible**: MCP support (Client, Host, Registry), 150 built-in skills, and plugin packs
 
 ### Feature Highlights
-- Real Office document creation (Excel, Word, PDF, PowerPoint)
+- Everyday Office-style document creation and review (Excel, Word, PDF, PowerPoint)
 - Web search and browser automation
 - Code tools (glob, grep, edit_file)
 - Personality customization (6 styles, 9 personas)
