@@ -2,12 +2,14 @@
 
 ## Production-Ready Implementation
 
-CoWork OS is a **security-first personal AI assistant platform** with multi-channel messaging support, comprehensive guardrails, and extensive test coverage.
+CoWork OS is a **security-first, GUI-first local AI super app and everything app** with multi-channel messaging support, visual agent management, comprehensive guardrails, and extensive test coverage.
 
 ### What CoWork OS Is
 
+- **Personal AI Super App**: Code, email, research, create documents, work with spreadsheets and decks, test web pages, automate work, and manage agents from one app
+- **GUI-first Agent Management**: Create reusable agents, spawn many runs, inspect timelines, assign work, and monitor teams through Agents Hub, Mission Control, task boards, and approval dialogs
 - **Personal AI Gateway**: Connect your AI assistant to WhatsApp, Telegram, Discord, Slack, and iMessage
-- **Everything Workbench**: Create, open, review, lightly edit, and revise generated documents, spreadsheets, presentations, web pages, PDFs, and previews from the same local-first task workspace
+- **Everything Workbench**: Create, open, review, edit, and revise generated documents, spreadsheets, presentations, web pages, PDFs, and previews from the same local-first task workspace
 - **Managed Devices**: Operate local and remote CoWork machines from a dedicated Devices tab
 - **Automations Surface**: One settings group for queueing, scheduling, triggers, briefing, and Workflow Intelligence suggestions/reflection/Dreaming; task view can also create cron scheduled tasks from the current task menu
 - **Renderer Performance**: Sidebar and timeline virtualization in the `CoWork-OS/CoWork-OS` repo use `@chenglou/pretext` for text measurement and keep long task feeds responsive
@@ -569,17 +571,18 @@ Expected behavior:
 
 ## Summary
 
-**CoWork OS is a production-ready, security-first personal AI assistant platform:**
+**CoWork OS is a production-ready, security-first, GUI-first local AI super app and everything app:**
 
 ### Core Strengths
 - **Security**: 4,932 automated tests across 390 test files, configurable guardrails, layered permission rules, approval workflows, and brute-force protection
 - **Multi-Channel**: WhatsApp, Telegram, Discord, Slack, iMessage integration
 - **Multi-Provider**: 35 LLM provider options and compatible gateways, including Claude, GPT, Gemini, Bedrock, OpenRouter Pareto Code routing, Ollama, and Grok through xAI API key or SuperGrok OAuth
+- **GUI-first Agents**: Agents Hub, Mission Control, visual task timelines, boards, and approval dialogs for creating, spawning, assigning, and monitoring many agents
 - **Local-First**: Your data stays on your machine, BYOK model
-- **Extensible**: MCP support (Client, Host, Registry), 147 built-in skills, and plugin packs
+- **Extensible**: MCP support (Client, Host, Registry), 150 built-in skills, and plugin packs
 
 ### Feature Highlights
-- Real Office document creation (Excel, Word, PDF, PowerPoint)
+- Everyday Office-style document creation and review (Excel, Word, PDF, PowerPoint)
 - Web search and browser automation
 - Code tools (glob, grep, edit_file) and git tools (commit, diff, branch)
 - Collaborative Mode with real-time thought sharing
