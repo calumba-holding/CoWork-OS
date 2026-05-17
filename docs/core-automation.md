@@ -30,6 +30,8 @@ That makes `Routines` the main user-facing automation abstraction without redefi
 
 Task view can also create a direct scheduled task with `... > Add automation...`. That flow is intentionally a shortcut into `Scheduled Tasks`, not a new core cognition loop and not a separate routine authoring path. It is useful when a completed or in-progress task should become a recurring cron-backed check while preserving a source task title, task ID, and `cowork://tasks/<taskId>` reference. See [Task Automations](task-automations.md).
 
+`Settings > Automations > Scheduled Tasks` is the observability surface for those cron-backed runs. It shows aggregate run health, the latest result, delivery status, recent run history, and task links for generated sessions so lower-level scheduled work can be audited without digging through the general task list.
+
 <p align="center">
   <img src="../resources/branding/images/cowork-os-6.webp" alt="Automations control center" width="700">
   <br><em>The Automations surface separates scheduled work, triggered work, and core automation controls.</em>
