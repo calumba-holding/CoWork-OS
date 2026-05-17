@@ -26,6 +26,7 @@ vi.mock("../../../settings/memory-features-manager", () => ({
 
 import { SystemTools } from "../system-tools";
 import { LayeredMemoryIndexService } from "../../../memory/LayeredMemoryIndexService";
+import { DurableContextService } from "../../../memory/DurableContextService";
 
 describe("SystemTools.normalizeAppleScript", () => {
   // Access the private method through a test-only technique
@@ -114,11 +115,14 @@ describe("SystemTools.getToolDefinitions", () => {
       verbatimRecallEnabled: true,
     });
     const tools = SystemTools.getToolDefinitions({ headless: true });
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(10);
     const names = tools.map((t) => t.name);
     expect(names).toContain("system_info");
     expect(names).toContain("get_env");
     expect(names).toContain("get_app_paths");
+    expect(names).toContain("memory_search_index");
+    expect(names).toContain("memory_timeline");
+    expect(names).toContain("memory_details");
     expect(names).toContain("search_memories");
     expect(names).toContain("search_quotes");
     expect(names).toContain("search_sessions");
@@ -152,6 +156,23 @@ describe("SystemTools.getToolDefinitions", () => {
     expect(names).not.toContain("search_quotes");
     expect(names).not.toContain("search_sessions");
     expect(names).not.toContain("memory_topics_load");
+  });
+
+  it("exposes durable context tools only when enabled", () => {
+    memoryFeatureMocks.loadSettings.mockReturnValue({
+      durableContextEnabled: true,
+      durableContextMode: "experimental",
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+    });
+    const names = SystemTools.getToolDefinitions().map((t) => t.name);
+    expect(names).toContain("context_grep");
+    expect(names).toContain("context_describe");
+
+    const headlessNames = SystemTools.getToolDefinitions({ headless: true }).map((t) => t.name);
+    expect(headlessNames).toContain("context_grep");
+    expect(headlessNames).toContain("context_describe");
   });
 });
 
@@ -226,6 +247,86 @@ describe("SystemTools memory feature gating", () => {
     });
     const instance = createInstance();
     await expect(instance.loadMemoryTopics({ query: "deploy" })).rejects.toThrow(/disabled/i);
+  });
+
+  it("rejects context_grep when durable context is disabled", async () => {
+    memoryFeatureMocks.loadSettings.mockReturnValue({
+      durableContextEnabled: false,
+      durableContextMode: "off",
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+    });
+    const instance = createInstance();
+    await expect(instance.contextGrep({ query: "deploy" })).rejects.toThrow(/disabled/i);
+  });
+
+  it("searches durable context scoped to the active task by default", async () => {
+    memoryFeatureMocks.loadSettings.mockReturnValue({
+      durableContextEnabled: true,
+      durableContextMode: "experimental",
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+    });
+    const searchSpy = vi.spyOn(DurableContextService, "search").mockReturnValue([
+      {
+        id: "dcs_1",
+        kind: "summary",
+        workspaceId: "ws-1",
+        taskId: "task-1",
+        timestamp: 1000,
+        snippet: "deployment plan",
+        depth: 0,
+        sourceMessageCount: 2,
+      },
+    ]);
+
+    const instance = createInstance();
+    const result = await instance.contextGrep({ query: "deployment" });
+
+    expect(searchSpy).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      taskId: "task-1",
+      query: "deployment",
+      limit: 10,
+    });
+    expect(result.results[0]).toMatchObject({
+      id: "dcs_1",
+      kind: "summary",
+      taskId: "task-1",
+      snippet: "deployment plan",
+      sourceMessageCount: 2,
+    });
+  });
+
+  it("ignores a different durable context taskId unless explicitly user-requested", async () => {
+    memoryFeatureMocks.loadSettings.mockReturnValue({
+      durableContextEnabled: true,
+      durableContextMode: "experimental",
+      sessionRecallEnabled: true,
+      topicMemoryEnabled: true,
+      verbatimRecallEnabled: true,
+    });
+    const searchSpy = vi.spyOn(DurableContextService, "search").mockReturnValue([]);
+    searchSpy.mockClear();
+
+    const instance = createInstance();
+    await instance.contextGrep({ query: "deployment", taskId: "other-task" });
+    await instance.contextGrep({
+      query: "deployment",
+      taskId: "other-task",
+      explicitUserRequest: true,
+    });
+
+    expect(searchSpy).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ taskId: "task-1" }),
+    );
+    expect(searchSpy).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ taskId: "other-task" }),
+    );
   });
 
   it("loads existing topic snippets by default when refresh is omitted", async () => {
