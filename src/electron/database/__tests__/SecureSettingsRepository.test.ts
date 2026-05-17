@@ -288,7 +288,7 @@ describe("SecureSettingsRepository", () => {
     });
 
     it("should return undefined on checksum mismatch", () => {
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const testData = { provider: "azure" };
 
       mockStmt.get.mockReturnValue({
@@ -305,12 +305,14 @@ describe("SecureSettingsRepository", () => {
       const result = repository.load("voice");
 
       expect(result).toBeUndefined();
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("Checksum mismatch"));
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Marked secure settings category voice unreadable"),
+      );
       consoleSpy.mockRestore();
     });
 
     it("should return undefined on decryption failure", () => {
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       mockStmt.get.mockReturnValue({
         id: "test-id",
@@ -329,9 +331,33 @@ describe("SecureSettingsRepository", () => {
 
       expect(result).toBeUndefined();
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to decrypt"),
-        expect.any(Error),
+        expect.stringContaining("Marked secure settings category voice unreadable"),
       );
+      consoleSpy.mockRestore();
+    });
+
+    it("should only warn once for a repeatedly unreadable category", () => {
+      const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      mockStmt.get.mockReturnValue({
+        id: "test-id",
+        category: "voice",
+        encrypted_data: "os:invalid-encrypted-data",
+        checksum: "some-checksum",
+        created_at: 1000,
+        updated_at: 2000,
+      });
+
+      mockDecryptString.mockImplementation(() => {
+        throw new Error("Decryption failed");
+      });
+
+      expect(repository.load("voice")).toBeUndefined();
+      expect(repository.load("voice")).toBeUndefined();
+      expect(repository.load("voice")).toBeUndefined();
+
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      expect(mockDecryptString).toHaveBeenCalledTimes(1);
       consoleSpy.mockRestore();
     });
   });
@@ -502,7 +528,7 @@ describe("SecureSettingsRepository", () => {
       mockIsEncryptionAvailable.mockReturnValue(false);
       repository = new SecureSettingsRepositoryClass(mockDb);
 
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       mockStmt.get.mockReturnValue({
         id: "test-id",
@@ -517,10 +543,7 @@ describe("SecureSettingsRepository", () => {
 
       expect(result).toBeUndefined();
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to decrypt"),
-        expect.objectContaining({
-          message: "OS encryption was used but is no longer available",
-        }),
+        expect.stringContaining("OS keychain which is no longer accessible"),
       );
       consoleSpy.mockRestore();
     });
