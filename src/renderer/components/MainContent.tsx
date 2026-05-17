@@ -214,11 +214,12 @@ import { DebugSessionPanel } from "./DebugSessionPanel";
 import { TaskPauseBanner } from "./TaskPauseBanner";
 import {
   TASK_AUTOMATION_TEMPLATES,
-  buildTaskAutomationCronJobCreate,
   buildTaskAutomationSchedule,
+  buildTaskRoutineCreate,
   type TaskAutomationRunMode,
   type TaskAutomationSchedulePreset,
   type TaskAutomationTemplate,
+  type TaskRoutineTriggerPreset,
 } from "./task-automation-utils";
 import {
   IntegrationMentionText,
@@ -747,6 +748,11 @@ export interface EndOfTaskArtifactCard {
   lastReferenceTimestamp: number;
 }
 
+export interface EndOfTaskArtifactStack {
+  anchorEventIndex: number;
+  artifacts: EndOfTaskArtifactCard[];
+}
+
 export function getVisibleEndOfTaskArtifactCards(
   artifacts: EndOfTaskArtifactCard[],
   expanded: boolean,
@@ -1007,6 +1013,28 @@ export function collectLatestEndOfTaskArtifactCards(
     return a.lastReferenceTimestamp - b.lastReferenceTimestamp;
   });
   return cards.slice(Math.max(0, cards.length - limit));
+}
+
+export function collectEndOfTaskArtifactCardStacks(
+  eventStream: TaskEvent[],
+  limit = 8,
+): EndOfTaskArtifactStack[] {
+  const cards = collectLatestEndOfTaskArtifactCards(eventStream, limit);
+  if (cards.length === 0) return [];
+
+  const byAnchorIndex = new Map<number, EndOfTaskArtifactCard[]>();
+  for (const card of cards) {
+    const existing = byAnchorIndex.get(card.lastReferenceIndex) || [];
+    existing.push(card);
+    byAnchorIndex.set(card.lastReferenceIndex, existing);
+  }
+
+  return Array.from(byAnchorIndex.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([anchorEventIndex, artifacts]) => ({
+      anchorEventIndex,
+      artifacts,
+    }));
 }
 
 // In non-verbose mode, hide verification noise (verification steps are still executed by the agent).
@@ -3999,6 +4027,24 @@ const TASK_AUTOMATION_SCHEDULE_LABEL: Record<TaskAutomationSchedulePreset, strin
   custom: "Custom",
 };
 
+const TASK_ROUTINE_TRIGGER_LABEL: Record<TaskRoutineTriggerPreset, string> = {
+  manual: "Manual",
+  ...TASK_AUTOMATION_SCHEDULE_LABEL,
+};
+
+function isTurnThisIntoRoutinePrompt(value: string): boolean {
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+  return /^(please\s+)?(turn|make|convert)\s+(this|that|it)\s+into\s+(a\s+)?routine[.!?]?$/.test(
+    normalized,
+  );
+}
+
+function taskCanBecomeRoutineFromFollowUp(task: Task | null | undefined): boolean {
+  if (!task) return false;
+  if (task.status !== "completed") return false;
+  return !task.terminalStatus || task.terminalStatus === "ok";
+}
+
 interface TaskAutomationModalProps {
   task: Task;
   workspace: Workspace | null;
@@ -4006,7 +4052,7 @@ interface TaskAutomationModalProps {
   defaultPrompt: string;
   deeplink: string;
   onClose: () => void;
-  onCreated?: () => void | Promise<void>;
+  onCreated?: (routine: Any) => void | Promise<void>;
 }
 
 export function TaskAutomationModal({
@@ -4021,27 +4067,28 @@ export function TaskAutomationModal({
   const [name, setName] = useState(defaultName);
   const [prompt, setPrompt] = useState(defaultPrompt);
   const [runMode, setRunMode] = useState<TaskAutomationRunMode>("chat");
-  const [schedulePreset, setSchedulePreset] = useState<TaskAutomationSchedulePreset>("every30m");
+  const [triggerPreset, setTriggerPreset] = useState<TaskRoutineTriggerPreset>("manual");
   const [customCron, setCustomCron] = useState("*/30 * * * *");
   const [openMenu, setOpenMenu] = useState<"run" | "schedule" | null>(null);
   const [showTemplates, setShowTemplates] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hasWorktree = Boolean(task.worktreePath);
-  const selectedSchedule = buildTaskAutomationSchedule(schedulePreset, customCron);
+  const selectedSchedule =
+    triggerPreset === "manual" ? null : buildTaskAutomationSchedule(triggerPreset, customCron);
   const workspaceId = task.workspaceId || workspace?.id || "";
   const canSave =
     name.trim().length > 0 &&
     prompt.trim().length > 0 &&
     workspaceId.trim().length > 0 &&
-    selectedSchedule !== null &&
+    (triggerPreset === "manual" || selectedSchedule !== null) &&
     !saving;
 
   useEffect(() => {
     setName(defaultName);
     setPrompt(defaultPrompt);
     setError(null);
-    setSchedulePreset("every30m");
+    setTriggerPreset("manual");
     setCustomCron("*/30 * * * *");
     setRunMode("chat");
     setShowTemplates(false);
@@ -4057,41 +4104,43 @@ export function TaskAutomationModal({
   const handleTemplateSelect = useCallback((template: TaskAutomationTemplate) => {
     setName(template.name);
     setPrompt(template.prompt);
-    setSchedulePreset(template.schedulePreset);
+    setTriggerPreset(template.schedulePreset);
     setShowTemplates(false);
     setError(null);
   }, []);
 
   const handleSave = useCallback(async () => {
-    if (!canSave || !selectedSchedule) return;
+    if (!canSave) return;
     setSaving(true);
     setError(null);
     try {
-      const result = await window.electronAPI.addCronJob(
-        buildTaskAutomationCronJobCreate({
+      const routine = await window.electronAPI.createRoutine(
+        buildTaskRoutineCreate({
           task,
           workspace,
           name,
           prompt,
           runMode,
+          triggerPreset,
           schedule: selectedSchedule,
           deeplink,
         }),
       );
-      if (!result.ok) {
-        setError(result.error || "Could not create automation.");
+      if (!routine?.id) {
+        setError("Could not create routine.");
         return;
       }
-      await onCreated?.();
+      await onCreated?.(routine);
       onClose();
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Could not create automation.");
+      setError(saveError instanceof Error ? saveError.message : "Could not create routine.");
     } finally {
       setSaving(false);
     }
-  }, [canSave, deeplink, name, onClose, onCreated, prompt, runMode, selectedSchedule, task, workspace]);
+  }, [canSave, deeplink, name, onClose, onCreated, prompt, runMode, selectedSchedule, task, triggerPreset, workspace]);
 
-  const scheduleOptions: TaskAutomationSchedulePreset[] = [
+  const scheduleOptions: TaskRoutineTriggerPreset[] = [
+    "manual",
     "every30m",
     "hourly",
     "daily",
@@ -4110,11 +4159,11 @@ export function TaskAutomationModal({
         className="task-automation-modal"
         role="dialog"
         aria-modal="true"
-        aria-label={showTemplates ? "Automation templates" : "Add automation"}
+        aria-label={showTemplates ? "Routine templates" : "Create routine"}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="task-automation-modal-header">
-          <h2>{showTemplates ? "Automation templates" : "Add automation"}</h2>
+          <h2>{showTemplates ? "Routine templates" : "Create routine"}</h2>
           <div className="task-automation-modal-header-actions">
             {!showTemplates && (
               <button
@@ -4180,7 +4229,7 @@ export function TaskAutomationModal({
                 placeholder="Add prompt e.g. look for crashes in $sentry"
                 disabled={saving}
               />
-              {schedulePreset === "custom" && (
+              {triggerPreset === "custom" && (
                 <label className="task-automation-custom-schedule">
                   <span>Cron expression</span>
                   <input
@@ -4274,24 +4323,24 @@ export function TaskAutomationModal({
                     disabled={saving}
                   >
                     <Clock size={16} aria-hidden="true" />
-                    <span>{TASK_AUTOMATION_SCHEDULE_LABEL[schedulePreset]}</span>
+                    <span>{TASK_ROUTINE_TRIGGER_LABEL[triggerPreset]}</span>
                     <ChevronDown size={15} aria-hidden="true" />
                   </button>
                   {openMenu === "schedule" && (
                     <div className="task-automation-popover schedule" role="menu">
-                      <div className="task-automation-popover-title">Schedule</div>
+                      <div className="task-automation-popover-title">Trigger</div>
                       {scheduleOptions.map((option) => (
                         <button
                           key={option}
                           type="button"
-                          className={`task-automation-popover-item ${schedulePreset === option ? "selected" : ""}`}
+                          className={`task-automation-popover-item ${triggerPreset === option ? "selected" : ""}`}
                           onClick={() => {
-                            setSchedulePreset(option);
+                            setTriggerPreset(option);
                             setOpenMenu(null);
                           }}
                         >
-                          <span>{TASK_AUTOMATION_SCHEDULE_LABEL[option]}</span>
-                          {schedulePreset === option && <CheckIcon size={16} aria-hidden="true" />}
+                          <span>{TASK_ROUTINE_TRIGGER_LABEL[option]}</span>
+                          {triggerPreset === option && <CheckIcon size={16} aria-hidden="true" />}
                         </button>
                       ))}
                     </div>
@@ -4314,7 +4363,7 @@ export function TaskAutomationModal({
                   onClick={() => void handleSave()}
                   disabled={!canSave}
                 >
-                  {saving ? "Saving" : "Save"}
+                  {saving ? "Saving" : "Create routine"}
                 </button>
               </div>
             </footer>
@@ -5700,6 +5749,43 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   );
   const feedRows = useMemo<TaskFeedRow[]>(() => {
     const rows: TaskFeedRow[] = [];
+    const artifactStacks = collectEndOfTaskArtifactCardStacks(events);
+    const artifactStacksByAnchorIndex = new Map<number, EndOfTaskArtifactStack[]>();
+    for (const stack of artifactStacks) {
+      const existing = artifactStacksByAnchorIndex.get(stack.anchorEventIndex) || [];
+      existing.push(stack);
+      artifactStacksByAnchorIndex.set(stack.anchorEventIndex, existing);
+    }
+    const pushArtifactStacksForTimelineItem = (item: any) => {
+      const eventIndices =
+        item.kind === "event"
+          ? [item.eventIndex]
+          : item.kind === "action_block" && Array.isArray(item.eventIndices)
+            ? item.eventIndices
+            : [];
+      for (const eventIndex of eventIndices) {
+        if (typeof eventIndex !== "number") continue;
+        const stacks = artifactStacksByAnchorIndex.get(eventIndex);
+        if (!stacks) continue;
+        for (const stack of stacks) {
+          const rowKey = `end-artifact-stack:${stack.anchorEventIndex}`;
+          const expanded = expandedArtifactStacks.has(rowKey);
+          rows.push({
+            kind: "artifact-stack",
+            key: rowKey,
+            estimatedHeight: estimateEndOfTaskArtifactStackHeight(stack.artifacts, expanded),
+            artifacts: stack.artifacts,
+            revision: [
+              expanded ? "expanded" : "collapsed",
+              stack.artifacts
+                .map((artifact) => `${artifact.path}:${artifact.kind}:${artifact.eventId ?? "none"}`)
+                .join("|"),
+            ].join(":"),
+            visiblePerfEventId: null,
+          });
+        }
+      }
+    };
     let lastActionBlockTimelineIndex = -1;
     for (let i = timelineItems.length - 1; i >= 0; i -= 1) {
       if (timelineItems[i].kind === "action_block") {
@@ -5811,26 +5897,8 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
         revision,
         visiblePerfEventId,
       });
+      pushArtifactStacksForTimelineItem(item);
     });
-
-    const endArtifactCards = collectLatestEndOfTaskArtifactCards(events);
-    if (endArtifactCards.length > 0) {
-      const rowKey = "end-artifact-stack";
-      const expanded = expandedArtifactStacks.has(rowKey);
-      rows.push({
-        kind: "artifact-stack",
-        key: rowKey,
-        estimatedHeight: estimateEndOfTaskArtifactStackHeight(endArtifactCards, expanded),
-        artifacts: endArtifactCards,
-        revision: [
-          expanded ? "expanded" : "collapsed",
-          endArtifactCards
-            .map((artifact) => `${artifact.path}:${artifact.kind}:${artifact.eventId ?? "none"}`)
-            .join("|"),
-        ].join(":"),
-        visiblePerfEventId: null,
-      });
-    }
 
     return rows;
   }, [
@@ -7421,6 +7489,12 @@ function MainContentComponent({
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
   const [showTaskHeaderMenu, setShowTaskHeaderMenu] = useState(false);
   const [showTaskAutomationModal, setShowTaskAutomationModal] = useState(false);
+  const [routineCreationNotice, setRoutineCreationNotice] = useState<{
+    taskId: string;
+    routineId: string;
+    name: string;
+    triggerSummary: string;
+  } | null>(null);
   const taskHeaderMenuRef = useRef<HTMLDivElement>(null);
   const taskHeaderMenuButtonRef = useRef<HTMLButtonElement>(null);
   // Focused mode card pool - pick random cards on mount
@@ -7436,6 +7510,7 @@ function MainContentComponent({
     setQuotedAssistantMessage(null);
     setShowTaskHeaderMenu(false);
     setShowTaskAutomationModal(false);
+    setRoutineCreationNotice(null);
   }, [task?.id]);
 
   useEffect(() => {
@@ -10282,6 +10357,29 @@ function MainContentComponent({
       setQuotedAssistantMessage(null);
       setAttachmentError(null);
       onAskInbox(inboxAskQuery);
+      return;
+    }
+
+    if (
+      !hasAttachments &&
+      taskCanBecomeRoutineFromFollowUp(task) &&
+      isTurnThisIntoRoutinePrompt(trimmedInput)
+    ) {
+      pendingProgrammaticResizeRef.current = true;
+      setInputValue("");
+      setPendingAttachments([]);
+      setIntegrationMentionSpans([]);
+      setMentionOpen(false);
+      setMentionQuery("");
+      setMentionTarget(null);
+      setSlashOpen(false);
+      setSlashQuery("");
+      setSlashTarget(null);
+      setModeSuggestions([]);
+      setActiveWelcomeSuggestionDraft(null);
+      setQuotedAssistantMessage(null);
+      setAttachmentError(null);
+      setShowTaskAutomationModal(true);
       return;
     }
 
@@ -13366,7 +13464,7 @@ function MainContentComponent({
                     onClick={handleTaskHeaderAddAutomation}
                   >
                     <Clock size={17} aria-hidden="true" />
-                    <span>Add automation...</span>
+                    <span>Create routine...</span>
                   </button>
                   {hasTaskOutputs(taskOutputSummary) && onViewTaskOutputs && (
                     <button
@@ -13612,6 +13710,22 @@ function MainContentComponent({
               }
               isWrappingUp={wrappingUp}
             />
+          )}
+          {routineCreationNotice?.taskId === task.id && (
+            <div className="task-automation-created-response" role="status">
+              <div>
+                <strong>Routine created</strong>
+                <span>
+                  {routineCreationNotice.name} is saved with {routineCreationNotice.triggerSummary}.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpenSettings?.("scheduled")}
+              >
+                View
+              </button>
+            </div>
           )}
           {hasActiveStructuredInputRequest && inputRequest && onSubmitInputRequest && onDismissInputRequest && (
             <StructuredInputPromptCard
@@ -14235,7 +14349,22 @@ function MainContentComponent({
           defaultPrompt={taskAutomationDefaultPrompt}
           deeplink={taskDeeplink}
           onClose={() => setShowTaskAutomationModal(false)}
-          onCreated={onTasksChanged}
+          onCreated={async (routine) => {
+            await onTasksChanged?.();
+            const triggers = Array.isArray(routine?.triggers) ? routine.triggers : [];
+            const triggerSummary =
+              triggers.some((trigger: Any) => trigger?.type === "schedule")
+                ? "scheduled and manual triggers"
+                : "manual trigger";
+            if (task) {
+              setRoutineCreationNotice({
+                taskId: task.id,
+                routineId: String(routine.id || ""),
+                name: String(routine.name || "Routine"),
+                triggerSummary,
+              });
+            }
+          }}
         />
       )}
 
