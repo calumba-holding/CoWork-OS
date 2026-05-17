@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 import { ThemeIcon } from "./ThemeIcon";
 import { AlertTriangleIcon, CheckIcon, ClockIcon, InfoIcon, XIcon } from "./LineIcons";
+import { normalizeMarkdownForCollab } from "../utils/markdown-inline-lists";
 
 // Define types inline for the renderer
 interface AppNotification {
@@ -351,6 +355,41 @@ const typeIcons: Record<string, { icon: React.ReactNode; bg: string; color: stri
   },
 };
 
+const notificationMarkdownPlugins = [remarkGfm, remarkBreaks];
+const notificationInlineMarkdownComponents: Components = {
+  p: ({ children }) => <span>{children}</span>,
+  h1: ({ children }) => <strong>{children}</strong>,
+  h2: ({ children }) => <strong>{children}</strong>,
+  h3: ({ children }) => <strong>{children}</strong>,
+  h4: ({ children }) => <strong>{children}</strong>,
+  h5: ({ children }) => <strong>{children}</strong>,
+  h6: ({ children }) => <strong>{children}</strong>,
+  ul: ({ children }) => <span>{children}</span>,
+  ol: ({ children }) => <span>{children}</span>,
+  li: ({ children }) => <span>{children} </span>,
+  a: ({ children }) => <span>{children}</span>,
+  img: ({ alt }) => (alt ? <span>{alt}</span> : null),
+};
+
+export function NotificationMarkdownPreview({
+  text,
+  style,
+}: {
+  text: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div style={style}>
+      <ReactMarkdown
+        remarkPlugins={notificationMarkdownPlugins}
+        components={notificationInlineMarkdownComponents}
+      >
+        {normalizeMarkdownForCollab(text)}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 function formatRelativeTime(timestamp: number): string {
   const now = Date.now();
   const diff = now - timestamp;
@@ -386,12 +425,12 @@ function humanizeStatus(value: string): string {
   return map[value] ?? value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-/** Extract a cleaner display title: prefer task name, drop redundant "Quick check-in ·" prefix */
+/** Extract a cleaner display title: prefer task name, drop redundant attention prefixes */
 function formatNotificationTitle(title: string): {
   primary: string;
   badge?: string;
 } {
-  const prefixes = ["Quick check-in · ", "Approval needed · ", "Input needed · "];
+  const prefixes = ["Quick check-in · ", "Approval needed · ", "Input needed · ", "Action needed · "];
   let primary = stripLeadingEmoji(title);
   let badge: string | undefined;
 
@@ -599,9 +638,12 @@ export function NotificationPanel({ onNotificationClick }: NotificationPanelProp
                       {displayBadge && (
                         <span style={styles.notificationBadge}>{displayBadge}</span>
                       )}
-                      <p style={styles.notificationTitle}>{primary}</p>
+                      <NotificationMarkdownPreview text={primary} style={styles.notificationTitle} />
                       {showMessage && (
-                        <p style={styles.notificationMessage}>{notification.message}</p>
+                        <NotificationMarkdownPreview
+                          text={notification.message}
+                          style={styles.notificationMessage}
+                        />
                       )}
                       <span style={styles.notificationTime}>
                         {formatRelativeTime(notification.createdAt)}
