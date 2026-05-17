@@ -9373,10 +9373,12 @@ ${transcript}
     ];
     if (EXCLUDE_SIGNALS.some((s) => lower.includes(s))) return false;
 
-    // Must involve web app work (require app/framework signals, not just html/css)
+    // Must involve web app work (require app/framework signals, not just html/css).
+    // Vite and localhost are common implementation details for Electron renderer
+    // development too, so do not treat them as standalone browser-QA signals.
     const WEB_APP_SIGNALS = [
       "web app", "webapp", "website", "frontend", "react", "vue", "svelte", "next.js", "nextjs",
-      "landing page", "dashboard", "spa", "localhost", "vite", "webpack", "create-react-app", "cra",
+      "landing page", "dashboard", "spa", "vite app", "vite site", "webpack app", "create-react-app", "cra",
     ];
     const hasWebSignal = WEB_APP_SIGNALS.some((s) => lower.includes(s));
     // Allow "html" + "css" only when combined with app-like context
