@@ -87,8 +87,10 @@ export class SecurityManager {
     // Get context-specific policy (creates default if doesn't exist)
     const contextPolicy = this.contextPolicyManager.getPolicy(channel.id, contextType);
 
-    // Use context policy's security mode, falling back to channel default
-    const mode: SecurityMode = contextPolicy.securityMode || securityConfig.mode;
+    // Email authorization is handled by mailbox ownership and optional sender filters,
+    // not chat-style pairing or user allowlists.
+    const mode: SecurityMode =
+      channel.type === "email" ? "open" : contextPolicy.securityMode || securityConfig.mode;
 
     // Get denied tools for this context
     const deniedTools = contextPolicy.toolRestrictions || [];
