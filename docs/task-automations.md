@@ -4,6 +4,11 @@ Task automations turn an existing task into a recurring scheduled task without l
 
 They are intentionally a bridge into CoWork's existing `Scheduled Tasks` engine, not a separate Codex heartbeat system and not a new `Routine` object. Use this flow when a one-off task proves useful enough to repeat.
 
+<p align="center">
+  <img src="../resources/branding/images/cowork-os-6.webp" alt="Automations dashboard" width="700">
+  <br><em>Saved automations and scheduled work are managed from the Automations surface.</em>
+</p>
+
 ## Where It Fits
 
 CoWork's current automation model has three layers:
@@ -128,7 +133,7 @@ The resulting job appears in `Settings > Automations > Scheduled Tasks` and uses
 
 - Task automations create cron scheduled tasks directly; they do not create a high-level `Routine`.
 - Worktree execution context is not preserved yet, so `Worktree` is visibly disabled when the current task has a worktree.
-- Automations are unattended by default: `allowUserInput` is false. A prompt that requires interactive clarification should be rewritten before saving.
+- Automations are unattended by default: `allowUserInput` is false and human-input policy is effectively `none`. A prompt that requires interactive clarification should be rewritten before saving.
 - Remote-session task views should not create local automations from the remote shadow task.
 
 ## Implementation Notes
