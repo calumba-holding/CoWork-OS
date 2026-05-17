@@ -263,6 +263,24 @@ function resolveShellForCommandExecution(): string {
   return envShell || "/bin/sh";
 }
 
+function buildSafeShellPath(platform: NodeJS.Platform, envPath: string | undefined): string {
+  if (platform === "win32") return envPath || "";
+
+  const basePaths = [
+    ...(platform === "darwin" ? ["/opt/homebrew/bin", "/opt/homebrew/sbin"] : []),
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+  const inheritedPaths = String(envPath || "")
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return Array.from(new Set([...basePaths, ...inheritedPaths])).join(path.delimiter);
+}
+
 /**
  * Get the shell arguments for running a command string.
  * Unix shells use -c, PowerShell uses -Command, cmd.exe uses /c.
@@ -1132,7 +1150,7 @@ export class ShellTools {
     const safeEnv: Record<string, string> =
       process.platform === "win32"
         ? {
-            PATH: process.env.PATH || "",
+            PATH: buildSafeShellPath(process.platform, process.env.PATH),
             USERPROFILE: process.env.USERPROFILE || "",
             USERNAME: process.env.USERNAME || "",
             HOMEDRIVE: process.env.HOMEDRIVE || "C:",
@@ -1145,7 +1163,7 @@ export class ShellTools {
           }
         : {
             // Essential system variables only (Unix/macOS)
-            PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            PATH: buildSafeShellPath(process.platform, process.env.PATH),
             HOME: process.env.HOME || "",
             USER: process.env.USER || "",
             SHELL: resolvedShell,
@@ -1436,4 +1454,5 @@ export const _testUtils = {
   killProcessTree,
   resolveCommandCwd,
   shouldUsePersistentShell,
+  buildSafeShellPath,
 };
