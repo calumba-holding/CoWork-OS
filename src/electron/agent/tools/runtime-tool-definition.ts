@@ -27,6 +27,7 @@ const READ_PARALLEL_TOOLS = new Set([
   "grep",
   "web_fetch",
   "web_search",
+  "x_search",
   "http_request",
   "git_status",
   "git_diff",
@@ -213,7 +214,13 @@ function inferResultKind(toolName: string): RuntimeToolResultKind {
   if (toolName === "run_command") return "command";
   if (toolName.startsWith("browser_")) return "browser";
   if (toolName.endsWith("_action") || toolName.startsWith("mcp_")) return "integration";
-  if (toolName === "web_search" || toolName === "glob" || toolName === "grep" || toolName === "search_files") {
+  if (
+    toolName === "web_search" ||
+    toolName === "x_search" ||
+    toolName === "glob" ||
+    toolName === "grep" ||
+    toolName === "search_files"
+  ) {
     return "search";
   }
   if (isArtifactGenerationToolName(toolName) || toolName.startsWith("generate_") || toolName.startsWith("create_")) {
