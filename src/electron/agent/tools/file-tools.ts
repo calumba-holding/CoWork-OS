@@ -49,6 +49,11 @@ interface ReadWindowOptions {
   maxChars: number;
 }
 
+interface WriteFileOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 function getElectronShell(): Any | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1108,6 +1113,7 @@ export class FileTools {
   async writeFile(
     relativePath: string,
     content: string,
+    options: WriteFileOptions = {},
   ): Promise<{ success: boolean; path: string }> {
     // Validate inputs before proceeding
     if (!relativePath || typeof relativePath !== "string") {
@@ -1153,7 +1159,12 @@ export class FileTools {
       throw new Error(`Invalid content: expected string but received ${typeof content}`);
     }
 
-    const redirected = await this.maybeRedirectAutomatedOutputPath(relativePath);
+    const redirected = await this.runWriteFilePhase(
+      "resolve managed output path",
+      relativePath,
+      options,
+      () => this.maybeRedirectAutomatedOutputPath(relativePath),
+    );
     const requestedPath = redirected.requestedPath;
     if (isCoWorkPrivateGeneratedPath(requestedPath)) {
       ensureCoWorkPrivatePathsExcluded(this.workspace.path);
@@ -1161,8 +1172,12 @@ export class FileTools {
 
     this.checkPermission("write");
     const fullPath = this.resolvePath(requestedPath, "write");
-    await this.enforceProjectAccess(fullPath);
-    await this.enforceSymlinkSafeAccess(fullPath, "write");
+    await this.runWriteFilePhase("enforce project access", requestedPath, options, () =>
+      this.enforceProjectAccess(fullPath),
+    );
+    await this.runWriteFilePhase("enforce symlink safe access", requestedPath, options, () =>
+      this.enforceSymlinkSafeAccess(fullPath, "write"),
+    );
 
     // Check file size against guardrail limits
     const contentSizeBytes = Buffer.byteLength(content, "utf-8");
@@ -1176,10 +1191,14 @@ export class FileTools {
 
     try {
       // Ensure directory exists
-      await fs.mkdir(path.dirname(fullPath), { recursive: true });
+      await this.runWriteFilePhase("create parent directory", requestedPath, options, () =>
+        fs.mkdir(path.dirname(fullPath), { recursive: true }),
+      );
 
       // Write file
-      await fs.writeFile(fullPath, content, "utf-8");
+      await this.runWriteFilePhase("write file contents", requestedPath, options, (signal) =>
+        fs.writeFile(fullPath, content, { encoding: "utf-8", signal }),
+      );
 
       // Build content preview (full content up to 20KB cap)
       const MAX_PREVIEW_CHARS = 20_000;
@@ -1208,6 +1227,82 @@ export class FileTools {
     } catch (error: Any) {
       throw new Error(`Failed to write file: ${error.message}`);
     }
+  }
+
+  private async runWriteFilePhase<T>(
+    phase: string,
+    requestedPath: string,
+    options: WriteFileOptions,
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const startedAt = Date.now();
+    const parentSignal = options.signal;
+    if (parentSignal?.aborted) {
+      throw new Error(`write_file aborted before ${phase} for ${requestedPath}`);
+    }
+
+    const phaseAbort = new AbortController();
+    const timeoutMs = this.getWriteFilePhaseTimeoutMs(options.timeoutMs);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let abortListener: (() => void) | undefined;
+    const guards: Array<Promise<never>> = [];
+
+    if (timeoutMs !== undefined) {
+      guards.push(
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            const elapsedMs = Date.now() - startedAt;
+            phaseAbort.abort();
+            reject(
+              new Error(
+                `write_file timed out during ${phase} for ${requestedPath} after ${elapsedMs}ms`,
+              ),
+            );
+          }, timeoutMs);
+        }),
+      );
+    }
+
+    if (parentSignal) {
+      guards.push(
+        new Promise<never>((_, reject) => {
+          abortListener = () => {
+            const elapsedMs = Date.now() - startedAt;
+            phaseAbort.abort();
+            reject(
+              new Error(`write_file aborted during ${phase} for ${requestedPath} after ${elapsedMs}ms`),
+            );
+          };
+          parentSignal.addEventListener("abort", abortListener, { once: true });
+        }),
+      );
+    }
+
+    try {
+      const operationPromise = operation(phaseAbort.signal);
+      const result =
+        guards.length > 0 ? await Promise.race([operationPromise, ...guards]) : await operationPromise;
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= 5_000) {
+        console.warn(
+          `[FileTools] write_file phase "${phase}" for "${requestedPath}" took ${elapsedMs}ms`,
+        );
+      }
+      return result;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (parentSignal && abortListener) parentSignal.removeEventListener("abort", abortListener);
+    }
+  }
+
+  private getWriteFilePhaseTimeoutMs(toolTimeoutMs: number | undefined): number | undefined {
+    if (typeof toolTimeoutMs !== "number" || !Number.isFinite(toolTimeoutMs) || toolTimeoutMs <= 0) {
+      return undefined;
+    }
+    if (toolTimeoutMs <= 1_000) {
+      return Math.max(1, Math.floor(toolTimeoutMs * 0.8));
+    }
+    return Math.max(1, toolTimeoutMs - 500);
   }
 
   /**
