@@ -13,4 +13,5 @@ export { DeepSeekProvider } from "./deepseek-provider";
 export { AnthropicCompatibleProvider } from "./anthropic-compatible-provider";
 export { GitHubCopilotProvider } from "./github-copilot-provider";
 export { OpenAIOAuth, OpenAIOAuthTokens } from "./openai-oauth";
+export { XAIOAuth, XAIOAuthTokens } from "./xai-oauth";
 export { LLMProviderFactory, LLMSettings, CachedModelInfo } from "./provider-factory";
