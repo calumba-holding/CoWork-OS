@@ -4,7 +4,7 @@ This guide helps users transition from other AI assistant platforms or set up Co
 
 ## Overview
 
-CoWork OS is a security-first personal AI assistant that runs on macOS and Windows. If you're coming from another multi-channel AI platform or looking to self-host your AI assistant, this guide will help you get started.
+CoWork OS is a security-first, GUI-first local AI super app and everything app that runs on macOS and Windows. If you're coming from another multi-channel AI platform, CLI-first agent runner, or self-hosted assistant, this guide will help you move into one app for coding, email, documents, spreadsheets, presentations, browser work, agents, and automations.
 
 ---
 
@@ -62,6 +62,7 @@ Moving to CoWork OS provides several advantages:
 | **30+ LLM providers** | Built-in + compatible gateways with BYOK flexibility |
 | **Local LLM support** | Run completely free and offline with Ollama |
 | **Native desktop app** | Full desktop UX on macOS and Windows (menu bar on macOS, system tray on Windows) |
+| **GUI-first agent management** | Create reusable agents, spawn many runs, inspect timelines, assign work, and monitor teams through Agents Hub and Mission Control |
 | **Real-time timeline** | See exactly what the agent is doing |
 | **Document creation** | Excel, Word, PDF, PowerPoint built-in |
 | **Personality system** | Customize how your AI communicates |
