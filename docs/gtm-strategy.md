@@ -61,7 +61,7 @@ The artifact workbench should not narrow the product category. CoWork OS also co
 
 ## Proof Points to Reuse in Messaging
 
-- 30+ LLM providers
+- 35 LLM provider options, including Grok through xAI API key or SuperGrok OAuth
 - 17 messaging channels
 - 100+ built-in skills
 - Coding, web design, research, automations, channels, devices, and artifact workspaces in one app
