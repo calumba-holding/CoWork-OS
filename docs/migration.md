@@ -4,7 +4,7 @@ This guide helps users transition from other AI assistant platforms or set up Co
 
 ## Overview
 
-CoWork OS is a security-first personal AI assistant that runs on macOS and Windows. If you're coming from another multi-channel AI platform or looking to self-host your AI assistant, this guide will help you get started.
+CoWork OS is a security-first, GUI-first local AI super app and everything app that runs on macOS and Windows. If you're coming from another multi-channel AI platform, CLI-first agent runner, or self-hosted assistant, this guide will help you move into one app for coding, email, documents, spreadsheets, presentations, browser work, agents, and automations.
 
 ---
 
@@ -13,7 +13,7 @@ CoWork OS is a security-first personal AI assistant that runs on macOS and Windo
 If you're currently using OpenClaw, the migration is mostly an operating model shift:
 
 - OpenClaw is commonly used as an agent experimentation toolkit.
-- CoWork OS is designed as a production runtime with built-in approvals, guardrails, and local-first controls.
+- CoWork OS is designed as a GUI-first production runtime with built-in approvals, guardrails, local-first controls, and visual management for many agents.
 
 See also: [OpenClaw alternative guide](openclaw-comparison.md)
 
@@ -91,8 +91,9 @@ Moving to CoWork OS provides several advantages:
 | **35 LLM provider options** | Built-in + compatible gateways with BYOK and supported subscription flexibility, including OpenRouter Pareto Code routing and Grok through xAI API key or SuperGrok OAuth |
 | **Local LLM support** | Run completely free and offline with Ollama |
 | **Native desktop app** | Full desktop UX on macOS and Windows (menu bar on macOS, system tray on Windows) |
+| **GUI-first agent management** | Create reusable agents, spawn many runs, inspect timelines, assign work, and monitor teams through Agents Hub and Mission Control |
 | **Real-time timeline** | See exactly what the agent is doing |
-| **Document creation** | Excel, Word, PDF, PowerPoint built-in |
+| **Everyday document work** | Excel, Word, PDF, and PowerPoint-style outputs built into the task workspace |
 | **Personality system** | Customize how your AI communicates |
 | **MCP support** | Extend with external tool servers |
 
