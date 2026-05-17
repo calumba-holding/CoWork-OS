@@ -121,6 +121,7 @@ import { AdaptiveStyleEngine } from "../memory/AdaptiveStyleEngine";
 import { MemoryConsolidator } from "../memory/MemoryConsolidator";
 import { DreamingRepository } from "../memory/DreamingRepository";
 import { DreamingService } from "../memory/DreamingService";
+import { MemoryPressureService } from "../memory/MemoryPressureService";
 import { TranscriptStore } from "../memory/TranscriptStore";
 import { getAwarenessService } from "../awareness/AwarenessService";
 import { PersonalityManager } from "../settings/personality-manager";
@@ -3904,9 +3905,19 @@ export class AgentDaemon extends EventEmitter {
       extension === ".mp4" ||
       extension === ".webm" ||
       payload.type === "video";
-    if (!isPreviewableVideo) return;
+    const isPreviewableHtml =
+      mimeType === "text/html" ||
+      extension === ".html" ||
+      extension === ".htm" ||
+      payload.type === "html" ||
+      payload.type === "web";
+    if (!isPreviewableVideo && !isPreviewableHtml) return;
+    if (isPreviewableHtml && !this.shouldEmitInlineHtmlFramePreview(task, payload, rawPath)) {
+      return;
+    }
 
-    const dedupeKey = `video:${normalizedPath}`;
+    const previewKind = isPreviewableVideo ? "video" : "frame";
+    const dedupeKey = `${previewKind}:${normalizedPath}`;
     let emittedForTask = this.mediaPreviewMessagesByTask.get(taskId);
     if (!emittedForTask) {
       emittedForTask = new Set<string>();
@@ -3918,15 +3929,59 @@ export class AgentDaemon extends EventEmitter {
     const title =
       typeof payload.label === "string" && payload.label.trim().length > 0
         ? payload.label.trim()
-        : path.basename(rawPath) || "Generated video";
+        : path.basename(rawPath) || (isPreviewableVideo ? "Generated video" : "Generated frame");
     const quote = (value: string): string => JSON.stringify(value);
-    const message = `Preview ready.\n\n::video{path=${quote(rawPath)} title=${quote(title)}}`;
+    const message = isPreviewableVideo
+      ? `Preview ready.\n\n::video{path=${quote(rawPath)} title=${quote(title)}}`
+      : `::frame{path=${quote(rawPath)} title=${quote(title)} kind="preview" height="640"}`;
 
     this.logEvent(taskId, "assistant_message", {
       message,
       internal: true,
       generatedBy: "media_preview",
     });
+  }
+
+  private shouldEmitInlineHtmlFramePreview(
+    task: Any,
+    payload: Record<string, unknown>,
+    rawPath: string,
+  ): boolean {
+    const displayMode = typeof payload.display === "string" ? payload.display.trim().toLowerCase() : "";
+    if (
+      payload.inlineFrame === true ||
+      payload.richFrame === true ||
+      displayMode === "inline_frame" ||
+      displayMode === "rich_frame"
+    ) {
+      return true;
+    }
+    if (
+      payload.inlineFrame === false ||
+      displayMode === "artifact" ||
+      displayMode === "artifact_card" ||
+      displayMode === "sidebar" ||
+      displayMode === "full_page"
+    ) {
+      return false;
+    }
+
+    const taskTitle = typeof task?.title === "string" ? task.title : "";
+    const taskPrompt = typeof task?.prompt === "string" ? task.prompt : "";
+    const payloadLabel = typeof payload.label === "string" ? payload.label : "";
+    const payloadKind = typeof payload.kind === "string" ? payload.kind : "";
+    const filename = path.basename(rawPath).toLowerCase();
+    const haystack = [taskTitle, taskPrompt, payloadLabel, payloadKind, rawPath].join(" ").toLowerCase();
+
+    const fullPageIntent =
+      /\b(landing page|homepage|website|web site|webpage|web page|site design|marketing page|portfolio site|single page app|web app|webapp|frontend app|react app|vite app|next\.?js app|static site|full page|page design|html file|standalone html)\b/.test(
+        haystack,
+      ) || /(^|[-_/])(index|landing|homepage|website|webpage|site|app|page)\.html?$/.test(filename);
+    if (fullPageIntent) return false;
+
+    return /\b(frame|card|widget|panel|summary|scorecard|kpi|metric|dashboard|chart|graph|sparkline|visuali[sz]ation|distribution|breakdown|status|sync|syncing|progress|timeline|monitor|health|debug|trace|log viewer|heatmap|calendar|calculator|simulator|comparison|matrix|table|spending|budget|portfolio|investment|payment|cash[-\s]?flow|forecast|invoice preview|receipt preview)\b/.test(
+      haystack,
+    );
   }
 
   private normalizeProviderTypeValue(value: unknown): string | null {
@@ -4393,6 +4448,9 @@ export class AgentDaemon extends EventEmitter {
           taskId: task.id,
           taskPrompt: task.prompt,
         });
+        const pressureInstructions = MemoryPressureService.buildCompactionInstructions(
+          MemoryPressureService.analyze(workspace.path),
+        );
         const dreaming = await new DreamingService(
           new DreamingRepository(this.dbManager.getDatabase()),
         ).run({
@@ -4401,7 +4459,12 @@ export class AgentDaemon extends EventEmitter {
           triggerSource: "task_completion",
           sourceTaskId: task.id,
           taskPrompt: task.prompt,
-          instructions: "Review recent task completion evidence for memory drift, corrections, stale context, and open loops.",
+          instructions: [
+            "Review recent task completion evidence for memory drift, corrections, stale context, and open loops.",
+            pressureInstructions,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
         });
         return { consolidation, dreaming };
       })()
@@ -7663,7 +7726,11 @@ export class AgentDaemon extends EventEmitter {
     // rather than being hard-blocked by the completion gate.
     const bestEffortReasons = [
       "best_effort",
+      "Soft deadline",
+      "soft deadline",
+      "soft-deadline",
       "Timeout recovery",
+      "Step timeout detected",
       "Wrap-up",
       "executor_best_effort_finalized",
       "No team member analyses available for synthesis",
