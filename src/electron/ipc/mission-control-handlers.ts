@@ -82,6 +82,15 @@ import {
 } from "../utils/validation";
 
 const logger = createLogger("MissionControl");
+
+function hasInvalidCoreMemoryCandidateScope(request: unknown): boolean {
+  if (!request || typeof request !== "object") return false;
+  const candidate = request as { profileId?: unknown; workspaceId?: unknown };
+  return (
+    (candidate.profileId !== undefined && !UUIDSchema.safeParse(candidate.profileId).success) ||
+    (candidate.workspaceId !== undefined && !UUIDSchema.safeParse(candidate.workspaceId).success)
+  );
+}
 type Any = any;
 
 // Get main window for event broadcasting
@@ -617,6 +626,9 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
   ipcMain.handle(
     IPC_CHANNELS.CORE_MEMORY_LIST_CANDIDATES,
     async (_, request?: unknown): Promise<CoreMemoryCandidate[]> => {
+      if (hasInvalidCoreMemoryCandidateScope(request)) {
+        return [];
+      }
       const validated = request
         ? validateInput(
             CoreMemoryCandidateListRequestSchema,
