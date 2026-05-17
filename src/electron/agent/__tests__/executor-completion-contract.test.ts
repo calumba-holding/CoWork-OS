@@ -62,6 +62,7 @@ function createExecuteHarness(options: HarnessOptions) {
   executor.requiresVisualQARun = false;
   executor.visualQARunObserved = false;
   executor.partialSuccessForCronEnabled = true;
+  executor.shouldPauseForRequiredDecision = true;
   executor.taskCompleted = false;
   executor.lastAssistantOutput = options.lastOutput;
   executor.lastNonVerificationOutput = options.lastOutput;
@@ -156,6 +157,30 @@ describe("TaskExecutor completion contract integration", () => {
       ],
     };
     (executor as Any).planCompletedEffectively = true;
+
+    expect((executor as Any).hasExecutionEvidence()).toBe(true);
+  });
+
+  it("counts successful tool results as execution evidence during timeout finalization", () => {
+    const executor = createExecuteHarness({
+      title: "Compare repositories",
+      prompt: "Research two GitHub repositories and compare their current stats.",
+      lastOutput: "Found repository stats from web sources.",
+    });
+
+    executor.plan = {
+      description: "Plan",
+      steps: [
+        {
+          id: "1",
+          description: "Find the repositories and collect current stats.",
+          status: "failed",
+        },
+      ],
+    };
+    (executor as Any).toolResultMemory = [
+      { tool: "web_fetch", summary: "Fetched GitHub repository metadata.", timestamp: Date.now() },
+    ];
 
     expect((executor as Any).hasExecutionEvidence()).toBe(true);
   });
@@ -1030,6 +1055,89 @@ DOCUMENT CREATION BEST PRACTICES:
       "Refined the app shell.",
       expect.objectContaining({
         waiveFailedStepIds: expect.arrayContaining(["2"]),
+      }),
+    );
+  });
+
+  it("waives timeout-failed research steps when tool evidence exists but no step completed", () => {
+    const executor = createExecuteHarness({
+      title: "Compare repositories",
+      prompt: "Research two GitHub repositories and compare their current stats.",
+      lastOutput: "Found repository stats from web sources.",
+      planStepDescription: "Find the repositories and collect current stats.",
+    });
+    executor.plan = {
+      description: "Plan",
+      steps: [
+        {
+          id: "1",
+          description: "Find the repositories and collect current stats.",
+          status: "failed",
+          error: "Step soft-deadline reached after 810s",
+        },
+      ],
+    };
+    (executor as Any).softDeadlineTriggered = true;
+    (executor as Any).toolResultMemory = [
+      { tool: "web_fetch", summary: "Fetched GitHub repository metadata.", timestamp: Date.now() },
+    ];
+    (executor as Any).buildResultSummary = vi
+      .fn()
+      .mockReturnValue("Found repository stats from web sources.");
+
+    (executor as Any).finalizeTaskBestEffort(
+      "Found repository stats from web sources.",
+      "Soft deadline reached during execution. Finalizing with best-effort answer.",
+    );
+
+    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
+      "task-1",
+      "Found repository stats from web sources.",
+      expect.objectContaining({
+        terminalStatus: "partial_success",
+        waiveFailedStepIds: ["1"],
+      }),
+    );
+  });
+
+  it("finalizes soft-deadline runs without waiting on LLM recovery", async () => {
+    const executor = createExecuteHarness({
+      title: "Compare repositories",
+      prompt: "Research two GitHub repositories and compare their current stats.",
+      lastOutput: "",
+      planStepDescription: "Find the repositories and collect current stats.",
+    });
+    const recoverySpy = vi.fn();
+
+    (executor as Any).buildTimeoutRecoveryAnswer = recoverySpy;
+    (executor as Any).executePlan = vi.fn(async function executePlanSoftDeadlineStub(this: Any) {
+      this.plan = {
+        description: "Plan",
+        steps: [
+          {
+            id: "1",
+            description: "Find the repositories and collect current stats.",
+            status: "failed",
+            error: "Step soft-deadline reached after 810s",
+          },
+        ],
+      };
+      this.softDeadlineTriggered = true;
+      this.toolResultMemory = [
+        { tool: "web_search", summary: "Found candidate GitHub repositories.", timestamp: Date.now() },
+        { tool: "http_request", summary: "Fetched GitHub repository stats.", timestamp: Date.now() },
+      ];
+    });
+
+    await (executor as Any).execute();
+
+    expect(recoverySpy).not.toHaveBeenCalled();
+    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.stringContaining("Captured tool progress:"),
+      expect.objectContaining({
+        terminalStatus: "partial_success",
+        waiveFailedStepIds: ["1"],
       }),
     );
   });
