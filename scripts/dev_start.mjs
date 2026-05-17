@@ -20,6 +20,14 @@ function parsePort(value, fallback = DEFAULT_PORT) {
   return parsed;
 }
 
+function normalizeDevLogLevel(env) {
+  if (String(env.COWORK_LOG_LEVEL || "").trim().toLowerCase() !== "debug") {
+    return;
+  }
+  env.COWORK_LOG_LEVEL = "info";
+  process.stdout.write("[dev-start] COWORK_LOG_LEVEL=debug ignored for local dev; using info.\n");
+}
+
 async function isPortAvailable(port) {
   return new Promise((resolve) => {
     const server = net.createServer();
@@ -106,6 +114,15 @@ function getNativeSqliteStatus(env) {
     return { ready: true, reason: null };
   }
 
+  if (result.signal) {
+    return {
+      ready: false,
+      reason:
+        `Electron was terminated by ${result.signal} before it could load better-sqlite3. ` +
+        "Refresh node_modules/electron/dist and retry.",
+    };
+  }
+
   const output = `${result.stderr || ""}${result.stdout || ""}`.trim();
   const firstLine = output.split(/\r?\n/).find(Boolean);
   return {
@@ -143,6 +160,44 @@ function repairNativeInstall(env, reason) {
   }
 }
 
+function runOptionalDevBranding(env) {
+  if (process.platform !== "darwin") {
+    return;
+  }
+
+  const shouldSkipDevBranding = String(env.COWORK_DEV_BRAND_APP || "")
+    .trim()
+    .toLowerCase();
+  if (["0", "false", "no", "off"].includes(shouldSkipDevBranding)) {
+    process.stdout.write(
+      "[dev-start] Skipping Electron.app dev branding/signing because COWORK_DEV_BRAND_APP disables it.\n",
+    );
+    return;
+  }
+
+  const brandResult = spawnSync(process.execPath, ["scripts/brand_electron_dev_app.mjs"], {
+    cwd: process.cwd(),
+    env,
+    stdio: "inherit",
+  });
+  if ((brandResult.status ?? 1) !== 0) {
+    throw new Error(
+      `Development Electron branding failed with exit code ${brandResult.status ?? 1}.`,
+    );
+  }
+
+  const signResult = spawnSync(process.execPath, ["scripts/codesign_electron_dev.mjs"], {
+    cwd: process.cwd(),
+    env,
+    stdio: "inherit",
+  });
+  if ((signResult.status ?? 1) !== 0) {
+    throw new Error(
+      `Development Electron codesigning failed with exit code ${signResult.status ?? 1}.`,
+    );
+  }
+}
+
 async function waitForPort(port, timeoutMs) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -173,6 +228,7 @@ const childEnv = {
   COWORK_DEV_SERVER_URL: devServerUrl,
 };
 delete childEnv.ELECTRON_RUN_AS_NODE;
+normalizeDevLogLevel(childEnv);
 
 const electronStatus = getElectronBinaryStatus();
 if (electronStatus.installed && !electronStatus.ready) {
@@ -188,6 +244,13 @@ if (electronStatus.installed && !electronStatus.ready) {
 }
 
 if (electronStatus.installed && electronStatus.ready) {
+  try {
+    runOptionalDevBranding(childEnv);
+  } catch (error) {
+    process.stderr.write(`[dev-start] ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
+
   const sqliteStatus = getNativeSqliteStatus(childEnv);
   if (!sqliteStatus.ready) {
     try {
