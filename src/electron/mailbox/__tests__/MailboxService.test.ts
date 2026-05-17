@@ -1876,7 +1876,7 @@ describeWithSqlite("MailboxService", () => {
   });
 
   it("persists LLM mailbox classifications and stores their provenance", async () => {
-    const factoryModule = await import("../agent/llm/provider-factory");
+    const factoryModule = await import("../../agent/llm/provider-factory");
     const loadSettingsSpy = vi.spyOn(factoryModule.LLMProviderFactory, "loadSettings").mockReturnValue({
       providerType: "openai",
       modelKey: "gpt-4o-mini",
@@ -1991,8 +1991,67 @@ describeWithSqlite("MailboxService", () => {
     }
   });
 
+  it("uses gpt-5.4-mini for ChatGPT subscription mailbox classifications without a cheap profile", async () => {
+    const factoryModule = await import("../../agent/llm/provider-factory");
+    const loadSettingsSpy = vi.spyOn(factoryModule.LLMProviderFactory, "loadSettings").mockReturnValue({
+      providerType: "openai",
+      modelKey: "gpt-5.5",
+      openai: {
+        authMethod: "oauth",
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        model: "gpt-5.5",
+      },
+    } as never);
+    const createMessage = vi.fn(async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            category: "updates",
+            todayBucket: "good_to_know",
+            domainCategory: "ops",
+            needsReply: false,
+            priorityScore: 18,
+            urgencyScore: 6,
+            staleFollowup: false,
+            cleanupCandidate: false,
+            handled: true,
+            confidence: 0.92,
+            rationale: "Informational update with no action requested.",
+            labels: ["update"],
+          }),
+        },
+      ],
+      stopReason: "end_turn",
+      usage: { inputTokens: 80, outputTokens: 24 },
+    }));
+    const createProviderSpy = vi.spyOn(factoryModule.LLMProviderFactory, "createProvider").mockReturnValue({
+      type: "openai",
+      createMessage,
+    } as never);
+
+    try {
+      const result = await service.reclassifyThread("gmail-thread:alpha");
+      expect(result.reclassifiedThreads).toBe(1);
+      expect(createMessage).toHaveBeenCalledWith(expect.objectContaining({ model: "gpt-5.4-mini" }));
+
+      const row = db
+        .prepare(
+          `SELECT classification_model_key
+           FROM mailbox_threads
+           WHERE id = ?`,
+        )
+        .get("gmail-thread:alpha") as { classification_model_key: string | null };
+      expect(row.classification_model_key).toBe("gpt-5.4-mini");
+    } finally {
+      loadSettingsSpy.mockRestore();
+      createProviderSpy.mockRestore();
+    }
+  });
+
   it("falls back conservatively when the model output is low confidence", async () => {
-    const factoryModule = await import("../agent/llm/provider-factory");
+    const factoryModule = await import("../../agent/llm/provider-factory");
     const loadSettingsSpy = vi.spyOn(factoryModule.LLMProviderFactory, "loadSettings").mockReturnValue({
       providerType: "openai",
       modelKey: "gpt-4o-mini",
@@ -2071,7 +2130,7 @@ describeWithSqlite("MailboxService", () => {
   });
 
   it("does not auto-reclassify already classified threads during sync", async () => {
-    const factoryModule = await import("../agent/llm/provider-factory");
+    const factoryModule = await import("../../agent/llm/provider-factory");
     const loadSettingsSpy = vi.spyOn(factoryModule.LLMProviderFactory, "loadSettings").mockReturnValue({
       providerType: "openai",
       modelKey: "gpt-4o-mini",
