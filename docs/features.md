@@ -4,6 +4,11 @@
 
 17 messaging channels with unified operations, plus per-channel, per-chat, and per-topic specialization for workspace, agent role, guidance, tool policy, and shared-memory opt-in. See [Channel Integrations](channels.md) for setup details, [Channel User Guides](channel-user-guides.md) for per-channel features and best practices, [Dedicated Channel Guides](channel-guides/) for separate channel pages, [Using CoWork from WhatsApp and Other Channels](gateway-user-guide.md) for end-user workflows, and [Gateway Message Lifecycle](gateway-message-lifecycle.md) for remote command routing, active-task behavior, delivery, and scheduled outputs.
 
+<p align="center">
+  <img src="../resources/branding/images/cowork-os-12.webp" alt="Messaging channel settings" width="700">
+  <br><em>Channels can be configured with provider setup, routing, specialization, and security controls.</em>
+</p>
+
 - **WhatsApp**: QR code pairing, self-chat mode, markdown support, `/new` and `/new temp` task resets, `/stop` cancellation, editable progress delivery, and hidden temporary scratch workspaces
 - **Telegram**: Bot commands, streaming responses, workspace selection, group routing modes, allowed-group allowlists, and group/topic specialization
 - **Discord**: Slash commands, DM support, guild integration, guild allowlists, channel/thread specialization, embeds/polls/select menus, live message fetch and attachment download
@@ -44,6 +49,7 @@
 - **Sectioned Prompt Stack**: execution and follow-up prompts are built from named session- and turn-scoped sections with explicit budgets, memoization of stable sections, provider-aware prompt caching, and truncation/drop reporting when token pressure rises.
 - **Provider-Aware Prompt Caching**: CoWork keeps stable system blocks cacheable and dynamic turn context uncached, prefers Anthropic automatic caching where supported, uses explicit Claude breakpoints on OpenRouter, and derives stable OpenAI-family cache keys for GPT routes.
 - **OpenRouter Pareto Code Routing**: OpenRouter model selection includes `openrouter/pareto-code` and `openrouter/pareto-code:nitro`. When selected, Settings exposes OpenRouter's optional Pareto minimum coding score as a decimal from `0` to `1` so coding tasks can route by capability tier without pinning one concrete model.
+- **Grok Subscription Routing**: xAI/Grok can run with either a direct xAI API key or browser OAuth against an active SuperGrok subscription. The OAuth path uses `grok-4.3` by default and keeps token refresh inside encrypted profile settings.
 - **Session Checklist Primitive**: execution-style tasks can create a session-local ordered checklist with `task_list_create`, maintain it with `task_list_update`, inspect it with `task_list_list`, and surface it read-only in the task UI. The runtime can issue a non-blocking verification nudge when implementation items are done but no verification item exists yet.
 - **Structured Delegation Briefs**: `spawn_agent` and `orchestrate_agents` resolve a worker role, package parent-step context plus evidence requirements into a structured brief, and apply the corresponding completion/tool contract to the child.
 - **Permission Engine**: layered tool approvals combine explicit modes, per-tool/path/command-prefix/MCP-server rules, session grants, workspace-local rules, profile rules, and hard guardrails; `dangerous_only` adds a lower-friction mode that still prompts on destructive, privacy-sensitive, side-effecting, or ambiguous actions.
@@ -51,6 +57,12 @@
 - **Dynamic Re-Planning**: Agent can revise its plan mid-execution
 - **147 Built-in Skills**: GitHub, Slack, Notion, Spotify, Apple Notes, Unity, Unreal, Terraform, Kubernetes, financial analysis, and more. Bundled workflows now include [LLM Wiki](llm-wiki.md) for persistent research vaults, [manim-video](skills/manim-video.md) for deterministic technical animation, [kami](skills/kami.md) for editorial PDFs and slide decks, [react-best-practices](skills/react-best-practices.md) for React and Next.js implementation work, and `taste-skill` for high-agency frontend design. Optional CLI-based skills (e.g. [aurl](skills/aurl.md) for OpenAPI/GraphQL APIs) appear when the binary is installed.
 - **Additive Skill Runtime**: Skills can still be proactively shortlisted from task semantics, but they now apply as additive context and scoped runtime directives. They never replace the original task prompt. See [Skills Runtime Model](skills-runtime-model.md).
+
+<p align="center">
+  <img src="../resources/branding/images/cowork-os-3.webp" alt="Agents Hub" width="700">
+  <br><em>Agents Hub turns reusable agent definitions into a first-class product surface.</em>
+</p>
+
 - **Chat Mode**: Direct LLM chat with no tools by default, no step timeline, same-session follow-ups, chat-only streaming for supported providers, and a fixed high output budget for explicit `executionMode: "chat"` sessions. Uploaded PDF turns that need deeper document reading are narrowly promoted into read-only analysis so the document parser can run. See [Chat Mode](chat-mode.md).
 - **Document Creation**: Excel, Word, PDF, PowerPoint, HTML, and React-style outputs with professional formatting, first-class LaTeX/TikZ `.tex` -> PDF compilation when a system TeX engine is installed, plus the bundled [kami](skills/kami.md) workflow for editorial PDFs, resumes, one-pagers, and slide decks
 - **Document Artifact Workbench**: task-created Word-style files use compact artifact cards in the task feed. `.docx` opens directly into a resizable right-sidebar editor with a Google Docs-style toolbar, direct text editing, copy, save, external-open, and folder actions. `.doc`, `.rtf`, `.odt`, `.ott`, `.pages`, and related formats are recognized as document artifacts and use best-effort preview or external-app/folder actions depending on parser support. Fullscreen mode expands editable documents across the app and keeps a functional follow-up composer with the main task model picker, voice input, attachments, send behavior, latest-turn/working context, and automatic preview refresh after follow-up edits. See [Document Artifacts](document-artifacts.md).
@@ -60,7 +72,7 @@
 - **Presentation Artifact Workbench**: PPTX artifacts render as compact task-feed cards and open by default in the resizable right-sidebar presentation viewer. The viewer includes slide thumbnails, previous/next controls, zoom, a white slide canvas, extracted slide text, speaker notes, fast text-first loading, cached rendered slide images, fullscreen follow-up context, external-app/folder actions, and preview refresh after follow-up edits. Legacy PowerPoint formats are recognized with external actions. See [Presentation Artifacts and PPTX Preview](pptx-generation-and-preview.md).
 - **Web Page Artifact Workbench**: generated `.html` / `.htm` files and built React output entrypoints render as compact task-feed cards and open by default in the resizable right-sidebar web viewer. The viewer uses a sandboxed iframe with local assets inlined where possible, browser/folder/copy actions, fullscreen follow-up context, and preview refresh after matching file/build-output updates. React-style projects without built output show a build-output-needed state instead of auto-starting a dev server. See [Web Page Artifacts](web-page-artifacts.md).
 - **Browser Workbench / Browser V2**: live browser-use prompts such as "go to this site and test it as a normal user" open a shared in-app browser session beside the task. The agent can navigate, resize to desktop/tablet/mobile viewports, snapshot, click, fill, type, scroll, inspect diagnostics, upload/download files, screenshot, and annotate while the user watches the visible cursor and page state. See [Browser Workbench](browser-workbench.md).
-- **Persistent Memory**: Cross-session context with curated hot memory, searchable archive recall, session transcript recall, topic packs, privacy-aware observation capture, and an optional Supermemory external provider lane
+- **Persistent Memory**: Cross-session context with curated hot memory, searchable archive recall, session transcript recall, topic packs, privacy-aware observation capture, opt-in durable runtime context for compacted active-task recall, and an optional Supermemory external provider lane
 - **Chronicle (Desktop Research Preview)**: opt-in local recent-screen context for vague prompts like `this`, `that`, `what is this`, `latest draft`, or `why is this failing`, with Memory Hub controls, pause/resume, promoted `screen_context` evidence, and optional linked background memory generation. See [Chronicle](chronicle.md).
 - **Knowledge Graph**: SQLite-backed entity/relationship memory with FTS5 search, graph traversal, and auto-extraction
 - **Workspace Kit**: `.cowork/` project kit + markdown indexing with context injection
@@ -189,6 +201,11 @@ See [Remote Access](remote-access.md) for connection patterns and [Mission Contr
 ### Automations Control Center
 
 Automation features are now grouped together in `Settings > Automations`:
+
+<p align="center">
+  <img src="../resources/branding/images/cowork-os-6.webp" alt="Automations control center" width="700">
+  <br><em>Automations separate core runtime settings, scheduled tasks, webhooks, triggers, and briefing workflows.</em>
+</p>
 
 - **Routines**: the primary automation abstraction for saved instructions, execution target, triggers, outputs, approval policy, connector policy, and recent runs
 - **Workflow Intelligence**: Memory, Heartbeat, internal Reflection, Dreaming, and reviewable Suggestions form one always-on runtime owned by automation profiles
@@ -322,7 +339,7 @@ The UI exposes a small set of execution modes. Chat mode is separate from task e
 |------|----------|
 | **Chat** | Direct assistant conversation, no tools, no step timeline, same-session follow-ups, and chat-only streaming for supported providers. |
 | **Execute** | Full task execution path with tools, planning, and artifacts. |
-| **Plan** | Structured planning path; can pause for `request_user_input` and is intended for non-mutating planning/coordination. |
+| **Plan** | Structured planning path; can pause for `request_user_input` when structured human input is enabled and is intended for non-mutating planning/coordination. |
 | **Analyze** | Read-only analysis path that stays evidence-focused and blocks mutating tools. |
 | **Verified** | Execute-like path that adds external verification checks after steps before completion. |
 
@@ -337,6 +354,7 @@ The task creation UI also includes higher-level toggles that change how tasks ar
 | Toggle | Behavior |
 |--------|----------|
 | **Autonomous** | Auto-approves all gated actions (shell commands, file deletions, etc.) so the agent runs without pauses. Disables user input prompts. |
+| **Check-ins** | Opts a fresh task into legacy clarification pauses. Keep this off for Codex/Claude Code-style execution that chooses safe defaults and stops only for hard blockers. |
 | **Collaborative** | Auto-creates an ephemeral team of agents that analyze the task from multiple perspectives, then a leader synthesizes the results. Phases: dispatch → think → synthesize → complete. |
 | **Multitask command** | Type `/multitask [N] <task>` to create a fresh collaborative run that splits the prompt into lane-specific child tasks before synthesis. Defaults to 4 lanes, bounded to 2-8. |
 | **Multi-LLM** | Sends the same task to multiple LLM providers/models in parallel. A designated judge model synthesizes the best result. Requires 2+ providers configured. |
@@ -358,7 +376,7 @@ Chat mode is the direct assistant conversation surface. It is designed for norma
 
 See [Chat Mode](chat-mode.md) for the full behavior contract.
 
-When the agent is operating in plan-mode execution, it can also use `request_user_input` to pause for structured multiple-choice decisions. Responses are persisted locally and can be submitted from either the desktop UI or the Control Plane web dashboard.
+When the agent is operating in plan-mode execution, it can also use `request_user_input` to pause for structured multiple-choice decisions. Responses are persisted locally and can be submitted from either the desktop UI or the Control Plane web dashboard. Normal execute-mode tasks default to safe assumptions plus concrete blocker reporting instead of broad clarification check-ins.
 
 ### Guided Decisions & Runtime Recovery
 
@@ -366,7 +384,7 @@ The runtime now includes a set of decision and recovery contracts aimed at keepi
 
 | Capability | Behavior |
 |------------|----------|
-| **Structured input requests** | `request_user_input` asks 1-3 concise multiple-choice questions, pauses the task, and resumes after submit/dismiss. Only available in plan mode. |
+| **Structured input requests** | `request_user_input` asks 1-3 concise multiple-choice questions, pauses the task, and resumes after submit/dismiss. Available in plan/debug mode when the task human-input policy allows structured input. |
 | **Explicit turn-window recovery** | Main interactive tasks run without an implicit turn window. If a caller, managed template, or helper explicitly sets `maxTurns` or `windowTurnCap`, the runtime applies the requested `turnBudgetPolicy`, soft-logs exhausted adaptive windows, reserves space for finalization, and allows bounded follow-up recovery before triggering a safety stop. |
 | **Context overflow retry** | Context-capacity errors trigger compaction plus retry instead of immediate hard failure when the model context window is exceeded. |
 | **Workspace alias repair** | Absolute alias paths such as `/workspace/...` can be remapped into the active workspace for file and directory tools, or blocked via `strict_fail`. |
@@ -496,6 +514,7 @@ Configure in **Settings** > **Voice**.
 | **Structured Observations** | Archive memories get inspectable sidecar metadata with title, narrative, facts, concepts, files, tools, source events, privacy state, and deterministic migration status |
 | **Dreaming Memory Curation** | Background Dreaming runs review recent session, observation, and curated-memory evidence, then persist reviewable `dreaming_candidates` for stale archives, corrections, open loops, recurring tasks, constraints, ignored-noise patterns, and curated-memory cleanup |
 | **Progressive Recall Tools** | `memory_search_index`, `memory_timeline`, and `memory_details` let agents search compact metadata first, inspect timeline context second, and fetch full details only for selected IDs |
+| **Durable Runtime Context** | Optional task-scoped runtime recall stores sanitized task messages and source-linked compaction summaries, then exposes read-only `context_grep` and `context_describe` tools for active-task facts after compaction. [Guide](durable-runtime-context.md) |
 | **Checkpoint Capture** | Runtime-native checkpoints are written before compaction, on non-trivial task completion, and every 12 meaningful exchanges, each carrying both a structured summary and a verbatim evidence packet |
 | **Session Recall** | `search_sessions` searches recent transcript spans and optional checkpoints when the agent needs to recall what happened in a prior run |
 | **Verbatim Quote Recall** | `search_quotes` returns exact spans with provenance from transcripts, task messages, imported memories, and indexed workspace markdown when the agent needs “what was actually said?” |
@@ -655,7 +674,7 @@ The workspace kit is contract-driven: every tracked markdown file has a declared
 | `TOOLS.md` | Local Setup Notes | `task`, `main-session` | `sectioned` | environment notes, common commands, local conventions |
 | `IDENTITY.md` | Workspace Identity | `task`, `main-session`, `role` | `kv-lines` | who the agent is and what it owns |
 | `RULES.md` | Operational Rules | `task`, `main-session`, `role`, `company-ops` | `checklist` | must/must-not behavior and approval defaults |
-| `SOUL.md` | Workspace Persona | `task`, `main-session`, `role` | `sectioned` | tone, collaboration style, execution philosophy |
+| `SOUL.md` | Workspace Persona | `task`, `main-session`, `role` | `sectioned` | tone, collaboration style, pushback contract, accountability loop, execution philosophy |
 | `VIBES.md` | Current Operating Mode | `task`, `role` | `sectioned` | what to optimize for right now |
 | `MISTAKES.md` | Recurring Mistakes | `task`, `main-session`, `role` | `decision-log` | recurring failure patterns and corrections |
 | `LORE.md` | Durable Context | `task`, `main-session` | `decision-log` | important historical decisions and background context |
@@ -723,7 +742,7 @@ Define per-role personality and operating guidelines in `.cowork/agents/<role-id
 |---|---|---|
 | `IDENTITY.md` | Workspace Identity | role identity, ownership boundaries, confirmation rules |
 | `RULES.md` | Operational Rules | role-specific must/must-not behavior and safety defaults |
-| `SOUL.md` | Workspace Persona | collaboration style, tone, execution philosophy |
+| `SOUL.md` | Workspace Persona | collaboration style, tone, pushback contract, accountability loop, execution philosophy |
 | `VIBES.md` | Current Operating Mode | current emphasis, urgency, and optimization target |
 
 ---
@@ -748,6 +767,11 @@ Configure in **Mission Control** > **Teams**.
 ## Mission Control
 
 Centralized agent orchestration and monitoring dashboard. Access from **Settings** > **Mission Control**.
+
+<p align="center">
+  <img src="../resources/branding/images/cowork-os-8.webp" alt="Mission Control board" width="700">
+  <br><em>Mission Control shows live queues, agent work, task status, and operational review.</em>
+</p>
 
 | Panel | Purpose |
 |-------|---------|
@@ -1363,6 +1387,11 @@ See [Remote Access](remote-access.md) for details.
 ## Enterprise MCP Connectors
 
 **44 pre-built connectors** for enterprise integrations. Install from **Settings > Connectors > Browse Registry**.
+
+<p align="center">
+  <img src="../resources/branding/images/cowork-os-11.webp" alt="Connector catalog" width="700">
+  <br><em>The connector catalog keeps MCP-backed integrations discoverable and configurable.</em>
+</p>
 
 | Connector | Type | Notes |
 |-----------|------|-------|
