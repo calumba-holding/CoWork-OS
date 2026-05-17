@@ -13,6 +13,7 @@ import type {
   TaskDomain,
   WebSearchMode,
   WorkerRoleKind,
+  HumanInputPolicy,
 } from "../../../shared/types";
 
 export type { LLMProviderType, AzureReasoningEffort, OpenAIReasoningEffort, LLMTextVerbosity };
@@ -71,6 +72,17 @@ export interface LLMProviderConfig {
   groqBaseUrl?: string;
   // xAI-specific
   xaiApiKey?: string;
+  xaiAccessToken?: string;
+  xaiRefreshToken?: string;
+  xaiTokenExpiresAt?: number;
+  xaiTokenEndpoint?: string;
+  xaiOAuthTokenUpdater?: (tokens: {
+    access_token: string;
+    refresh_token: string;
+    expires_at?: number;
+    token_endpoint?: string;
+    id_token?: string;
+  }) => void | Promise<void>;
   xaiBaseUrl?: string;
   // Kimi-specific
   kimiApiKey?: string;
@@ -107,6 +119,7 @@ export interface LLMToolPromptRenderContext {
   agentType?: string | null;
   workerRole?: WorkerRoleKind | null;
   allowUserInput?: boolean;
+  humanInputPolicy?: HumanInputPolicy;
 }
 
 export interface LLMToolPromptRenderResult {
@@ -197,6 +210,11 @@ export const PROVIDER_IMAGE_CAPS: Record<string, LLMProviderImageCaps> = {
   },
   deepseek: { supportsImages: false, maxImageBytes: 0, supportedMimeTypes: [] },
   xai: {
+    supportsImages: true,
+    maxImageBytes: 20 * 1024 * 1024,
+    supportedMimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+  },
+  "xai-oauth": {
     supportsImages: true,
     maxImageBytes: 20 * 1024 * 1024,
     supportedMimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
@@ -563,20 +581,25 @@ export type GroqModelKey = keyof typeof GROQ_MODELS;
  * Popular xAI (Grok) models
  */
 export const XAI_MODELS = {
-  "grok-4": {
-    id: "grok-4",
-    displayName: "Grok 4",
-    description: "Flagship model",
+  "grok-4.3": {
+    id: "grok-4.3",
+    displayName: "Grok 4.3",
+    description: "Default Grok subscription model",
   },
-  "grok-4-fast-non-reasoning": {
-    id: "grok-4-fast-non-reasoning",
-    displayName: "Grok 4 Fast (Non-Reasoning)",
-    description: "Fast responses without explicit reasoning",
+  "grok-4.20-0309-reasoning": {
+    id: "grok-4.20-0309-reasoning",
+    displayName: "Grok 4.20 Reasoning",
+    description: "Reasoning variant",
   },
-  "grok-4-fast-reasoning": {
-    id: "grok-4-fast-reasoning",
-    displayName: "Grok 4 Fast (Reasoning)",
-    description: "Faster model with reasoning support",
+  "grok-4.20-0309-non-reasoning": {
+    id: "grok-4.20-0309-non-reasoning",
+    displayName: "Grok 4.20 Non-Reasoning",
+    description: "Non-reasoning variant",
+  },
+  "grok-4.20-multi-agent-0309": {
+    id: "grok-4.20-multi-agent-0309",
+    displayName: "Grok 4.20 Multi-Agent",
+    description: "Multi-agent variant",
   },
 } as const;
 
@@ -634,6 +657,7 @@ export const PI_PROVIDERS = {
   openai: { displayName: "OpenAI" },
   google: { displayName: "Google" },
   xai: { displayName: "xAI" },
+  "xai-oauth": { displayName: "xAI Grok OAuth" },
   groq: { displayName: "Groq" },
   cerebras: { displayName: "Cerebras" },
   openrouter: { displayName: "OpenRouter" },
