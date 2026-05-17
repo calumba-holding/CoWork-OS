@@ -8,7 +8,7 @@ import { ChannelRepository, TaskRepository, WorkspaceRepository } from "../datab
 import { AgentRoleRepository } from "../agents/AgentRoleRepository";
 import { LLMProviderFactory } from "../agent/llm/provider-factory";
 import { recordLlmCallError, recordLlmCallSuccess } from "../agent/llm/usage-telemetry";
-import type { LLMMessage } from "../agent/llm/types";
+import type { LLMMessage, LLMProviderType } from "../agent/llm/types";
 import { GoogleWorkspaceSettingsManager } from "../settings/google-workspace-manager";
 import { AgentMailSettingsManager } from "../settings/agentmail-manager";
 import { gmailRequest } from "../utils/gmail-api";
@@ -133,7 +133,8 @@ import {
 import {
   MICROSOFT_EMAIL_DEFAULT_TENANT,
   MICROSOFT_EMAIL_GRAPH_READWRITE_SCOPES,
-  MICROSOFT_EMAIL_OAUTH_DEFAULT_SCOPES,
+  MICROSOFT_EMAIL_GRAPH_SEND_SCOPES,
+  normalizeMicrosoftEmailReadScopes,
 } from "../../shared/microsoft-email";
 import { isMicrosoftConsumerEmailAddress } from "../../shared/email-provider-support";
 import type { AgentRole, CompanyEvidenceRef, CompanyOutputContract, Issue, Task } from "../../shared/types";
@@ -559,9 +560,9 @@ const MAILBOX_SENT_FOLLOWUP_DEFAULT_THRESHOLD_HOURS = 24;
 const MAILBOX_SENT_FOLLOWUP_MAX_LIMIT = 20;
 const MICROSOFT_GRAPH_API_BASE = "https://graph.microsoft.com/v1.0";
 const MICROSOFT_GRAPH_MESSAGE_SELECT =
-  "id,conversationId,subject,bodyPreview,body,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,hasAttachments,internetMessageId";
+  "id,conversationId,parentFolderId,subject,bodyPreview,body,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,isRead,hasAttachments,internetMessageId";
 const MICROSOFT_GRAPH_READWRITE_SCOPES = [...MICROSOFT_EMAIL_GRAPH_READWRITE_SCOPES];
-const MICROSOFT_GRAPH_FULL_SCOPES = [...MICROSOFT_EMAIL_OAUTH_DEFAULT_SCOPES];
+const MICROSOFT_GRAPH_SEND_SCOPES = [...MICROSOFT_EMAIL_GRAPH_SEND_SCOPES];
 
 let mailboxCipherState: MailboxCipherState | null = null;
 
@@ -610,7 +611,10 @@ function normalizeMicrosoftScope(scope: string): string {
 function microsoftScopesIncludeAll(granted: string[] | undefined, required: readonly string[]): boolean {
   if (!granted || granted.length === 0) return false;
   const grantedSet = new Set(granted.map(normalizeMicrosoftScope).filter(Boolean));
-  return required.every((scope) => grantedSet.has(normalizeMicrosoftScope(scope)));
+  return required.every((scope) => {
+    const normalized = normalizeMicrosoftScope(scope);
+    return normalized === "offline_access" || grantedSet.has(normalized);
+  });
 }
 
 function escapeODataString(value: string): string {
@@ -765,6 +769,7 @@ type NormalizedThreadInput = {
   staleFollowup: boolean;
   cleanupCandidate: boolean;
   handled: boolean;
+  localInboxHidden?: boolean;
   unreadCount: number;
   lastMessageAt: number;
   messages: Array<{
@@ -1957,6 +1962,40 @@ export class MailboxService {
     });
   }
 
+  private isMicrosoftGraphAccountRow(row: MailboxAccountRow): boolean {
+    if (row.provider === "outlook_graph") return true;
+    const capabilities = parseJsonArray<string>(row.capabilities_json);
+    return resolveMailboxProviderBackend({
+      provider: row.provider,
+      capabilities,
+    }) === "microsoft_graph";
+  }
+
+  private getObsoleteDuplicateMailboxAccountIds(rows?: MailboxAccountRow[]): string[] {
+    const accountRows =
+      rows ||
+      (this.db
+        .prepare(
+          `SELECT id, provider, address, display_name, status, capabilities_json, sync_cursor, classification_initial_batch_at, last_synced_at
+           FROM mailbox_accounts`,
+        )
+        .all() as MailboxAccountRow[]);
+    const graphAddresses = new Set(
+      accountRows
+        .filter((row) => this.isMicrosoftGraphAccountRow(row))
+        .map((row) => normalizeEmailAddress(row.address))
+        .filter((address): address is string => Boolean(address)),
+    );
+    return accountRows
+      .filter((row) => row.provider === "imap" && graphAddresses.has(normalizeEmailAddress(row.address) || ""))
+      .map((row) => row.id);
+  }
+
+  private filterVisibleMailboxAccountRows(rows: MailboxAccountRow[]): MailboxAccountRow[] {
+    const obsoleteIds = new Set(this.getObsoleteDuplicateMailboxAccountIds(rows));
+    return rows.filter((row) => !obsoleteIds.has(row.id));
+  }
+
   private noteGmailTransientSyncFailure(error: unknown): string {
     const detail = summarizeMailboxConnectionError(error);
     const label = `Gmail sync temporarily unavailable; retrying later (${detail})`;
@@ -2013,7 +2052,8 @@ export class MailboxService {
 
     const googleWorkspaceAuthIssue = this.getGoogleWorkspaceAuthIssue();
     const gmailTransientSyncActive = this.gmailTransientSyncBackoffUntil > Date.now();
-    const accounts = accountRows.map((row) => {
+    const visibleAccountRows = this.filterVisibleMailboxAccountRows(accountRows);
+    const accounts = visibleAccountRows.map((row) => {
       const account = this.mapAccountRow(row);
       return (googleWorkspaceAuthIssue || gmailTransientSyncActive) && account.provider === "gmail"
         ? { ...account, status: "degraded" as const }
@@ -3461,6 +3501,7 @@ export class MailboxService {
       const data = await this.microsoftGraphRequest(channel.id, {
         method: "GET",
         path: "/me/messages",
+        scopes: MICROSOFT_GRAPH_READWRITE_SCOPES,
         query: {
           $search: `"${searchQuery.replace(/"/g, '\\"')}"`,
           $top: String(Math.min(Math.max(limit, 5), 10)),
@@ -4074,6 +4115,11 @@ export class MailboxService {
       );
       params.push(workspaceId, workspaceId);
     }
+    const obsoleteAccountIds = this.getObsoleteDuplicateMailboxAccountIds();
+    if (obsoleteAccountIds.length > 0) {
+      conditions.push(`${threadAlias}.account_id NOT IN (${obsoleteAccountIds.map(() => "?").join(",")})`);
+      params.push(...obsoleteAccountIds);
+    }
     return { sql: conditions.join(" AND "), params };
   }
 
@@ -4271,7 +4317,8 @@ export class MailboxService {
     const rows = this.db.prepare(`SELECT id FROM mailbox_accounts ORDER BY updated_at DESC`).all() as Array<{
       id: string;
     }>;
-    return rows.map((row) => row.id).filter(Boolean);
+    const obsoleteIds = new Set(this.getObsoleteDuplicateMailboxAccountIds());
+    return rows.map((row) => row.id).filter((id) => Boolean(id) && !obsoleteIds.has(id));
   }
 
   private async classifyPendingMailboxBacklog(
@@ -4439,6 +4486,10 @@ export class MailboxService {
             syncedMessages += result.syncedMessages;
           }
         } catch (error) {
+          mailboxLogger.warn("Email channel sync failed", {
+            message: error instanceof Error ? error.message : String(error),
+            transient: isMailboxConnectionError(error),
+          });
           syncErrors.push({
             message: `Email channel sync failed: ${error instanceof Error ? error.message : String(error)}`,
             transient: isMailboxConnectionError(error),
@@ -4487,6 +4538,13 @@ export class MailboxService {
             );
 
       const lastSyncedAt = Date.now();
+      const syncWarning = syncErrors[0]?.message;
+      const doneLabel =
+        syncedThreads > 0
+          ? `Synced ${syncedThreads} thread${syncedThreads === 1 ? "" : "s"} and ${syncedMessages} message${syncedMessages === 1 ? "" : "s"}${backlogResult.reclassifiedThreads > 0 ? ` · classified ${backlogResult.reclassifiedThreads}` : ""}`
+          : backlogResult.reclassifiedThreads > 0
+            ? `Classified ${backlogResult.reclassifiedThreads} pending thread${backlogResult.reclassifiedThreads === 1 ? "" : "s"}`
+            : "Mailbox sync complete";
       this.updateSyncProgress({
         phase: "done",
         totalThreads: syncedThreads,
@@ -4496,19 +4554,16 @@ export class MailboxService {
         newThreads: syncedThreads,
         classifiedThreads: backlogResult.reclassifiedThreads,
         skippedThreads: 0,
-        label:
-          syncedThreads > 0
-            ? `Synced ${syncedThreads} thread${syncedThreads === 1 ? "" : "s"} and ${syncedMessages} message${syncedMessages === 1 ? "" : "s"}${backlogResult.reclassifiedThreads > 0 ? ` · classified ${backlogResult.reclassifiedThreads}` : ""}`
-          : backlogResult.reclassifiedThreads > 0
-            ? `Classified ${backlogResult.reclassifiedThreads} pending thread${backlogResult.reclassifiedThreads === 1 ? "" : "s"}`
-            : "Mailbox sync complete",
+        label: syncWarning ? `${doneLabel} · ${syncWarning}` : doneLabel,
       });
       this.emitMailboxEvent({
         type: "sync_completed",
         workspaceId: this.resolveDefaultWorkspaceId(),
         accountId: accounts[0]?.id,
         provider: accounts[0]?.provider,
-        summary: `Synced ${syncedThreads} thread${syncedThreads === 1 ? "" : "s"} and ${syncedMessages} message${syncedMessages === 1 ? "" : "s"}`,
+        summary: syncWarning
+          ? `Synced ${syncedThreads} thread${syncedThreads === 1 ? "" : "s"} and ${syncedMessages} message${syncedMessages === 1 ? "" : "s"} with warnings`
+          : `Synced ${syncedThreads} thread${syncedThreads === 1 ? "" : "s"} and ${syncedMessages} message${syncedMessages === 1 ? "" : "s"}`,
         evidenceRefs: accounts.map((account) => account.id),
         payload: {
           accountCount: accounts.length,
@@ -4516,6 +4571,7 @@ export class MailboxService {
           messageCount: syncedMessages,
           accountIds: accounts.map((account) => account.id),
           providers: accounts.map((account) => account.provider),
+          warnings: syncErrors.map((entry) => entry.message),
         },
       });
       return {
@@ -6623,6 +6679,7 @@ export class MailboxService {
     accountId: string,
     accountEmail: string,
     message: Any,
+    options: { localInboxHidden?: boolean } = {},
   ): NormalizedThreadInput | null {
     const messageId = asString(message?.id);
     if (!messageId) return null;
@@ -6679,10 +6736,49 @@ export class MailboxService {
       staleFollowup: false,
       cleanupCandidate: false,
       handled: !normalizedMessage.unread,
+      localInboxHidden: options.localInboxHidden,
       unreadCount: normalizedMessage.unread ? 1 : 0,
       lastMessageAt: receivedAt,
       messages: [normalizedMessage],
     };
+  }
+
+  private getMicrosoftGraphThreadIdFromMessage(message: Any): string | null {
+    const messageId = asString(message?.id);
+    if (!messageId) return null;
+    const conversationId = asString(message?.conversationId) || messageId;
+    return `outlook-graph-thread:${conversationId}`;
+  }
+
+  private hideMicrosoftGraphJunkThreads(
+    accountId: string,
+    messages: Any[],
+    visibleInboxThreadIds: Set<string>,
+  ): number {
+    const junkThreadIds = new Set<string>();
+    for (const message of messages) {
+      const threadId = this.getMicrosoftGraphThreadIdFromMessage(message);
+      if (!threadId || visibleInboxThreadIds.has(threadId)) continue;
+      junkThreadIds.add(threadId);
+    }
+    if (junkThreadIds.size === 0) return 0;
+
+    const now = Date.now();
+    const update = this.db.prepare(
+      `UPDATE mailbox_threads
+       SET local_inbox_hidden = 1,
+           handled = 1,
+           cleanup_candidate = 0,
+           updated_at = ?
+       WHERE account_id = ?
+         AND provider = 'outlook_graph'
+         AND id = ?`,
+    );
+    let hidden = 0;
+    for (const threadId of junkThreadIds) {
+      hidden += update.run(now, accountId, threadId).changes;
+    }
+    return hidden;
   }
 
   private async syncMicrosoftGraphEmailChannel(
@@ -6722,18 +6818,76 @@ export class MailboxService {
     });
     await this.refreshMicrosoftGraphNavigation(channelId, accountId);
 
-    const data = await this.microsoftGraphRequest(channelId, {
+    const graphLimit = Math.min(Math.max(limit, 5), 50);
+    const recentData = await this.microsoftGraphRequest(channelId, {
       method: "GET",
-      path: "/me/messages",
+      path: "/me/mailFolders/inbox/messages",
+      scopes: MICROSOFT_GRAPH_READWRITE_SCOPES,
       query: {
-        $top: String(Math.min(Math.max(limit, 5), 50)),
+        $top: String(graphLimit),
         $orderby: "receivedDateTime desc",
         $select: MICROSOFT_GRAPH_MESSAGE_SELECT,
       },
     });
-    const messages = Array.isArray(data?.value) ? data.value : [];
+    const unreadInboxData = await this.microsoftGraphRequest(channelId, {
+      method: "GET",
+      path: "/me/mailFolders/inbox/messages",
+      scopes: MICROSOFT_GRAPH_READWRITE_SCOPES,
+      query: {
+        $top: String(graphLimit),
+        $filter: "isRead eq false",
+        $select: MICROSOFT_GRAPH_MESSAGE_SELECT,
+      },
+    });
+    let junkData: Any | undefined;
+    try {
+      junkData = await this.microsoftGraphRequest(channelId, {
+        method: "GET",
+        path: "/me/mailFolders/junkemail/messages",
+        scopes: MICROSOFT_GRAPH_READWRITE_SCOPES,
+        query: {
+          $top: "100",
+          $select: "id,conversationId",
+        },
+      });
+    } catch (error) {
+      mailboxLogger.warn("Microsoft Graph junk folder cleanup skipped", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const messagesById = new Map<string, Any>();
+    for (const message of [
+      ...(Array.isArray(recentData?.value) ? recentData.value : []),
+      ...(Array.isArray(unreadInboxData?.value) ? unreadInboxData.value : []),
+    ]) {
+      const messageId = asString(message?.id);
+      if (!messageId) continue;
+      messagesById.set(messageId, message);
+    }
+    const messages = Array.from(messagesById.values());
+    const inboxThreadIds = new Set(
+      messages
+        .map((message) => this.getMicrosoftGraphThreadIdFromMessage(message))
+        .filter((threadId): threadId is string => Boolean(threadId)),
+    );
+    const hiddenJunkThreads = this.hideMicrosoftGraphJunkThreads(
+      accountId,
+      Array.isArray(junkData?.value) ? junkData.value : [],
+      inboxThreadIds,
+    );
+    mailboxLogger.info("Microsoft Graph mailbox sync fetched messages", {
+      accountId,
+      recentCount: Array.isArray(recentData?.value) ? recentData.value.length : 0,
+      unreadInboxCount: Array.isArray(unreadInboxData?.value) ? unreadInboxData.value.length : 0,
+      mergedCount: messages.length,
+      hiddenJunkThreads,
+    });
     const threads = messages
-      .map((message: Any) => this.normalizeMicrosoftGraphMessage(accountId, address, message))
+      .map((message: Any) =>
+        this.normalizeMicrosoftGraphMessage(accountId, address, message, {
+          localInboxHidden: false,
+        }),
+      )
       .filter((thread: NormalizedThreadInput | null): thread is NormalizedThreadInput => Boolean(thread));
 
     const classificationCandidates: string[] = [];
@@ -7437,7 +7591,12 @@ export class MailboxService {
     const classificationValues = keepExistingClassification || preserveBackfillState ? existing : null;
     const shouldClassify = !existing || existing.classification_state !== "classified";
     const preserveLocalInboxHidden =
+      thread.localInboxHidden === undefined &&
       existing?.local_inbox_hidden === 1 && thread.lastMessageAt <= existing.last_message_at;
+    const nextLocalInboxHidden =
+      thread.localInboxHidden === undefined
+        ? preserveLocalInboxHidden ? 1 : 0
+        : thread.localInboxHidden ? 1 : 0;
     const localMessageRows = this.db
       .prepare("SELECT id, is_unread FROM mailbox_messages WHERE thread_id = ?")
       .all(thread.id) as Array<{ id: string; is_unread: number }>;
@@ -7534,7 +7693,7 @@ export class MailboxService {
         classificationValues?.stale_followup ?? (thread.staleFollowup ? 1 : 0),
         classificationValues?.cleanup_candidate ?? (thread.cleanupCandidate ? 1 : 0),
         nextHandled,
-        preserveLocalInboxHidden ? 1 : 0,
+        nextLocalInboxHidden,
         nextUnreadCount,
         thread.messages.length,
         thread.lastMessageAt,
@@ -7884,27 +8043,10 @@ export class MailboxService {
 
   private chooseMailboxClassifierModel(): { providerType: string; modelKey: string; modelId: string } | null {
     try {
-      let selection = LLMProviderFactory.resolveTaskModelSelection(undefined, {
+      const selection = LLMProviderFactory.resolveTaskModelSelection(undefined, {
         forceProfile: "cheap",
         allowProfileRouting: true,
       });
-      if (selection.providerType === "openai" && selection.modelSource === "provider_default") {
-        const settings = LLMProviderFactory.loadSettings();
-        if (settings.openai?.authMethod === "oauth") {
-          selection = LLMProviderFactory.resolveTaskModelSelection(
-            {
-              providerType: "openai",
-              modelKey: "gpt-5.4-mini",
-              llmProfile: "cheap",
-            },
-            {
-              forceProfile: "cheap",
-              allowProviderOverride: true,
-              allowModelOverride: true,
-            },
-          );
-        }
-      }
       return {
         providerType: selection.providerType,
         modelKey: selection.modelKey,
@@ -8002,7 +8144,16 @@ export class MailboxService {
       return mailboxClassificationFallback(snapshot);
     }
 
-    const provider = LLMProviderFactory.createProvider();
+    mailboxLogger.info("Mailbox classifier model selected", {
+      providerType: modelSelection.providerType,
+      modelKey: modelSelection.modelKey,
+      modelId: modelSelection.modelId,
+    });
+
+    const provider = LLMProviderFactory.createProvider({
+      type: modelSelection.providerType as LLMProviderType,
+      model: modelSelection.modelId,
+    });
     const workspaceId =
       this.resolveThreadWorkspaceId(thread.accountId) ||
       this.resolveDefaultWorkspaceId();
@@ -9220,6 +9371,7 @@ export class MailboxService {
       await this.microsoftGraphRequest(this.resolveMicrosoftGraphChannelId(), {
         method: "POST",
         path: `/me/messages/${encodeURIComponent(latestMessage.providerMessageId)}/move`,
+        scopes: MICROSOFT_GRAPH_READWRITE_SCOPES,
         body: { destinationId: archiveFolder.providerFolderId },
       });
     } else {
@@ -9289,6 +9441,7 @@ export class MailboxService {
       await this.microsoftGraphRequest(this.resolveMicrosoftGraphChannelId(), {
         method: "DELETE",
         path: `/me/messages/${encodeURIComponent(latestMessage.providerMessageId)}`,
+        scopes: MICROSOFT_GRAPH_READWRITE_SCOPES,
       });
     } else {
       throw new Error("Trash is not supported for the current IMAP adapter.");
@@ -9689,6 +9842,7 @@ export class MailboxService {
       await this.microsoftGraphRequest(this.resolveMicrosoftGraphChannelId(), {
         method: "POST",
         path: `/me/messages/${encodeURIComponent(message.providerMessageId)}/move`,
+        scopes: MICROSOFT_GRAPH_READWRITE_SCOPES,
         body: { destinationId: target },
       });
     } else {
@@ -10099,7 +10253,7 @@ export class MailboxService {
 
   private async getMicrosoftGraphAccessToken(
     channelId: string,
-    requiredScopes: readonly string[] = MICROSOFT_GRAPH_FULL_SCOPES,
+    requiredScopes: readonly string[] = MICROSOFT_GRAPH_READWRITE_SCOPES,
   ): Promise<string> {
     const channel = this.channelRepo.findById(channelId);
     if (!channel || channel.type !== "email") {
@@ -10111,8 +10265,9 @@ export class MailboxService {
       throw new Error("Email channel is not configured for Microsoft Outlook OAuth");
     }
 
-    const accessToken = asString(config.microsoftGraphAccessToken);
-    const tokenExpiresAt = asNumber(config.microsoftGraphTokenExpiresAt);
+    const accessToken = asString(config.microsoftGraphAccessToken) || asString(config.accessToken);
+    const tokenExpiresAt =
+      asNumber(config.microsoftGraphTokenExpiresAt) ?? asNumber(config.tokenExpiresAt);
     const tokenScopes = Array.isArray(config.microsoftGraphTokenScopes)
       ? (config.microsoftGraphTokenScopes as string[])
       : Array.isArray(config.scopes)
@@ -10129,6 +10284,13 @@ export class MailboxService {
 
     const oauthClientId = asString(config.oauthClientId);
     const refreshToken = asString(config.refreshToken);
+    if (
+      accessToken &&
+      (!tokenExpiresAt || now < tokenExpiresAt - 2 * 60 * 1000) &&
+      !refreshToken
+    ) {
+      return accessToken;
+    }
     if (!oauthClientId || !refreshToken) {
       throw new Error("Reconnect the Outlook email channel so CoWork can sync Outlook read state.");
     }
@@ -10140,7 +10302,7 @@ export class MailboxService {
       tenant: asString(config.oauthTenant) || MICROSOFT_EMAIL_DEFAULT_TENANT,
       scopes: [...requiredScopes],
     });
-    const refreshedScopes = refreshed.scopes || [...requiredScopes];
+    const refreshedScopes = normalizeMicrosoftEmailReadScopes(refreshed.scopes || requiredScopes);
 
     const nextConfig = {
       ...config,
@@ -10148,7 +10310,9 @@ export class MailboxService {
       microsoftGraphTokenExpiresAt: refreshed.expiresIn ? Date.now() + refreshed.expiresIn * 1000 : tokenExpiresAt,
       microsoftGraphTokenScopes: refreshedScopes,
       refreshToken: refreshed.refreshToken || refreshToken,
-      scopes: refreshed.scopes || (config.scopes as string[] | undefined),
+      scopes: normalizeMicrosoftEmailReadScopes(
+        refreshed.scopes || (config.scopes as string[] | undefined),
+      ),
     };
     this.channelRepo.update(channelId, { config: nextConfig });
     return refreshed.accessToken;
@@ -10195,7 +10359,9 @@ export class MailboxService {
       accessToken: refreshed.accessToken,
       refreshToken: refreshed.refreshToken || refreshToken,
       tokenExpiresAt: refreshed.expiresIn ? Date.now() + refreshed.expiresIn * 1000 : tokenExpiresAt,
-      scopes: refreshed.scopes || (config.scopes as string[] | undefined),
+      scopes: normalizeMicrosoftEmailReadScopes(
+        refreshed.scopes || (config.scopes as string[] | undefined),
+      ),
     };
     this.channelRepo.update(channelId, { config: nextConfig });
     return refreshed.accessToken;
@@ -10299,7 +10465,7 @@ export class MailboxService {
       { role: "spam", name: "Spam" },
     ];
     const now = Date.now();
-    for (const account of accounts) {
+    for (const account of this.filterVisibleMailboxAccountRows(accounts)) {
       for (const folder of standard) {
         if (existingKeys.has(`${account.id}:${folder.role}`)) continue;
         synthetic.push({
@@ -10343,7 +10509,7 @@ export class MailboxService {
     const now = Date.now();
     return [
       ...identities,
-      ...accounts
+      ...this.filterVisibleMailboxAccountRows(accounts)
         .filter((account) => !existingAccounts.has(account.id))
         .map((account) => ({
           id: `${account.id}:default`,
@@ -10649,6 +10815,7 @@ export class MailboxService {
       await this.microsoftGraphRequest(this.resolveMicrosoftGraphChannelId(), {
         method: "POST",
         path: `/me/messages/${encodeURIComponent(graphDraftId)}/send`,
+        scopes: MICROSOFT_GRAPH_SEND_SCOPES,
       });
       return { providerDraftId: graphDraftId, providerMessageId: graphDraftId };
     }
@@ -10680,6 +10847,7 @@ export class MailboxService {
     return this.microsoftGraphRequest(this.resolveMicrosoftGraphChannelId(), {
       method: "POST",
       path: "/me/messages",
+      scopes: MICROSOFT_GRAPH_SEND_SCOPES,
       body: {
         subject: draft.subject,
         body: {
@@ -10924,6 +11092,7 @@ export class MailboxService {
     const result = await this.microsoftGraphRequest(channelId, {
       method: "GET",
       path: "/me/mailFolders",
+      scopes: MICROSOFT_GRAPH_READWRITE_SCOPES,
       query: { $top: 100 },
     });
     const folders = Array.isArray(result?.value) ? result.value : [];
