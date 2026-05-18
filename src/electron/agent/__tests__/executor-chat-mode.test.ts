@@ -175,6 +175,9 @@ describe("TaskExecutor chat mode", () => {
     };
 
     expect((TaskExecutor as Any).prototype.isExplicitChatExecutionMode.call(executor)).toBe(false);
+    expect(
+      (TaskExecutor as Any).prototype.shouldHandleInitialPromptAsCompanion.call(executor, "hello"),
+    ).toBe(true);
 
     executor.shouldEmitAnswerFirst = vi.fn().mockReturnValue(true);
     executor.hasDirectAnswerReady = vi.fn().mockReturnValue(true);
@@ -261,6 +264,32 @@ describe("TaskExecutor chat mode", () => {
     expect((TaskExecutor as Any).prototype.buildFollowUpResultSummary.call(executor)).toBe(
       "Goal active.\n\nObjective: Track release blockers",
     );
+  });
+
+  it("does not route inferred chat live-lookup prompts through companion mode", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+
+    executor.task = {
+      id: "task-inferred-chat-live",
+      title: "Premier League fixtures",
+      prompt: "please tell me which football clubs have games tomorrow in premier league",
+      userPrompt: "please tell me which football clubs have games tomorrow in premier league",
+      rawPrompt: "please tell me which football clubs have games tomorrow in premier league",
+      createdAt: Date.now(),
+      agentConfig: {
+        executionMode: "execute",
+        executionModeSource: "strategy",
+        conversationMode: "chat",
+        taskIntent: "chat",
+      },
+    };
+
+    expect(
+      (TaskExecutor as Any).prototype.shouldHandleInitialPromptAsCompanion.call(
+        executor,
+        "please tell me which football clubs have games tomorrow in premier league",
+      ),
+    ).toBe(false);
   });
 
   it("only exposes the last non-verification step as an assistant bubble", () => {
