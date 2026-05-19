@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { TaskExecutor } from "../executor";
-import type { IntentRoute } from "../strategy/IntentRouter";
 import { TaskStrategyService } from "../strategy/TaskStrategyService";
 import type { TaskStrategySnapshot } from "../strategy/TaskStrategySnapshot";
+import { makeRoute } from "../strategy/__tests__/task-strategy-test-fixtures";
 
 vi.mock("electron", () => ({
   app: {
@@ -37,20 +37,9 @@ function createExecutorWithSnapshot(snapshot?: Partial<TaskStrategySnapshot>) {
   return executor;
 }
 
-function makeRoute(overrides: Partial<IntentRoute> = {}): IntentRoute {
-  return {
-    intent: "execution",
-    confidence: 0.8,
-    conversationMode: "task",
-    answerFirst: false,
-    signals: [],
-    complexity: "low",
-    domain: "code",
-    ...overrides,
-  };
-}
-
 describe("TaskExecutor routing state machine gates", () => {
+  // These assertions intentionally call private routing gates: the public executor
+  // flow is too expensive for this state-machine matrix.
   it("uses terminal quick-answer snapshots for answer-first LLM calls", () => {
     const executor = createExecutorWithSnapshot({
       directResponseMode: "terminal_quick_answer",
@@ -143,17 +132,17 @@ describe("agent loop routing matrix", () => {
     },
     {
       name: "simple image generation",
-      route: makeRoute({ intent: "execution", domain: "creative", signals: ["image-creation-intent"] }),
+      route: makeRoute({ intent: "execution", domain: "media", signals: ["image-creation-intent"] }),
       title: "Create image",
       prompt: "Create an image of a snow leopard wearing a small backpack.",
-      expected: { taskIntent: "execution", executionMode: "execute", taskDomain: "creative" },
+      expected: { taskIntent: "execution", executionMode: "execute", taskDomain: "media" },
     },
     {
       name: "document artifact task",
-      route: makeRoute({ intent: "execution", domain: "document", signals: ["artifact-creation-intent"] }),
+      route: makeRoute({ intent: "execution", domain: "writing", signals: ["artifact-creation-intent"] }),
       title: "Create PDF",
       prompt: "Create a PDF report from the attached notes and save it in the workspace.",
-      expected: { taskIntent: "execution", executionMode: "execute", taskDomain: "document" },
+      expected: { taskIntent: "execution", executionMode: "execute", taskDomain: "writing" },
     },
     {
       name: "code execution task",

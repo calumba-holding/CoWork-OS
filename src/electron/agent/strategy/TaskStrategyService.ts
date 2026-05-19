@@ -416,8 +416,7 @@ export class TaskStrategyService {
     strategy: DerivedTaskStrategy,
   ): AgentConfig {
     const next: AgentConfig = existing ? { ...existing } : {};
-    (next as AgentConfig & { taskStrategySnapshot?: TaskStrategySnapshot }).taskStrategySnapshot =
-      strategy.snapshot;
+    next.taskStrategySnapshot = strategy.snapshot;
     const existingExecutionMode = existing?.executionMode;
     const inferredExistingExecutionModeSource =
       existing?.executionModeSource ||

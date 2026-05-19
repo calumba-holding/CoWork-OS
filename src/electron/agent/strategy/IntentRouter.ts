@@ -1,15 +1,6 @@
-import { ConversationMode, TaskDomain } from "../../../shared/types";
+import type { ConversationMode, TaskDomain, TaskStrategyIntent } from "../../../shared/types";
 
-export type RoutedIntent =
-  | "chat"
-  | "advice"
-  | "planning"
-  | "execution"
-  | "mixed"
-  | "thinking"
-  | "workflow"
-  | "deep_work"
-  | "redirect";
+export type RoutedIntent = TaskStrategyIntent;
 
 export type TaskComplexity = "low" | "medium" | "high";
 

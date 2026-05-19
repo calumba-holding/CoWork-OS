@@ -22093,9 +22093,9 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private getTaskStrategySnapshot(): TaskStrategySnapshot | undefined {
-    const snapshot = (this.task.agentConfig as Any)?.taskStrategySnapshot;
+    const snapshot = this.task.agentConfig?.taskStrategySnapshot;
     if (!snapshot || typeof snapshot !== "object") return undefined;
-    return snapshot as TaskStrategySnapshot;
+    return snapshot;
   }
 
   private hasDirectAnswerReady(): boolean {

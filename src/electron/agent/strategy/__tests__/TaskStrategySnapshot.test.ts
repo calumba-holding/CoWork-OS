@@ -1,19 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { IntentRoute } from "../IntentRouter";
 import { TaskStrategyService } from "../TaskStrategyService";
-
-function makeRoute(overrides: Partial<IntentRoute> = {}): IntentRoute {
-  return {
-    intent: "execution",
-    confidence: 0.8,
-    conversationMode: "task",
-    answerFirst: false,
-    signals: [],
-    complexity: "low",
-    domain: "code",
-    ...overrides,
-  };
-}
+import { makeRoute } from "./task-strategy-test-fixtures";
 
 describe("TaskStrategySnapshot", () => {
   it("classifies chat and thinking as companion direct responses", () => {
@@ -61,9 +48,9 @@ describe("TaskStrategySnapshot", () => {
 
   it("persists the snapshot onto agent config", () => {
     const strategy = TaskStrategyService.derive(makeRoute({ intent: "planning", answerFirst: true }));
-    const config = TaskStrategyService.applyToAgentConfig({}, strategy) as Any;
+    const config = TaskStrategyService.applyToAgentConfig({}, strategy);
 
     expect(config.taskStrategySnapshot).toEqual(strategy.snapshot);
-    expect(config.taskStrategySnapshot.directResponseMode).toBe("terminal_quick_answer");
+    expect(config.taskStrategySnapshot?.directResponseMode).toBe("terminal_quick_answer");
   });
 });

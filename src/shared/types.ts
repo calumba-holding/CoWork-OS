@@ -1953,6 +1953,51 @@ export type ToolDecision = "allow" | "deny" | "ask";
 export type LlmProfile = "strong" | "cheap";
 export type ReviewPolicy = "off" | "balanced" | "strict";
 
+export type TaskStrategyIntent =
+  | "chat"
+  | "advice"
+  | "planning"
+  | "execution"
+  | "mixed"
+  | "thinking"
+  | "workflow"
+  | "deep_work"
+  | "redirect";
+
+export type DirectResponseMode =
+  | "none"
+  | "companion"
+  | "terminal_quick_answer"
+  | "brief_status_then_execute";
+
+export type PreflightGate =
+  | "preflight_framing"
+  | "workspace_selection"
+  | "artifact_presence";
+
+export type WorkflowMode = "none" | "workflow" | "deep_work";
+
+export interface StrategyOverride {
+  field: string;
+  from: unknown;
+  to: unknown;
+  reason: string;
+  phase: "daemon" | "startup" | "pre_planning" | "step";
+}
+
+export interface TaskStrategySnapshot {
+  taskIntent: TaskStrategyIntent;
+  conversationMode: ConversationMode;
+  executionMode: ExecutionMode;
+  taskDomain: TaskDomain;
+  directResponseMode: DirectResponseMode;
+  preflightGates: PreflightGate[];
+  workflowMode: WorkflowMode;
+  llmProfileHint?: LlmProfile;
+  confidence: number;
+  overrides: StrategyOverride[];
+}
+
 /**
  * Post-task repository entropy sweep: read-only audit for stale docs, contradictions, dead-code hints.
  * Defaults follow reviewPolicy when unset (see resolveEntropySweepPolicy).
@@ -2178,6 +2223,8 @@ export interface AgentConfig {
   stepDecompositionPolicy?: "off" | "balanced" | "strict";
   /** Whether to emit a pre-flight problem framing before execution (set by strategy service) */
   preflightRequired?: boolean;
+  /** Canonical routing decision snapshot produced by TaskStrategyService. */
+  taskStrategySnapshot?: TaskStrategySnapshot;
   /** Enable deep work mode: long-running autonomous execution with research-retry, journaling, auto-report */
   deepWorkMode?: boolean;
   /** Persistent `/goal` lifecycle metadata for long-running task objectives. */

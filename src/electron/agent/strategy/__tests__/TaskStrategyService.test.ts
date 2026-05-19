@@ -1,19 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { IntentRoute } from "../IntentRouter";
 import { TaskStrategyService } from "../TaskStrategyService";
-
-function makeRoute(overrides: Partial<IntentRoute> = {}): IntentRoute {
-  return {
-    intent: "execution",
-    confidence: 0.8,
-    conversationMode: "task",
-    answerFirst: false,
-    signals: [],
-    complexity: "low",
-    domain: "code",
-    ...overrides,
-  };
-}
+import { makeRoute } from "./task-strategy-test-fixtures";
 
 describe("TaskStrategyService deriveLlmProfile", () => {
   it("returns strong for planning intent", () => {
@@ -49,7 +36,7 @@ describe("TaskStrategyService deriveLlmProfile", () => {
 
   it("keeps simple image generation to one quality pass", () => {
     const strategy = TaskStrategyService.derive(
-      makeRoute({ intent: "execution", signals: ["image-creation-intent"], domain: "creative" }),
+      makeRoute({ intent: "execution", signals: ["image-creation-intent"], domain: "media" }),
       undefined,
       {
         title: "Create image",
@@ -62,7 +49,7 @@ describe("TaskStrategyService deriveLlmProfile", () => {
 
   it("keeps infographic image generation to one quality pass", () => {
     const strategy = TaskStrategyService.derive(
-      makeRoute({ intent: "execution", signals: ["image-creation-intent"], domain: "creative" }),
+      makeRoute({ intent: "execution", signals: ["image-creation-intent"], domain: "media" }),
       undefined,
       {
         title: "Create infographic",
@@ -75,7 +62,7 @@ describe("TaskStrategyService deriveLlmProfile", () => {
 
   it("keeps app avatar image generation to one quality pass", () => {
     const strategy = TaskStrategyService.derive(
-      makeRoute({ intent: "execution", signals: ["image-creation-intent"], domain: "creative" }),
+      makeRoute({ intent: "execution", signals: ["image-creation-intent"], domain: "media" }),
       undefined,
       {
         title: "Create avatar",
@@ -88,7 +75,7 @@ describe("TaskStrategyService deriveLlmProfile", () => {
 
   it("keeps grounded infographic image generation to one quality pass", () => {
     const strategy = TaskStrategyService.derive(
-      makeRoute({ intent: "execution", signals: ["image-creation-intent"], domain: "creative" }),
+      makeRoute({ intent: "execution", signals: ["image-creation-intent"], domain: "media" }),
       undefined,
       {
         title: "Create infographic",
@@ -144,7 +131,7 @@ describe("TaskStrategyService decoratePrompt", () => {
     const route = makeRoute({
       intent: "execution",
       signals: ["image-creation-intent"],
-      domain: "creative",
+      domain: "media",
     });
     const strategy = TaskStrategyService.derive(route, undefined, {
       title: "Create image",
@@ -166,7 +153,7 @@ describe("TaskStrategyService decoratePrompt", () => {
     const route = makeRoute({
       intent: "execution",
       signals: ["image-creation-intent"],
-      domain: "creative",
+      domain: "media",
     });
     const strategy = TaskStrategyService.derive(route, undefined, {
       title: "Create infographic",
@@ -194,7 +181,7 @@ image_generation_contract:
     const route = makeRoute({
       intent: "execution",
       signals: ["image-creation-intent"],
-      domain: "creative",
+      domain: "media",
     });
     const strategy = TaskStrategyService.derive(route, undefined, {
       title: "Create avatar",
@@ -209,7 +196,7 @@ image_generation_contract:
     const route = makeRoute({
       intent: "execution",
       signals: ["image-creation-intent"],
-      domain: "creative",
+      domain: "media",
     });
     const strategy = TaskStrategyService.derive(route, undefined, {
       title: "Create infographic",
