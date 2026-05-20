@@ -9,6 +9,13 @@ import {
 } from "../../../shared/google-workspace";
 import { startMicrosoftEmailOAuth } from "../../utils/microsoft-email-oauth";
 
+function sanitizeOAuthError(text: string): string {
+  return text
+    .replace(/("(?:client_secret|code|access_token|refresh_token|code_verifier)":\s*")([^"]+)(")/gi, "$1[REDACTED]$3")
+    .replace(/[?&](code|client_secret|token)=[^&\s"]+/gi, (m, key) => `${m[0]}${key}=[REDACTED]`)
+    .slice(0, 500);
+}
+
 export type ConnectorOAuthProvider =
   | "salesforce"
   | "jira"
@@ -289,7 +296,7 @@ async function startSalesforceOAuth(request: ConnectorOAuthRequest): Promise<Con
 
   if (!tokenResponse.ok) {
     const text = await tokenResponse.text();
-    throw new Error(`Salesforce OAuth failed: ${text}`);
+    throw new Error(`Salesforce OAuth failed: ${sanitizeOAuthError(text)}`);
   }
 
   const tokenData = (await tokenResponse.json()) as {
@@ -359,7 +366,7 @@ async function startJiraOAuth(request: ConnectorOAuthRequest): Promise<Connector
 
   if (!tokenResponse.ok) {
     const text = await tokenResponse.text();
-    throw new Error(`Jira OAuth failed: ${text}`);
+    throw new Error(`Jira OAuth failed: ${sanitizeOAuthError(text)}`);
   }
 
   const tokenData = (await tokenResponse.json()) as {
@@ -448,7 +455,7 @@ async function startHubSpotOAuth(request: ConnectorOAuthRequest): Promise<Connec
 
   if (!tokenResponse.ok) {
     const text = await tokenResponse.text();
-    throw new Error(`HubSpot OAuth failed: ${text}`);
+    throw new Error(`HubSpot OAuth failed: ${sanitizeOAuthError(text)}`);
   }
 
   const tokenData = (await tokenResponse.json()) as {
@@ -512,7 +519,7 @@ async function startZendeskOAuth(request: ConnectorOAuthRequest): Promise<Connec
 
   if (!tokenResponse.ok) {
     const text = await tokenResponse.text();
-    throw new Error(`Zendesk OAuth failed: ${text}`);
+    throw new Error(`Zendesk OAuth failed: ${sanitizeOAuthError(text)}`);
   }
 
   const tokenData = (await tokenResponse.json()) as {
@@ -597,7 +604,7 @@ async function startGoogleOAuth(request: ConnectorOAuthRequest): Promise<Connect
 
   if (!tokenResponse.ok) {
     const text = await tokenResponse.text();
-    throw new Error(`Google OAuth failed: ${text}`);
+    throw new Error(`Google OAuth failed: ${sanitizeOAuthError(text)}`);
   }
 
   const tokenData = (await tokenResponse.json()) as {
@@ -674,7 +681,7 @@ async function startDocusignOAuth(request: ConnectorOAuthRequest): Promise<Conne
 
   if (!tokenResponse.ok) {
     const text = await tokenResponse.text();
-    throw new Error(`DocuSign OAuth failed: ${text}`);
+    throw new Error(`DocuSign OAuth failed: ${sanitizeOAuthError(text)}`);
   }
 
   const tokenData = (await tokenResponse.json()) as {
@@ -738,7 +745,7 @@ async function startOutreachOAuth(request: ConnectorOAuthRequest): Promise<Conne
 
   if (!tokenResponse.ok) {
     const text = await tokenResponse.text();
-    throw new Error(`Outreach OAuth failed: ${text}`);
+    throw new Error(`Outreach OAuth failed: ${sanitizeOAuthError(text)}`);
   }
 
   const tokenData = (await tokenResponse.json()) as {
@@ -803,7 +810,7 @@ async function startSlackOAuth(request: ConnectorOAuthRequest): Promise<Connecto
 
   if (!tokenResponse.ok) {
     const text = await tokenResponse.text();
-    throw new Error(`Slack OAuth failed: ${text}`);
+    throw new Error(`Slack OAuth failed: ${sanitizeOAuthError(text)}`);
   }
 
   const tokenData = (await tokenResponse.json()) as {
