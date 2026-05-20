@@ -65,6 +65,24 @@ describe("buildMessageSlashOptions", () => {
     ]);
   });
 
+  it("shows /review from the built-in shortcut catalog", () => {
+    const options = buildMessageSlashOptions({
+      query: "review",
+      includeOnboarding: false,
+      customSkills: [],
+      pluginSlashCommands: [],
+      limit: 20,
+    });
+
+    expect(options.map((option) => option.commandName)).toEqual(
+      expect.arrayContaining(["review"]),
+    );
+    expect(options.find((option) => option.commandName === "review")).toMatchObject({
+      kind: "app",
+      description: "Review local changes or a pull request in the current workspace.",
+    });
+  });
+
   it("hides a direct skill when a plugin alias owns the same visible token", () => {
     const options = buildMessageSlashOptions({
       query: "alias review",
