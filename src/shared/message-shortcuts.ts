@@ -7,7 +7,8 @@ export type MessageAppShortcutName =
   | "multitask"
   | "compact"
   | "doctor"
-  | "undo";
+  | "undo"
+  | "review";
 
 export type MessageAppShortcutAction =
   | "insert"
@@ -15,7 +16,8 @@ export type MessageAppShortcutAction =
   | "plan"
   | "cost"
   | "diagnostic"
-  | "safe-workflow";
+  | "safe-workflow"
+  | "review";
 
 export interface MessageAppShortcut {
   name: MessageAppShortcutName;
@@ -78,6 +80,12 @@ export const MESSAGE_APP_SHORTCUTS: MessageAppShortcut[] = [
     description: "Review the latest changes and prepare a safe undo plan.",
     icon: "↩️",
     action: "safe-workflow",
+  },
+  {
+    name: "review",
+    description: "Review local changes or a pull request in the current workspace.",
+    icon: "🔍",
+    action: "review",
   },
 ];
 
