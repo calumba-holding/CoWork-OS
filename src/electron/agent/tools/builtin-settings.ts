@@ -8,6 +8,9 @@ import * as fs from "fs";
 import * as path from "path";
 import { SecureSettingsRepository } from "../../database/SecureSettingsRepository";
 import { getUserDataDir } from "../../utils/user-data-dir";
+import { createLogger } from "../../utils/logger";
+
+const log = createLogger("BuiltinSettings");
 
 /**
  * Tool category configuration
@@ -154,6 +157,18 @@ const TOOL_CATEGORIES: Record<string, keyof BuiltinToolsSettings["categories"]> 
   onedrive_action: "webfetch",
   google_drive_action: "webfetch",
   gmail_action: "webfetch",
+  gmail_search_emails: "webfetch",
+  gmail_search_email_ids: "webfetch",
+  gmail_batch_read_email: "webfetch",
+  gmail_read_email_thread: "webfetch",
+  gmail_create_draft: "webfetch",
+  gmail_list_drafts: "webfetch",
+  gmail_update_draft: "webfetch",
+  gmail_send_draft: "webfetch",
+  gmail_send_email: "webfetch",
+  gmail_apply_labels_to_emails: "webfetch",
+  gmail_bulk_label_matching_emails: "webfetch",
+  gmail_forward_emails: "webfetch",
   mailbox_action: "webfetch",
   email_imap_unread: "webfetch",
   calendar_action: "webfetch",
@@ -294,8 +309,8 @@ export class BuiltinToolsSettingsManager {
         return;
       }
 
-      console.log(
-        "[BuiltinToolsSettings] Migrating settings from legacy JSON file to encrypted database...",
+      log.info(
+        "Migrating settings from legacy JSON file to encrypted database...",
       );
 
       // Create backup before migration
@@ -308,20 +323,20 @@ export class BuiltinToolsSettingsManager {
         const merged = this.mergeWithDefaults(settings);
 
         repository.save("builtintools", merged);
-        console.log("[BuiltinToolsSettings] Settings migrated to encrypted database");
+        log.info("Settings migrated to encrypted database");
 
         // Migration successful - delete backup and original
         fs.unlinkSync(backupPath);
         fs.unlinkSync(legacyPath);
-        console.log("[BuiltinToolsSettings] Migration complete, cleaned up legacy files");
+        log.info("Migration complete, cleaned up legacy files");
 
         this.migrationCompleted = true;
       } catch (migrationError) {
-        console.error("[BuiltinToolsSettings] Migration failed, backup preserved at:", backupPath);
+        log.error("Migration failed, backup preserved at:", backupPath);
         throw migrationError;
       }
     } catch (error) {
-      console.error("[BuiltinToolsSettings] Migration failed:", error);
+      log.error("Migration failed:", error);
     }
   }
 
@@ -346,7 +361,7 @@ export class BuiltinToolsSettingsManager {
         }
       }
     } catch (error) {
-      console.error("[BuiltinToolsSettings] Error loading settings:", error);
+      log.error("Error loading settings:", error);
     }
 
     // Deep clone to prevent mutation of DEFAULT_SETTINGS
@@ -367,9 +382,9 @@ export class BuiltinToolsSettingsManager {
       const repository = SecureSettingsRepository.getInstance();
       repository.save("builtintools", settings);
       this.cachedSettings = settings;
-      console.log("[BuiltinToolsSettings] Settings saved to encrypted database");
+      log.info("Settings saved to encrypted database");
     } catch (error) {
-      console.error("[BuiltinToolsSettings] Error saving settings:", error);
+      log.error("Error saving settings:", error);
       throw error;
     }
   }
