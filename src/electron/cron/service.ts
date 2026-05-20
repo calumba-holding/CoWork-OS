@@ -26,6 +26,9 @@ import type {
 import { loadCronStore, saveCronStore, resolveCronStorePath } from "./store";
 import { computeNextRunAtMs } from "./schedule";
 import { CronWebhookServer } from "./webhook";
+import { createLogger } from "../utils/logger";
+
+const cronLogger = createLogger("CronService");
 
 // Maximum timeout value to prevent overflow warnings (2^31 - 1 ms, ~24.8 days)
 const MAX_TIMEOUT_MS = 2147483647;
@@ -37,10 +40,10 @@ const DEFAULT_MAX_HISTORY_ENTRIES = 10;
 
 // Default logger
 const defaultLog = {
-  debug: (msg: string, data?: unknown) => console.log(`[Cron] ${msg}`, data ?? ""),
-  info: (msg: string, data?: unknown) => console.log(`[Cron] ${msg}`, data ?? ""),
-  warn: (msg: string, data?: unknown) => console.warn(`[Cron] ${msg}`, data ?? ""),
-  error: (msg: string, data?: unknown) => console.error(`[Cron] ${msg}`, data ?? ""),
+  debug: (msg: string, data?: unknown) => cronLogger.debug(msg, data ?? ""),
+  info: (msg: string, data?: unknown) => cronLogger.info(msg, data ?? ""),
+  warn: (msg: string, data?: unknown) => cronLogger.warn(msg, data ?? ""),
+  error: (msg: string, data?: unknown) => cronLogger.error(msg, data ?? ""),
 };
 
 interface CronServiceState {
@@ -55,6 +58,7 @@ interface CronServiceState {
       | "maxHistoryEntries"
       | "webhook"
       | "deliverToChannel"
+      | "sendTaskMessage"
       | "getTaskStatus"
       | "getTaskResultText"
       | "resolveTemplateVariables"
@@ -70,6 +74,7 @@ interface CronServiceState {
     webhook?: CronWebhookConfig;
     getTaskStatus?: CronServiceDeps["getTaskStatus"];
     getTaskResultText?: CronServiceDeps["getTaskResultText"];
+    sendTaskMessage?: CronServiceDeps["sendTaskMessage"];
     deliverToChannel?: CronServiceDeps["deliverToChannel"];
     resolveTemplateVariables?: CronServiceDeps["resolveTemplateVariables"];
     resolveWorkspaceContext?: CronServiceDeps["resolveWorkspaceContext"];
@@ -99,6 +104,7 @@ export class CronService {
         webhook: deps.webhook,
         getTaskStatus: deps.getTaskStatus,
         getTaskResultText: deps.getTaskResultText,
+        sendTaskMessage: deps.sendTaskMessage,
         deliverToChannel: deps.deliverToChannel,
         resolveTemplateVariables: deps.resolveTemplateVariables,
         resolveWorkspaceContext: deps.resolveWorkspaceContext,
@@ -308,6 +314,9 @@ export class CronService {
         workspaceId: input.workspaceId,
         taskPrompt: input.taskPrompt,
         taskTitle: input.taskTitle,
+        runMode: input.runMode,
+        targetTaskId: input.targetTaskId,
+        threadAutomation: input.threadAutomation,
         // Advanced options
         timeoutMs: input.timeoutMs,
         modelKey: input.modelKey,
@@ -376,6 +385,15 @@ export class CronService {
       if (patch.workspaceId !== undefined) job.workspaceId = patch.workspaceId;
       if (patch.taskPrompt !== undefined) job.taskPrompt = patch.taskPrompt;
       if (patch.taskTitle !== undefined) job.taskTitle = patch.taskTitle;
+      if (patch.runMode !== undefined) {
+        job.runMode = patch.runMode;
+        if (patch.runMode === "new_task") {
+          job.targetTaskId = undefined;
+          job.threadAutomation = undefined;
+        }
+      }
+      if (patch.targetTaskId !== undefined) job.targetTaskId = patch.targetTaskId;
+      if (patch.threadAutomation !== undefined) job.threadAutomation = patch.threadAutomation;
       // Apply patch - advanced options
       if (patch.timeoutMs !== undefined) job.timeoutMs = patch.timeoutMs;
       if (patch.modelKey !== undefined) job.modelKey = patch.modelKey;
@@ -567,6 +585,7 @@ export class CronService {
     let resultText: string | undefined;
     let workspaceContext: CronWorkspaceContext | null = null;
     let workspaceIdForRun = job.workspaceId;
+    let shouldPollTaskStatus = true;
 
     try {
       workspaceContext = await this.resolveWorkspaceContext(job, nowMs, "run");
@@ -585,33 +604,66 @@ export class CronService {
         workspaceContext,
       );
 
-      // Create a task with optional model override
-      const result = await deps.createTask({
-        title: job.taskTitle || `Scheduled: ${job.name}`,
-        prompt: renderedPrompt,
-        workspaceId: workspaceIdForRun,
-        modelKey: job.modelKey,
-        allowUserInput: job.allowUserInput ?? false,
-        agentConfig: {
-          ...job.taskAgentConfig,
-          // Only restrict run_command when shellAccess is explicitly set to false.
-          // undefined (legacy jobs) means unrestricted, preserving prior behavior.
-          ...(job.shellAccess === false
-            ? {
-                toolRestrictions: Array.from(
-                  new Set([...(job.taskAgentConfig?.toolRestrictions ?? []), "run_command"]),
-                ),
-              }
-            : {}),
-        },
-      });
+      const agentConfig = {
+        ...job.taskAgentConfig,
+        // Only restrict run_command when shellAccess is explicitly set to false.
+        // undefined (legacy jobs) means unrestricted, preserving prior behavior.
+        ...(job.shellAccess === false
+          ? {
+              toolRestrictions: Array.from(
+                new Set([...(job.taskAgentConfig?.toolRestrictions ?? []), "run_command"]),
+              ),
+            }
+          : {}),
+      };
 
-      taskId = result.id;
-      job.state.lastTaskId = taskId;
-      log.info(`Job ${job.name} created task ${taskId}`);
+      if (job.runMode === "thread_follow_up") {
+        shouldPollTaskStatus = false;
+        taskId = job.targetTaskId?.trim();
+        if (!taskId) {
+          status = "needs_user_action";
+          errorMsg = "Thread follow-up scheduled task is missing a target task";
+        } else if (!deps.sendTaskMessage) {
+          status = "needs_user_action";
+          errorMsg = "Thread follow-up execution is not available in this runtime";
+        } else {
+          if (deps.getTaskStatus) {
+            const target = await deps.getTaskStatus(taskId);
+            if (!target) {
+              status = "needs_user_action";
+              errorMsg = `Target task not found: ${taskId}`;
+            }
+          }
+
+          if (status === "ok") {
+            await deps.sendTaskMessage({
+              taskId,
+              message: renderedPrompt,
+              allowUserInput: job.allowUserInput ?? false,
+              agentConfig,
+            });
+            job.state.lastTaskId = taskId;
+            log.info(`Job ${job.name} sent scheduled follow-up to task ${taskId}`);
+          }
+        }
+      } else {
+        // Create a task with optional model override
+        const result = await deps.createTask({
+          title: job.taskTitle || `Scheduled: ${job.name}`,
+          prompt: renderedPrompt,
+          workspaceId: workspaceIdForRun,
+          modelKey: job.modelKey,
+          allowUserInput: job.allowUserInput ?? false,
+          agentConfig,
+        });
+
+        taskId = result.id;
+        job.state.lastTaskId = taskId;
+        log.info(`Job ${job.name} created task ${taskId}`);
+      }
 
       // If task status hooks are available, wait for completion and capture the final output.
-      if (deps.getTaskStatus) {
+      if (status === "ok" && shouldPollTaskStatus && taskId && deps.getTaskStatus) {
         const timeoutMs = Math.max(1, Math.floor(job.timeoutMs ?? deps.defaultTimeoutMs));
         const deadlineMs = deps.nowMs() + timeoutMs;
         const pollMs = 1500;
@@ -743,6 +795,7 @@ export class CronService {
       status,
       error: errorMsg,
       taskId,
+      runMode: job.runMode ?? "new_task",
       workspaceId: workspaceIdForRun,
       runWorkspacePath: workspaceContext?.runWorkspacePath,
       deliveryAttempts: 0,
@@ -1007,7 +1060,9 @@ export class CronService {
     }
 
     for (const [k, v] of Object.entries(vars)) {
-      rendered = rendered.split(`{{${k}}}`).join(v);
+      // Escape {{ in values to prevent re-interpolation of user-controlled content
+      const safeValue = v.replace(/\{\{/g, "{ {");
+      rendered = rendered.split(`{{${k}}}`).join(safeValue);
     }
 
     const hasEnabledChannelDelivery =
@@ -1039,6 +1094,24 @@ export class CronService {
         "",
         rendered,
       ].join("\n");
+    }
+
+    if (job.runMode === "thread_follow_up") {
+      const thread = job.threadAutomation;
+      rendered = [
+        "Scheduled thread wake:",
+        `- Job: ${job.name}`,
+        `- Target task ID: ${job.targetTaskId || thread?.sourceTaskId || "(missing)"}`,
+        thread?.sourceTaskTitle ? `- Source task: ${thread.sourceTaskTitle}` : null,
+        thread?.sourceLink ? `- Source link: ${thread.sourceLink}` : null,
+        prevRunAtMs ? `- Previous scheduled wake: ${new Date(prevRunAtMs).toISOString()}` : null,
+        thread?.wakeObjective ? `- Wake objective: ${thread.wakeObjective}` : null,
+        "- Continue this existing conversation. Use the prior task timeline as context and report only the useful update for this wake.",
+        "",
+        rendered,
+      ]
+        .filter((line): line is string => line !== null)
+        .join("\n");
     }
 
     return rendered;
