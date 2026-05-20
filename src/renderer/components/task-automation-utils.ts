@@ -10,6 +10,7 @@ import {
 import type { Task, Workspace } from "../../shared/types";
 
 export type TaskAutomationRunMode = "chat" | "local" | "worktree";
+export type TaskAutomationTargetMode = "new_task" | "thread_follow_up";
 export type TaskAutomationSchedulePreset =
   | "every30m"
   | "hourly"
@@ -153,11 +154,13 @@ export function buildTaskRoutineCreate({
   name,
   prompt,
   runMode,
+  targetMode = "new_task",
   triggerPreset,
   schedule,
   deeplink,
 }: BuildTaskRoutineCreateParams): TaskRoutineCreatePayload {
   const workspaceId = task.workspaceId || workspace?.id || "";
+  const effectiveTargetMode = runMode === "worktree" ? "new_task" : targetMode;
   const triggers: TaskRoutineCreatePayload["triggers"] =
     triggerPreset === "manual" || !schedule
       ? [{ type: "manual", enabled: true }]
@@ -180,6 +183,14 @@ export function buildTaskRoutineCreate({
         source: "task_session",
         sourceTaskId: task.id,
         sourceTaskTitle: task.title,
+        automationRunMode: effectiveTargetMode,
+        ...(effectiveTargetMode === "thread_follow_up"
+          ? {
+              runMode: "thread_follow_up",
+              targetTaskId: task.id,
+              threadAutomation: "true",
+            }
+          : {}),
         ...(task.sessionId ? { sourceSessionId: task.sessionId } : {}),
         ...(deeplink ? { sourceLink: deeplink } : {}),
       },
@@ -203,6 +214,7 @@ export interface BuildTaskAutomationCronJobCreateParams {
   name: string;
   prompt: string;
   runMode: TaskAutomationRunMode;
+  targetMode?: TaskAutomationTargetMode;
   schedule: TaskAutomationSchedule;
   deeplink: string;
 }
@@ -213,6 +225,7 @@ export interface BuildTaskRoutineCreateParams {
   name: string;
   prompt: string;
   runMode: TaskAutomationRunMode;
+  targetMode?: TaskAutomationTargetMode;
   triggerPreset: TaskRoutineTriggerPreset;
   schedule: TaskAutomationSchedule | null;
   deeplink: string;
@@ -224,10 +237,12 @@ export function buildTaskAutomationCronJobCreate({
   name,
   prompt,
   runMode,
+  targetMode = "new_task",
   schedule,
   deeplink,
 }: BuildTaskAutomationCronJobCreateParams) {
   const workspaceId = task.workspaceId || workspace?.id || "";
+  const effectiveTargetMode = runMode === "worktree" ? "new_task" : targetMode;
   return {
     name: name.trim(),
     description: `Created from task ${task.id}${deeplink ? ` (${deeplink})` : ""}`,
@@ -239,5 +254,17 @@ export function buildTaskAutomationCronJobCreate({
     workspaceId,
     taskTitle: task.title,
     taskPrompt: buildTaskAutomationPrompt(prompt, task, deeplink),
+    runMode: effectiveTargetMode,
+    targetTaskId: effectiveTargetMode === "thread_follow_up" ? task.id : undefined,
+    threadAutomation:
+      effectiveTargetMode === "thread_follow_up"
+        ? {
+            sourceTaskId: task.id,
+            sourceTaskTitle: task.title,
+            sourceLink: deeplink || undefined,
+            wakeObjective: prompt.trim(),
+            includeContextBrief: true,
+          }
+        : undefined,
   };
 }
