@@ -70,6 +70,12 @@ describeWithSqlite("DatabaseManager legacy_type migration", () => {
     expect(taskEventIndexes.map((index) => index.name)).toContain(
       "idx_task_events_task_legacy_type_timestamp",
     );
+    expect(taskEventIndexes.map((index) => index.name)).toContain(
+      "idx_task_events_task_order_expr",
+    );
+    expect(taskEventIndexes.map((index) => index.name)).toContain(
+      "idx_task_events_task_effective_type_order_expr",
+    );
 
     manager.close();
   });
