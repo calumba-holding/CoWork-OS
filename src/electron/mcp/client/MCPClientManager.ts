@@ -55,6 +55,10 @@ export class MCPClientManager extends EventEmitter {
   private isInitializing = false; // Flag to batch operations during startup
   private rebuildToolMapDebounceTimer: NodeJS.Timeout | null = null;
   private desiredTriggerResourceSubscriptions: Map<string, Set<string>> = new Map();
+  /** Per-server set of executor IDs that currently reference the connection */
+  private connectionRefCounts: Map<string, Set<string>> = new Map();
+  /** Server IDs that were connected during initial startup — these are never auto-disconnected */
+  private initialServerIds: Set<string> = new Set();
   private startupStats: { enabled: number; attempted: number; connected: number; failed: number } = {
     enabled: 0,
     attempted: 0,
@@ -145,6 +149,13 @@ export class MCPClientManager extends EventEmitter {
     this.isInitializing = false;
     this.initialized = true;
 
+    // Snapshot initial server IDs so they are never auto-disconnected by releaseForExecutor
+    this.initialServerIds = new Set(
+      Array.from(this.connections.entries())
+        .filter(([, conn]) => conn.getStatus().status === "connected")
+        .map(([id]) => id),
+    );
+
     // Rebuild tool map once after all connections are established
     this.rebuildToolMapImmediate();
 
@@ -152,6 +163,52 @@ export class MCPClientManager extends EventEmitter {
     MCPSettingsManager.endBatch();
 
     logger.info("Initialized");
+  }
+
+  /**
+   * Register that an executor is using a particular MCP server connection.
+   * Call this when a task executor starts using tools from a dynamically-connected server.
+   */
+  acquireForExecutor(executorId: string, serverId: string): void {
+    const normalizedExecutorId = String(executorId || "").trim();
+    const normalizedServerId = String(serverId || "").trim();
+    if (!normalizedExecutorId || !normalizedServerId) return;
+
+    let refs = this.connectionRefCounts.get(normalizedServerId);
+    if (!refs) {
+      refs = new Set();
+      this.connectionRefCounts.set(normalizedServerId, refs);
+    }
+    refs.add(normalizedExecutorId);
+  }
+
+  /**
+   * Release all MCP server references held by an executor.
+   * Servers that were connected at startup (initial servers) are never auto-disconnected.
+   * Dynamically-connected servers with no remaining references are disconnected to prevent leaks.
+   */
+  async releaseForExecutor(executorId: string): Promise<void> {
+    const normalizedExecutorId = String(executorId || "").trim();
+    if (!normalizedExecutorId) return;
+
+    const serversToDisconnect: string[] = [];
+    for (const [serverId, refs] of this.connectionRefCounts.entries()) {
+      refs.delete(normalizedExecutorId);
+      if (refs.size === 0) {
+        this.connectionRefCounts.delete(serverId);
+        if (!this.initialServerIds.has(serverId)) {
+          serversToDisconnect.push(serverId);
+        }
+      }
+    }
+
+    await Promise.all(
+      serversToDisconnect.map((serverId) =>
+        this.disconnectServer(serverId).catch((error) =>
+          logger.error(`Error releasing MCP server ${serverId}:`, error),
+        ),
+      ),
+    );
   }
 
   /**
