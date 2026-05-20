@@ -31,6 +31,84 @@ describe("RightPanel checklist rendering", () => {
     expect(markup).toContain("Dismiss");
   });
 
+  it("renders collaborative sub-agent totals in the right panel", () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(RightPanel, {
+        task: {
+          id: "task-1",
+          status: "completed",
+          title: "Collaborative review",
+          prompt: "Prompt",
+          agentConfig: { collaborativeMode: true },
+        } as Any,
+        workspace: null,
+        events: [] as Any,
+        childTasks: [
+          {
+            id: "child-1",
+            parentTaskId: "task-1",
+            agentType: "sub",
+            status: "completed",
+            terminalStatus: "partial_success",
+            title: "Bug and Regression Risk Review",
+            prompt: "Review bugs",
+            createdAt: 1000,
+            updatedAt: 3000,
+            completedAt: 3000,
+          },
+          {
+            id: "child-2",
+            parentTaskId: "task-1",
+            agentType: "sub",
+            status: "completed",
+            title: "Synthesis",
+            prompt: "Synthesize",
+            createdAt: 2000,
+            updatedAt: 5000,
+            completedAt: 5000,
+          },
+        ] as Any,
+        childEvents: [
+          {
+            id: "evt-1",
+            taskId: "child-1",
+            timestamp: 1500,
+            schemaVersion: 2,
+            type: "tool_call",
+            payload: { tool: "read_file" },
+          },
+          {
+            id: "evt-2",
+            taskId: "child-1",
+            timestamp: 2500,
+            schemaVersion: 2,
+            type: "llm_usage",
+            payload: { totals: { inputTokens: 1000, outputTokens: 250, cost: 0.012 } },
+          },
+          {
+            id: "evt-3",
+            taskId: "child-2",
+            timestamp: 4500,
+            schemaVersion: 2,
+            type: "llm_usage",
+            payload: { totals: { inputTokens: 500, outputTokens: 100, cost: 0.003 } },
+          },
+        ] as Any,
+      }),
+    );
+
+    expect(markup).toContain("Sub Agents");
+    expect(markup).toContain("2 background agents");
+    expect(markup).toContain("1 done");
+    expect(markup).toContain("1 warning");
+    expect(markup).toContain("Tools");
+    expect(markup).toContain("Tokens");
+    expect(markup).toContain("1.9K");
+    expect(markup).toContain("$0.015");
+    expect(markup).toContain("Bug and Regression Risk Review");
+    expect(markup).toContain("Needs review");
+  });
+
   it("renders the latest session checklist state and verification nudge", () => {
     const markup = renderToStaticMarkup(
       React.createElement(RightPanel, {
