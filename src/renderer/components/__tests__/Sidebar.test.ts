@@ -104,6 +104,39 @@ describe("Sidebar top-level destinations", () => {
     expect(markup).toContain("Mission Control");
   });
 
+  it("renders available app updates as a single Update button", () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(Sidebar, {
+        workspace: { id: "ws-1", name: "Workspace", path: "/workspace" } as Any,
+        tasks: [] as Any,
+        selectedTaskId: null,
+        updateInfo: {
+          available: true,
+          currentVersion: "0.5.45",
+          latestVersion: "0.5.46",
+          updateMode: "electron-updater",
+        } as Any,
+        onSelectTask: () => {},
+        onOpenHome: () => {},
+        onOpenIdeas: () => {},
+        onOpenInboxAgent: () => {},
+        onOpenAgents: () => {},
+        onOpenEverydayAgent: () => {},
+        onOpenHealth: () => {},
+        onNewSession: () => {},
+        onOpenSettings: () => {},
+        onOpenMissionControl: () => {},
+        onOpenDevices: () => {},
+        onTasksChanged: () => {},
+      }),
+    );
+
+    expect(markup).toMatch(/class="[^"]*\bupdate-banner\b[^"]*"/);
+    expect(markup).toContain(">Update</button>");
+    expect(markup).not.toContain("0.5.46");
+    expect(markup).not.toContain("Dismiss update notification");
+  });
+
   it("prioritizes the session title over time while a session is awaiting response", () => {
     const markup = renderToStaticMarkup(
       React.createElement(Sidebar, {
