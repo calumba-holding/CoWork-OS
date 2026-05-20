@@ -1,6 +1,6 @@
 # Operator Runtime Visibility
 
-Operator Runtime Visibility is the productized surface for the learning-loop, recall, shell, and router work that now ships in CoWork OS. The goal is not to add a second learning system. It is to make the existing memory, Dreaming, playbook, skill-promotion, and routing subsystems visible after every task, while keeping CoWork OS centered on its core surfaces: desktop control plane, channels, inbox, devices, and governed automation.
+Operator Runtime Visibility is the productized surface for the learning-loop, recall, shell, terminal, and router work that now ships in CoWork OS. The goal is not to add a second learning system. It is to make the existing memory, Dreaming, playbook, skill-promotion, shell, terminal, and routing subsystems visible after every task, while keeping CoWork OS centered on its core surfaces: desktop control plane, channels, inbox, devices, and governed automation.
 
 ## What users see
 
@@ -34,17 +34,19 @@ Recall now behaves like one search surface instead of several separate searches.
 
 Results are normalized into one envelope with source type, object id, timestamp, rank, and snippet. The same ranking and dedup logic powers both the UI and prompt/context injection so operator search and runtime recall stay aligned.
 
-### 3. Shell sessions keep operator state
+### 3. Shell and terminal sessions keep operator state
 
-Persistent shell sessions are now a first-class operator workflow:
+Persistent shell sessions and real terminal tabs are first-class operator workflows:
 
 - cwd, environment deltas, aliases, and session state are retained per task/workspace
 - commands can run in a long-lived session instead of starting from a fresh process every time
 - reset and new-session controls remain available
 - one-shot shell execution stays as the fallback path for commands that are incompatible or unsafe for persistent sessions
 - lifecycle events are auditable and recoverable
+- humans can open multiple xterm.js + node-pty terminal tabs in the workspace for direct interactive CLI work
+- terminal tabs support native shell editing, Tab completion, arrows, Ctrl+C, interactive prompts, resizing, and close controls
 
-This makes long-running terminal work feel like a real session instead of a chain of unrelated commands.
+This makes long-running terminal work feel like a real session instead of a chain of unrelated commands, and it keeps direct CLI operations inside the same super-app workspace as agent tasks, artifacts, browser testing, approvals, and memory.
 
 ### 4. Routing decisions are legible
 
@@ -97,6 +99,7 @@ Chronicle is part of this visibility story:
 ## Related docs
 
 - [Computer use](computer-use.md)
+- [Terminal Tabs](terminal-tabs.md)
 - [Chronicle](chronicle.md)
 - [Dreaming](dreaming.md)
 - [Features](features.md)
