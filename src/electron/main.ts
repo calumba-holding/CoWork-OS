@@ -1970,6 +1970,21 @@ if (!gotTheLock) {
           });
           return { id: task.id };
         },
+        sendTaskMessage: async (params) => {
+          const task = taskRepo.findById(params.taskId);
+          if (!task) {
+            throw new Error(`Target task not found: ${params.taskId}`);
+          }
+          return agentDaemon.sendMessage(params.taskId, params.message, undefined, undefined, {
+            agentConfigOverride:
+              params.agentConfig && Object.keys(params.agentConfig).length > 0
+                ? {
+                    ...params.agentConfig,
+                    allowUserInput: params.allowUserInput ?? params.agentConfig.allowUserInput,
+                  }
+                : undefined,
+          });
+        },
         resolveTemplateVariables: async ({
           job,
           runAtMs,
@@ -3045,6 +3060,16 @@ if (!gotTheLock) {
             });
             return { id: task.id };
           },
+          sendTaskMessage: async (params) => {
+            const taskRepoForTrigger = new TaskRepository(db);
+            const task = taskRepoForTrigger.findById(params.taskId);
+            if (!task) {
+              throw new Error(`Target task not found: ${params.taskId}`);
+            }
+            return agentDaemon.sendMessage(params.taskId, params.message, undefined, undefined, {
+              agentConfigOverride: params.agentConfig,
+            });
+          },
           deliverToChannel: async (params: {
             channelType: string;
             channelId: string;
@@ -3065,6 +3090,7 @@ if (!gotTheLock) {
               });
           },
           getDefaultWorkspaceId: () => "",
+          getActiveTaskCount: () => agentDaemon.getQueueStatus().runningTaskIds.length,
           log: (...args: unknown[]) => console.log("[EventTriggers]", ...args),
           onTriggerFired: (payload) => {
             MailboxAutomationRegistry.recordTriggerFire(payload);
@@ -3168,6 +3194,15 @@ if (!gotTheLock) {
             source: params.source,
           });
           return { id: task.id };
+        },
+        sendTaskMessage: async (params) => {
+          const task = routineTaskRepo.findById(params.taskId);
+          if (!task) {
+            throw new Error(`Target task not found: ${params.taskId}`);
+          }
+          return agentDaemon.sendMessage(params.taskId, params.message, undefined, undefined, {
+            agentConfigOverride: params.agentConfig,
+          });
         },
         createManagedSession: async (params) => {
           const agent = params.agentId
