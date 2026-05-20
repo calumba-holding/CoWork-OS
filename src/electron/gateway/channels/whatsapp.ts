@@ -51,7 +51,10 @@ import {
   isLikelyWhatsAppNaturalCommand,
   stripWhatsAppCommandPreamble,
 } from "../whatsapp-command-utils";
+import { notifyDetectedIntegrationAuthIssue } from "../../notifications/integration-auth";
+import { createLogger } from "../../utils/logger";
 
+const log = createLogger("WhatsApp");
 const WHATSAPP_USER_JID_RE = /^(\d+)(?::\d+)?@s\.whatsapp\.net$/i;
 const WHATSAPP_LID_JID_RE = /^(\d+)@lid$/i;
 
@@ -216,7 +219,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
     // In self-chat mode, disable read receipts by default
     if (this.config.selfChatMode && config.sendReadReceipts === undefined) {
       this.config.sendReadReceipts = false;
-      console.log("[WhatsApp] Self-chat mode enabled; defaulting sendReadReceipts to false.");
+      log.info("[WhatsApp] Self-chat mode enabled; defaulting sendReadReceipts to false.");
     }
 
     // Set auth directory
@@ -326,7 +329,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
           return;
         }
         const level = this.isTransientNetworkError(err) ? "warn" : "error";
-        console[level]("[WhatsApp] WebSocket error:", err.message);
+        log[level]("WebSocket error:", err.message);
         this.handleError(err, "websocket");
       });
 
@@ -335,13 +338,13 @@ export class WhatsAppAdapter implements ChannelAdapter {
         Promise.resolve(saveCreds()).catch((error: unknown) => {
           const err = error instanceof Error ? error : new Error(String(error));
           if (this.isCredentialStateError(err)) {
-            console.warn("[WhatsApp] Stored credentials are unreadable; clearing session and requiring re-authentication.");
-            void this.invalidateCredentials(
-              new Error("WhatsApp credentials became unreadable. Please re-authenticate."),
-            );
+            log.warn("[WhatsApp] Stored credentials are unreadable; clearing session and requiring re-authentication.");
+            const authError = new Error("WhatsApp credentials became unreadable. Please re-authenticate.");
+            void notifyDetectedIntegrationAuthIssue(authError);
+            void this.invalidateCredentials(authError);
             return;
           }
-          console.error("[WhatsApp] Failed to persist credentials:", err);
+          log.error("[WhatsApp] Failed to persist credentials:", err);
           this.handleError(err, "creds.update");
         });
       });
@@ -351,7 +354,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
         try {
           this.handleConnectionUpdate(update);
         } catch (error) {
-          console.error("Unhandled error in WhatsApp connection update handler:", error);
+          log.error("Unhandled error in WhatsApp connection update handler:", error);
           this.handleError(
             error instanceof Error ? error : new Error(String(error)),
             "connectionUpdate",
@@ -362,7 +365,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
       // Handle incoming messages
       this.sock.ev.on("messages.upsert", (upsert) => {
         this.handleMessagesUpsert(upsert).catch((error) => {
-          console.error("Unhandled error in WhatsApp message upsert handler:", error);
+          log.error("Unhandled error in WhatsApp message upsert handler:", error);
           this.handleError(
             error instanceof Error ? error : new Error(String(error)),
             "messagesUpsert",
@@ -409,14 +412,14 @@ export class WhatsAppAdapter implements ChannelAdapter {
     // Handle QR code for authentication
     if (qr) {
       this.currentQr = qr;
-      console.log("WhatsApp QR code received - scan with WhatsApp mobile app");
+      log.info("WhatsApp QR code received - scan with WhatsApp mobile app");
 
       // Notify QR handlers
       for (const handler of this.qrCodeHandlers) {
         try {
           handler(qr);
         } catch (e) {
-          console.error("Error in QR code handler:", e);
+          log.error("Error in QR code handler:", e);
         }
       }
     }
@@ -435,7 +438,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
       this._selfJid = this.sock?.user?.id;
       this._selfE164 = this._selfJid ? (this.jidToE164(this._selfJid) ?? undefined) : undefined;
 
-      console.log(
+      log.info(
         `WhatsApp connected as ${maskWhatsAppIdentity(this._selfE164 || this._selfJid)}`,
       );
       this.setStatus("connected");
@@ -463,21 +466,23 @@ export class WhatsAppAdapter implements ChannelAdapter {
       const statusCode = this.getStatusCode(lastDisconnect?.error);
 
       if (statusCode === DisconnectReason.loggedOut) {
-        console.error("WhatsApp session logged out");
-        this.setStatus("error", new Error("WhatsApp session logged out. Please re-authenticate."));
+        log.error("WhatsApp session logged out");
+        const authError = new Error("WhatsApp session logged out. Please re-authenticate.");
+        void notifyDetectedIntegrationAuthIssue(authError);
+        this.setStatus("error", authError);
         // Clear credentials on logout
         this.clearCredentials().catch(() => {});
       } else if (statusCode === DisconnectReason.restartRequired) {
-        console.log("WhatsApp restart required, reconnecting...");
+        log.info("WhatsApp restart required, reconnecting...");
         this.attemptReconnection().catch((error) => {
-          console.error("WhatsApp reconnection failed:", error);
+          log.error("WhatsApp reconnection failed:", error);
         });
       } else {
-        console.log(
+        log.info(
           `WhatsApp connection closed (status: ${statusCode}), attempting reconnection...`,
         );
         this.attemptReconnection().catch((error) => {
-          console.error("WhatsApp reconnection failed:", error);
+          log.error("WhatsApp reconnection failed:", error);
         });
       }
     }
@@ -496,7 +501,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
       try {
         await this.processInboundMessage(msg, upsert.type);
       } catch (error) {
-        console.error("Error processing WhatsApp message:", error);
+        log.error("Error processing WhatsApp message:", error);
         this.handleError(
           error instanceof Error ? error : new Error(String(error)),
           "messageProcessing",
@@ -548,7 +553,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
         } else {
           const now = Date.now();
           if (now - this.selfChatIgnoreLogAt > 30000) {
-            console.log(
+            log.info(
               `WhatsApp: Ignoring message from ${remoteJidNormalized} because self-chat mode is enabled. ` +
                 "Disable self-chat mode to accept messages from other numbers.",
             );
@@ -588,7 +593,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
     if (allowedNumbers.size > 0) {
       const senderNumber = senderE164?.replace(/[^0-9]/g, "");
       if (senderNumber && !allowedNumbers.has(senderNumber)) {
-        console.log(`WhatsApp: Ignoring message from unauthorized number: ${senderNumber}`);
+        log.info(`WhatsApp: Ignoring message from unauthorized number: ${senderNumber}`);
         return;
       }
     }
@@ -878,7 +883,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
           didAttachWithCaption = true;
           textToSend = "";
         } catch (error) {
-          console.error("Failed to send media attachment; sending fallback message only:", error);
+          log.error("Failed to send media attachment; sending fallback message only:", error);
         }
       }
     }
@@ -1072,7 +1077,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
         }
 
         const delayMs = this.calculateSendRetryDelay(attempt);
-        console.warn(
+        log.warn(
           `[WhatsApp] ${operationName} attempt ${attempt} failed, retrying in ${delayMs}ms`,
         );
         await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -1282,7 +1287,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
     // If self-chat was just enabled and read receipts weren't explicitly set, default to false.
     if (!prevSelfChat && this.config.selfChatMode && next.sendReadReceipts === undefined) {
       this.config.sendReadReceipts = false;
-      console.log("[WhatsApp] Self-chat mode enabled; defaulting sendReadReceipts to false.");
+      log.info("[WhatsApp] Self-chat mode enabled; defaulting sendReadReceipts to false.");
     }
 
     const nextDedupEnabled = this.config.deduplicationEnabled !== false;
@@ -1334,7 +1339,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
         }
       }
     } catch (error) {
-      console.error("Error clearing WhatsApp credentials:", error);
+      log.error("Error clearing WhatsApp credentials:", error);
     }
   }
 
@@ -1350,7 +1355,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
       try {
         await handler(message);
       } catch (error) {
-        console.error("Error in WhatsApp message handler:", error);
+        log.error("Error in WhatsApp message handler:", error);
         this.handleError(
           error instanceof Error ? error : new Error(String(error)),
           "messageHandler",
@@ -1367,7 +1372,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
       try {
         handler(error, context);
       } catch (e) {
-        console.error("Error in error handler:", e);
+        log.error("Error in error handler:", e);
       }
     }
   }
@@ -1381,7 +1386,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
       try {
         handler(status, error);
       } catch (e) {
-        console.error("Error in status handler:", e);
+        log.error("Error in status handler:", e);
       }
     }
   }
@@ -1399,8 +1404,10 @@ export class WhatsAppAdapter implements ChannelAdapter {
     const config = this.DEFAULT_BACKOFF;
 
     if (this.backoffAttempt >= config.maxAttempts) {
-      console.error(`WhatsApp: Max reconnection attempts (${config.maxAttempts}) reached`);
-      this.setStatus("error", new Error("Max reconnection attempts reached"));
+      log.error(`WhatsApp: Max reconnection attempts (${config.maxAttempts}) reached`);
+      const authError = new Error("WhatsApp max reconnection attempts reached. Open Settings > WhatsApp to reconnect or resync.");
+      void notifyDetectedIntegrationAuthIssue(authError);
+      this.setStatus("error", authError);
       return;
     }
 
@@ -1412,12 +1419,12 @@ export class WhatsAppAdapter implements ChannelAdapter {
     // If connection is flapping (repeated rapid disconnects), enforce a longer minimum delay
     if (this.isConnectionFlapping()) {
       delay = Math.max(delay, this.FLAP_BACKOFF_MS);
-      console.warn(
+      log.warn(
         `WhatsApp: Connection flapping detected (${this.recentDisconnects.length} disconnects in ${Math.round(this.FLAP_WINDOW_MS / 60000)}min), using ${Math.round(delay / 1000)}s backoff`,
       );
     }
 
-    console.log(
+    log.info(
       `WhatsApp: Reconnection attempt ${this.backoffAttempt}/${config.maxAttempts} in ${delay}ms`,
     );
 
@@ -1434,7 +1441,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
         await this.connect();
       } catch (error) {
         this.isReconnecting = false;
-        console.error("WhatsApp reconnection attempt failed:", error);
+        log.error("WhatsApp reconnection attempt failed:", error);
         await this.attemptReconnection();
       }
     }, delay);
@@ -1481,10 +1488,11 @@ export class WhatsAppAdapter implements ChannelAdapter {
       // Ignore close errors after a failed TLS handshake.
     }
     this.sock = null;
-    console.error(
+    log.error(
       "[WhatsApp] TLS certificate verification failed; pausing reconnect until certificate trust is fixed:",
       error.message,
     );
+    void notifyDetectedIntegrationAuthIssue(statusError);
     this.setStatus("error", statusError);
     this.handleError(statusError, context);
   }
@@ -1722,7 +1730,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
     try {
       const buffer = await this.bufferFromWhatsAppMedia(params.media, params.mediaType);
       if (!buffer.length || buffer.length > this.MAX_ATTACHMENT_BYTES) {
-        console.warn(
+        log.warn(
           "[WhatsApp] Attachment download skipped (size unacceptable):",
           params.defaultBaseName,
           buffer.length,
@@ -1749,7 +1757,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
         isVoiceNote: params.isVoiceNote,
       };
     } catch (error) {
-      console.error("[WhatsApp] Failed to download attachment:", error);
+      log.error("[WhatsApp] Failed to download attachment:", error);
       return null;
     }
   }
