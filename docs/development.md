@@ -153,6 +153,7 @@ Current bundle-splitting rules:
 - Do not import the `highlight.js` package root in renderer code. Use `highlight.js/lib/core` inside
   the lazy highlighting component and register only the language grammars the UI should support.
 - Prefer feature-level dynamic imports before adding Rollup `manualChunks`; manual chunks improve cache boundaries, but they do not remove code from startup if imports remain static.
+- Keep terminal tabs lazy-loaded. `TerminalTabsDock` imports xterm.js and its CSS, so it should stay behind the terminal-open path rather than becoming part of the startup bundle.
 
 The initial optimization reduced the renderer entry chunk from about `4,842 kB` minified (`1,267 kB` gzip) to about `1,259 kB` minified (`364 kB` gzip) in `npm run build:react`. Large feature code now appears as separate chunks such as `Settings`, `mermaid.core`, PDF, KaTeX, and chart/diagram chunks.
 
@@ -171,35 +172,76 @@ Use `npm run build:react` output as a budget check: the main renderer entry shou
 
 ## Task Automation UI
 
-Task view supports `... > Add automation...`, a renderer-side shortcut that creates a real cron scheduled task from the current task.
+Task view supports `... > Add automation...`, a renderer-side shortcut that creates a task-sourced routine from the current task. Schedule, API, and event triggers then compile to the existing cron, webhook, and event-trigger engines.
 
 Implementation contract:
 
 - The task title/three-dot menu lives in `src/renderer/components/MainContent.tsx`.
 - The modal is `TaskAutomationModal` in the same file so task-derived defaults stay local to task view.
-- Saving must call `window.electronAPI.addCronJob`; do not create a parallel automation store for this flow.
+- Saving must call `window.electronAPI.createRoutine` with `buildTaskRoutineCreate`; do not create a parallel automation store for this flow.
+- Default target mode is `Continue thread`, which stores the selected task as `targetTaskId` and compiles schedule triggers to cron jobs with `runMode: "thread_follow_up"`.
+- `New task` compiles schedule triggers to the normal `runMode: "new_task"` cron path.
+- API-triggered routines compile same-thread targets to webhook mappings with `action: "task_message"` and an explicit `targetTaskId`.
+- Event-triggered routines compile same-thread targets to event triggers with `runMode: "thread_follow_up"`; invalid thread targets must fail instead of silently creating a new task.
 - Default run mode is `Chat`, with `shellAccess: false`, `allowUserInput: false`, and no clarifying check-ins. Execute-mode tasks use hard-blocker-only human input by default; Plan/Debug can opt into structured `request_user_input`.
 - `Local` sets `shellAccess: true`.
-- `Worktree` should remain disabled until the cron creation payload can preserve a task worktree execution context.
+- `Worktree` must not be combined with `Continue thread`; the UI disables that path and lower-level worktree payloads force `New task`.
 - Saved prompts should include a source task title, task ID, and `cowork://tasks/<taskId>` deeplink so future runs remain traceable.
-- Template selection should fill name, prompt, and schedule only; templates are not routines or managed agents.
-- Scheduled-task observability belongs in `src/renderer/components/ScheduledTasksSettings.tsx`: use `listCronJobs`, `getCronRunHistory`, and `clearCronRunHistory` for run health, latest result, delivery status, and per-run task links. Do not duplicate scheduler history in the task automation modal.
+- Template selection should fill name, prompt, and schedule only; templates are not managed agents.
+- Routine observability belongs in the routines surface. Compiled scheduled-task observability belongs in `src/renderer/components/ScheduledTasksSettings.tsx`: use `listCronJobs`, `getCronRunHistory`, and `clearCronRunHistory` for run health, latest result, delivery status, target-thread/new-task labels, and per-run task links. Do not duplicate scheduler history in the task automation modal.
+- Automation-specific agent config must be passed as transient run override for same-thread follow-ups; it must not overwrite the persisted task agent config.
 
 Focused helpers exported from `MainContent.tsx` for tests:
 
 - `TASK_AUTOMATION_TEMPLATES`
 - `buildTaskAutomationSchedule`
 - `buildTaskAutomationPrompt`
+- `buildTaskRoutineCreate`
 - `buildTaskAutomationCronJobCreate`
 
 Validate changes with:
 
 ```bash
 npx vitest run src/renderer/components/__tests__/main-content-working-state.test.ts
+npx vitest run src/electron/agent/__tests__/executor-schedule-slash.test.ts src/electron/cron/__tests__/service.test.ts src/electron/routines/__tests__/service.test.ts src/electron/hooks/__tests__/server.test.ts src/electron/triggers/__tests__/EventTriggerService.test.ts
 npm run build:react
 ```
 
 See [Task Automations](task-automations.md) for the product concept and user-facing behavior.
+
+## Terminal Tabs Development
+
+Terminal tabs are real PTY-backed work surfaces, not a custom terminal emulator.
+
+Implementation landmarks:
+
+- `src/renderer/components/TerminalTabsDock.tsx`: xterm.js instances, tab controls, fit/resize, keyboard input forwarding, and output rendering
+- `src/renderer/components/terminal-tabs-dock.css`: terminal dock layout and xterm style isolation
+- `src/electron/terminal/TerminalPtyManager.ts`: `node-pty` lifecycle, replay buffers, cwd/status tracking, platform shell environment, resize, stop, and close
+- `src/electron/ipc/handlers.ts`: terminal tab IPC handlers
+- `src/electron/preload.ts`: renderer-safe terminal tab API
+- `src/shared/types.ts`: terminal tab channel and event contracts
+
+Design rules:
+
+- Do not reimplement shell editing, Tab completion, Ctrl+C, cursor movement, prompt rendering, or command history in React. Those belong to the shell inside the PTY.
+- Renderer input should be forwarded as raw xterm data to the PTY.
+- Output replay should happen only on first attach for a renderer listener; replaying on every input duplicates prompts and output.
+- Keep app typography out of xterm: reset letter spacing, word spacing, and transforms inside the terminal surface.
+- Keep `node-pty` native files unpacked from Electron ASAR.
+- On macOS, keep zsh prompt/cwd setup in generated startup files rather than writing setup commands into the visible terminal.
+- On Windows, validate through a real Windows build because modern systems use ConPTY and older systems can fall back to winpty.
+
+Focused validation:
+
+```bash
+npx oxlint src/electron/terminal/TerminalPtyManager.ts src/renderer/components/TerminalTabsDock.tsx
+npm run build:electron
+npm run build:react
+npm run type-check
+```
+
+Product behavior, platform details, and release QA are documented in [Terminal Tabs](terminal-tabs.md).
 
 ## Reliability Workflow (Local)
 
@@ -557,7 +599,7 @@ Implementation boundaries:
 - `src/shared/message-shortcuts.ts` owns the deterministic app command catalog and parser for `/schedule`, `/clear`, `/plan`, `/cost`, `/compact`, `/doctor`, and `/undo`.
 - `src/shared/multitask-command.ts` owns `/multitask [N] <task>` parsing because it is a task-creation command that strips its prefix before persistence and adds collaborative multitask task metadata.
 - `src/renderer/utils/message-slash-options.ts` owns picker option ordering, filtering, app-vs-skill display, optional/required parameter classification, invalid-token filtering, and keyboard selected-index clamping.
-- `src/renderer/components/MainContent.tsx` owns composer detection, selection behavior, slash-token insertion, app command task creation, legal workflow intake cards, and `/schedule` fresh-task precedence.
+- `src/renderer/components/MainContent.tsx` owns composer detection, selection behavior, slash-token insertion, app command task creation, legal workflow intake cards, and `/schedule` target selection for standalone tasks versus same-thread follow-ups.
 - `src/renderer/utils/legal-demand-intake.ts` owns Claude-for-Legal slash detection, demand-intake prefill/serialization, generic legal workflow context serialization, and the allow/deny filter for legal commands that should show matter-context UI.
 - `src/electron/agents/MultitaskLanePlanner.ts` plans `/multitask` lanes from explicit list items, LLM JSON output, or deterministic fallback lanes.
 - `src/renderer/App.tsx` owns the safe `/clear` task-view reset. `/clear` must not delete task history or switch workspaces.
