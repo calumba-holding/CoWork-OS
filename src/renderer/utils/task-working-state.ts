@@ -48,6 +48,10 @@ export function isTaskActivelyWorking(
 ): boolean {
   if (!task) return false;
 
+  if (task.status === "pending" && task.branchFromTaskId) {
+    return false;
+  }
+
   if (task.status === "executing" || task.status === "planning") {
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const event = events[i];
