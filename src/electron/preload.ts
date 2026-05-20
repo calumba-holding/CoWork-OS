@@ -13,6 +13,14 @@ import type {
 } from "../shared/onboarding";
 import type { SpreadsheetPreview } from "../shared/spreadsheet-preview";
 import type {
+  SpreadsheetApplyPatchesResult,
+  SpreadsheetOpenWorkbookResult,
+  SpreadsheetPatch,
+  SpreadsheetSaveWorkbookResult,
+  SpreadsheetViewportRequest,
+  SpreadsheetViewportResult,
+} from "../shared/spreadsheet-workbook";
+import type {
   DocumentPreview,
   EditableDocumentBlock,
 } from "../shared/document-preview";
@@ -126,6 +134,8 @@ import type {
   ChronicleResolvedContext,
   ShellSessionInfo,
   ShellSessionLifecycleEvent,
+  TerminalTabRunResult,
+  TerminalTabOutputEvent,
   LLMRoutingRuntimeState,
   SupervisorExchange,
   SupervisorExchangeEvent,
@@ -2004,6 +2014,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     workspacePath: string;
     preview: SpreadsheetPreview;
   }) => ipcRenderer.invoke(IPC_CHANNELS.FILE_UPDATE_SPREADSHEET, data) as Promise<FileViewerResult>,
+  openSpreadsheetWorkbook: (data: { filePath: string; workspacePath: string; workspaceId?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SPREADSHEET_OPEN_WORKBOOK, data) as Promise<SpreadsheetOpenWorkbookResult>,
+  getSpreadsheetViewport: (data: SpreadsheetViewportRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SPREADSHEET_GET_VIEWPORT, data) as Promise<SpreadsheetViewportResult>,
+  applySpreadsheetPatches: (data: { sessionId: string; patches: SpreadsheetPatch[] }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SPREADSHEET_APPLY_PATCHES, data) as Promise<SpreadsheetApplyPatchesResult>,
+  saveSpreadsheetWorkbook: (data: { sessionId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SPREADSHEET_SAVE_WORKBOOK, data) as Promise<SpreadsheetSaveWorkbookResult>,
+  closeSpreadsheetWorkbook: (data: { sessionId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SPREADSHEET_CLOSE_WORKBOOK, data) as Promise<{ success: boolean }>,
   updateDocumentFile: (data: {
     filePath: string;
     workspacePath: string;
@@ -4736,6 +4756,24 @@ export interface ElectronAPI {
     workspacePath: string;
     preview: SpreadsheetPreview;
   }) => Promise<FileViewerResult>;
+  openSpreadsheetWorkbook: (data: {
+    filePath: string;
+    workspacePath: string;
+    workspaceId?: string;
+  }) => Promise<SpreadsheetOpenWorkbookResult>;
+  getSpreadsheetViewport: (
+    data: SpreadsheetViewportRequest,
+  ) => Promise<SpreadsheetViewportResult>;
+  applySpreadsheetPatches: (data: {
+    sessionId: string;
+    patches: SpreadsheetPatch[];
+  }) => Promise<SpreadsheetApplyPatchesResult>;
+  saveSpreadsheetWorkbook: (data: {
+    sessionId: string;
+  }) => Promise<SpreadsheetSaveWorkbookResult>;
+  closeSpreadsheetWorkbook: (data: {
+    sessionId: string;
+  }) => Promise<{ success: boolean }>;
   updateDocumentFile: (data: {
     filePath: string;
     workspacePath: string;
@@ -5029,6 +5067,39 @@ export interface ElectronAPI {
     scope?: "task" | "workspace",
   ) => Promise<ShellSessionInfo | null>;
   onShellSessionEvent: (callback: (event: ShellSessionLifecycleEvent) => void) => () => void;
+  listTerminalTabs: (workspaceId: string) => Promise<ShellSessionInfo[]>;
+  createTerminalTab: (data: {
+    workspaceId: string;
+    title?: string;
+    cwd?: string;
+  }) => Promise<ShellSessionInfo>;
+  runTerminalTabCommand: (data: {
+    tabId: string;
+    workspaceId: string;
+    taskId: string;
+    command: string;
+    cwd?: string;
+  }) => Promise<TerminalTabRunResult>;
+  writeTerminalTabInput: (data: {
+    tabId: string;
+    workspaceId: string;
+    input: string;
+  }) => Promise<ShellSessionInfo>;
+  resizeTerminalTab: (data: {
+    tabId: string;
+    workspaceId: string;
+    cols: number;
+    rows: number;
+  }) => Promise<ShellSessionInfo>;
+  stopTerminalTab: (data: {
+    tabId: string;
+    workspaceId: string;
+  }) => Promise<ShellSessionInfo | null>;
+  closeTerminalTab: (data: {
+    tabId: string;
+    workspaceId: string;
+  }) => Promise<{ success: boolean }>;
+  onTerminalTabOutput: (callback: (event: TerminalTabOutputEvent) => void) => () => void;
   createWorkspace: (data: Any) => Promise<Workspace>;
   listWorkspaces: () => Promise<Workspace[]>;
   selectWorkspace: (id: string) => Promise<Workspace>;
@@ -5500,11 +5571,25 @@ export interface ElectronAPI {
     enabled: boolean;
     clientId?: string;
     clientSecret?: string;
+    builtinOAuthClientAvailable?: boolean;
+    accounts?: Array<{
+      email: string;
+      name?: string;
+      accessToken?: string;
+      refreshToken?: string;
+      tokenExpiresAt?: number;
+      scopes?: string[];
+      connectionMode?: "gmail" | "workspace";
+      connectedAt?: number;
+    }>;
+    activeAccountEmail?: string;
     accessToken?: string;
     refreshToken?: string;
     tokenExpiresAt?: number;
     scopes?: string[];
     timeoutMs?: number;
+    connectionMode?: "gmail" | "workspace";
+    loginHint?: string;
   }>;
   saveGoogleWorkspaceSettings: (settings: Any) => Promise<{ success: boolean }>;
   testGoogleWorkspaceConnection: () => Promise<{
@@ -5519,11 +5604,14 @@ export interface ElectronAPI {
     connected: boolean;
     name?: string;
     error?: string;
+    missingScopes?: string[];
+    connectionMode?: "gmail" | "workspace";
   }>;
   startGoogleWorkspaceOAuth: (payload: {
-    clientId: string;
+    clientId?: string;
     clientSecret?: string;
     scopes?: string[];
+    connectionMode?: "gmail" | "workspace";
     loginHint?: string;
   }) => Promise<{
     accessToken: string;
@@ -5531,11 +5619,13 @@ export interface ElectronAPI {
     expiresIn?: number;
     tokenType?: string;
     scopes?: string[];
+    email?: string;
   }>;
   getGoogleWorkspaceOAuthLink: (payload: {
-    clientId: string;
+    clientId?: string;
     clientSecret?: string;
     scopes?: string[];
+    connectionMode?: "gmail" | "workspace";
     loginHint?: string;
   }) => Promise<{ url: string }>;
   // AgentMail Settings
@@ -5764,6 +5854,8 @@ export interface ElectronAPI {
     timelineVerbosity?: "summary" | "verbose";
     language?: string;
     devRunLoggingEnabled?: boolean;
+    homeResearchVaultEnabled?: boolean;
+    homeNextActionsEnabled?: boolean;
     disclaimerAccepted?: boolean;
     onboardingCompleted?: boolean;
     onboardingCompletedAt?: string;
@@ -5792,6 +5884,8 @@ export interface ElectronAPI {
     timelineVerbosity?: "summary" | "verbose";
     language?: string;
     devRunLoggingEnabled?: boolean;
+    homeResearchVaultEnabled?: boolean;
+    homeNextActionsEnabled?: boolean;
     disclaimerAccepted?: boolean;
     onboardingCompleted?: boolean;
     onboardingCompletedAt?: string;
