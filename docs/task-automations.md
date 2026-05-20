@@ -1,8 +1,6 @@
 # Task Automations
 
-Task automations turn an existing task into a recurring scheduled task without leaving the task view.
-
-They are intentionally a bridge into CoWork's existing `Scheduled Tasks` engine, not a separate Codex heartbeat system and not a new `Routine` object. Use this flow when a one-off task proves useful enough to repeat.
+Task automations turn an existing task into scheduled or triggered follow-up work without leaving the task view. By default, they continue the same conversation thread so future runs keep the context that was already built up.
 
 <p align="center">
   <img src="../resources/branding/images/cowork-os-6.webp" alt="Automations dashboard" width="700">
@@ -11,13 +9,19 @@ They are intentionally a bridge into CoWork's existing `Scheduled Tasks` engine,
 
 ## Where It Fits
 
-CoWork's current automation model has three layers:
+CoWork's automation model has three layers:
 
 - `Workflow Intelligence` is the always-on cognitive runtime.
-- `Routines` are the primary saved automation product for policy, triggers, outputs, and observability.
-- `Scheduled Tasks` are the lower-level cron-backed execution engine used directly by advanced users and as a compiled backend for schedules.
+- `Routines` are the primary saved automation product for instructions, targets, triggers, outputs, policy, and observability.
+- `Scheduled Tasks`, `Webhooks`, and `Event Triggers` are lower-level execution engines used directly by advanced users and as compiled backends for routines.
 
-Task automations use the third layer. They create a real cron scheduled task from a selected task by calling the same scheduler API used by `Settings > Automations > Scheduled Tasks`.
+Task automations create task-sourced `Routines`. A routine can then compile to the lower-level engine that matches its trigger:
+
+- schedule triggers compile into `Scheduled Tasks`
+- API triggers compile into `Webhooks`
+- event triggers compile into `Event Triggers`
+
+This keeps the task menu on the same routine-first automation path as the rest of the product while still using the durable cron, hook, and event infrastructure underneath.
 
 ## Task Overflow Menu
 
@@ -43,22 +47,31 @@ Clicking `Add automation...` opens an `Add automation` modal over the current ta
 Defaults come from the selected task:
 
 - `name`: current task title
-- `taskTitle`: current task title
 - `prompt`: current task prompt
 - `workspaceId`: current task workspace
+- `target`: `Continue thread`
 - `description`: `Created from task <taskId>` plus the task deeplink
-- `taskPrompt`: the edited automation prompt plus a source reference containing the original task title, task ID, and deeplink
+- saved instructions: the edited automation prompt plus a source reference containing the original task title, task ID, and deeplink
 
 The modal includes:
 
 - a large prompt editor prefilled from the task
 - a footer `Run in` selector
+- a `Target` selector for `Continue thread` or `New task`
 - an editable automation name control
 - a schedule selector
 - `Cancel` and `Save`
 - a `Use template` view with built-in template prompts
 
-`Save` is disabled until the name, prompt, workspace, and schedule are valid. If scheduler creation fails, the modal shows the returned error inline and stays open.
+`Save` is disabled until the name, prompt, workspace, target, and schedule are valid. If routine creation fails, the modal shows the returned error inline and stays open.
+
+## Target Modes
+
+`Continue thread` is the default. Scheduled, API, and event-triggered runs append a follow-up message to the source task, preserving the conversation context and timeline. This is the closest equivalent to Codex-style thread wakeups.
+
+`New task` creates a standalone run for each automation execution. Use this when the recurring work should not mutate or lengthen the original conversation.
+
+Worktree execution is not compatible with `Continue thread`. The UI prevents that combination, and lower-level worktree automation payloads force `New task` so a worktree run never silently targets an existing thread without the right execution context.
 
 ## Run Modes
 
@@ -72,7 +85,7 @@ The modal includes:
 - `shellAccess: true`
 - `allowUserInput: false`
 
-`Worktree` is shown only for tasks with a worktree path. It is currently disabled because the cron creation API stores a workspace target but does not yet preserve an individual task worktree execution context. The UI should make that limitation visible instead of silently creating a job in the wrong place.
+`Worktree` is shown only for tasks with a worktree path. It is disabled for same-thread automations because a thread follow-up must run against the original task context, while a worktree automation needs an isolated run target.
 
 ## Schedule Presets
 
@@ -97,7 +110,7 @@ Custom schedules use the existing cron-expression path and are invalid until the
 - prompt
 - schedule preset
 
-Built-in templates cover common scheduled-task examples:
+Built-in templates cover common recurring examples:
 
 - daily summary
 - scan recent changes
@@ -106,56 +119,61 @@ Built-in templates cover common scheduled-task examples:
 - inbox check-in
 - regression watch
 
-Templates are deliberately small and local to the task automation modal. They are starting points for the scheduled-task prompt, not separate managed routines.
+Templates are deliberately small and local to the task automation modal. They are starting points for routine instructions, not separate managed agents.
 
-## Scheduler Payload
+## Compiled Payloads
 
-Saving calls `window.electronAPI.addCronJob` with a `CronJobCreate` payload:
+Saving calls `window.electronAPI.createRoutine` with a task-sourced routine payload.
+
+For schedule triggers, the routine service creates a cron job. Same-thread schedules use:
 
 ```ts
 {
-  name,
-  description,
-  enabled: true,
-  shellAccess,
-  allowUserInput: false,
-  deleteAfterRun: false,
-  schedule,
-  workspaceId,
-  taskTitle,
-  taskPrompt,
+  runMode: "thread_follow_up",
+  targetTaskId,
+  threadAutomation: {
+    source: "routine",
+    routineId,
+    taskId: targetTaskId,
+  },
 }
 ```
 
-The resulting job appears in `Settings > Automations > Scheduled Tasks` and uses the normal cron runtime, history, enable/disable behavior, and scheduler persistence.
+New-task schedules use the normal `runMode: "new_task"` cron path.
+
+For API triggers, the routine service creates a webhook mapping with `action: "task_message"` when the target is `Continue thread`. The handler sends the request body as a follow-up to the target task and only includes the task ID in the response when the mapping explicitly asks for it.
+
+For event triggers, the routine service creates an event trigger whose action carries the same run target. A `thread_follow_up` event trigger must include `targetTaskId`; invalid configurations fail instead of falling back to a new task.
+
+Automation-specific agent settings are applied as transient run overrides. They do not overwrite the saved agent configuration on the target task.
 
 ## Monitoring Results
 
-`Settings > Automations > Scheduled Tasks` is also the main place to inspect what automated runs actually did.
+`Settings > Automations > Routines` is the primary place to inspect task-sourced automations because it owns the saved instruction, trigger, target, policy, and recent routine run state.
 
-The panel summarizes:
+When a task automation compiles to a scheduled task, `Settings > Automations > Scheduled Tasks` also shows the lower-level cron job. The panel summarizes:
 
 - total scheduled tasks and active tasks
 - aggregate run success rate
 - the next scheduler wake-up and any currently running job
 - jobs needing attention because their latest run failed, timed out, or needs user action
+- whether a job creates a new task or continues an existing thread
 
-Expanding a scheduled task shows a results view with:
+Expanding a scheduled task shows:
 
 - the latest run status in plain language
 - total run count, success rate, and latest duration
 - delivery state for channel-backed scheduled outputs
 - latest error text when a run or delivery failed
 - a run-folder indicator when the scheduler created a dedicated run workspace
-- a direct `Open generated task` link when the run created a task session
+- a direct `Open generated task` or thread link when available
 
-The run-history ledger keeps recent runs together with status, duration, delivery outcome, and an `Open` action for each generated task. `Refresh` reloads scheduler history from the cron service, while `Clear` removes the scheduler history counters for that job without deleting the generated task sessions.
+The run-history ledger keeps recent runs together with status, duration, delivery outcome, and an `Open` action for each generated task or target thread. `Refresh` reloads scheduler history from the cron service, while `Clear` removes the scheduler history counters for that job without deleting task sessions.
 
 ## Current Limitations
 
-- Task automations create cron scheduled tasks directly; they do not create a high-level `Routine`.
-- Worktree execution context is not preserved yet, so `Worktree` is visibly disabled when the current task has a worktree.
 - Automations are unattended by default: `allowUserInput` is false and human-input policy is effectively `none`. A prompt that requires interactive clarification should be rewritten before saving.
+- Worktree execution cannot continue an existing thread. Choose `New task` for worktree-style automation.
 - Remote-session task views should not create local automations from the remote shadow task.
 
 ## Implementation Notes
@@ -168,14 +186,17 @@ Important helper exports:
 - `TASK_AUTOMATION_TEMPLATES`
 - `buildTaskAutomationSchedule`
 - `buildTaskAutomationPrompt`
-- `buildTaskAutomationCronJobCreate`
+- `buildTaskRoutineCreate`
+- `buildTaskAutomationCronJobCreate` for low-level scheduled-task payload coverage
 
 The focused renderer test coverage lives in `src/renderer/components/__tests__/main-content-working-state.test.ts` and verifies:
 
 - modal defaults from a selected task
-- default `Every 30m` scheduler payload
+- default `Every 30m` schedule payload
+- default same-thread target
 - template defaults
 - `Local` run mode enabling `shellAccess`
+- worktree target protection
 
 When changing this flow, run:
 
