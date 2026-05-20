@@ -2,14 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import type { TaskEvent } from "../../../shared/types";
 import type { LucideIcon } from "lucide-react";
 import {
+  Activity,
   ChevronDown,
   ChevronRight,
   CircleCheck,
-  CircleDot,
   Globe2,
   PencilLine,
   Search,
   ShieldCheck,
+  Sparkles,
   SquareTerminal,
 } from "lucide-react";
 import { getEffectiveTaskEventType } from "../../utils/task-event-compat";
@@ -22,6 +23,7 @@ export type ActionBlockIconKind =
   | "web"
   | "verify"
   | "approval"
+  | "generate"
   | "work";
 
 export interface ActionBlockSummary {
@@ -44,6 +46,31 @@ export interface ActionBlockSummary {
 export interface BuildActionBlockSummaryOptions {
   /** When true, use in-progress phrasing (e.g. "Exploring files…") instead of past-tense totals */
   isActive?: boolean;
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function collectStepActionText(event: TaskEvent): string {
+  const payload = asObject(event.payload);
+  const step = asObject(payload.step);
+  return [
+    typeof payload.message === "string" ? payload.message : "",
+    typeof payload.description === "string" ? payload.description : "",
+    typeof payload.action === "string" ? payload.action : "",
+    typeof step.description === "string" ? step.description : "",
+    typeof step.action === "string" ? step.action : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function isGenerativeStepText(text: string): boolean {
+  return /\b(generate|generating|generated|draft|drafting|compose|composing|synthesize|synthesizing)\b/.test(text);
 }
 
 /**
@@ -134,6 +161,7 @@ export function buildActionBlockSummary(
     (toolCounts.get("web_search") || 0) +
     (toolCounts.get("http_request") || 0);
   let verificationSteps = 0;
+  let generativeSteps = 0;
   for (const event of events) {
     const effectiveType = getEffectiveTaskEventType(event);
     if (
@@ -143,6 +171,17 @@ export function buildActionBlockSummary(
       effectiveType === "verification_pending_user_action"
     ) {
       verificationSteps += 1;
+    }
+    if (
+      effectiveType === "step_started" ||
+      effectiveType === "step_completed" ||
+      event.type === "timeline_step_started" ||
+      event.type === "timeline_step_updated" ||
+      event.type === "timeline_step_finished"
+    ) {
+      if (isGenerativeStepText(collectStepActionText(event))) {
+        generativeSteps += 1;
+      }
     }
   }
   let approvedRequests = 0;
@@ -176,7 +215,9 @@ export function buildActionBlockSummary(
               ? "web"
               : verificationSteps > 0
                 ? "verify"
-                : "work";
+                : generativeSteps > 0
+                  ? "generate"
+                  : "work";
 
   if (isActive) {
     if (approvedRequests > 0) {
@@ -325,7 +366,8 @@ const ACTION_BLOCK_ICONS: Record<ActionBlockIconKind, LucideIcon> = {
   web: Globe2,
   verify: ShieldCheck,
   approval: CircleCheck,
-  work: CircleDot,
+  generate: Sparkles,
+  work: Activity,
 };
 
 const ACTION_BLOCK_ICON_LABELS: Record<ActionBlockIconKind, string> = {
@@ -336,6 +378,7 @@ const ACTION_BLOCK_ICON_LABELS: Record<ActionBlockIconKind, string> = {
   web: "Web activity",
   verify: "Verification activity",
   approval: "Approved activity",
+  generate: "Generation activity",
   work: "Agent activity",
 };
 
