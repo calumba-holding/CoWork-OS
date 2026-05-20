@@ -25,7 +25,7 @@ const VERIFIER_DENY_LIST = [
 
 const RESEARCHER_DENY_LIST = [
   "group:write",
-  "group:destructive",
+  "delete_file",
   "group:meta",
   "spawn_agent",
   "orchestrate_agents",
@@ -41,7 +41,7 @@ const IMPLEMENTER_DENY_LIST = [
 ];
 
 const SYNTHESIZER_DENY_LIST = [
-  "group:destructive",
+  "delete_file",
   "spawn_agent",
   "orchestrate_agents",
   "send_agent_message",
