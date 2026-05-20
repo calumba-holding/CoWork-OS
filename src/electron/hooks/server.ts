@@ -28,9 +28,13 @@ import {
   findHookMapping,
   normalizeHooksPath as _normalizeHooksPath,
 } from "./mappings";
+import { createLogger } from "../utils/logger";
+
+const log = createLogger("HooksServer");
 
 const RESEND_SIGNATURE_ALLOWED_DRIFT_SECONDS = 300;
 const RESEND_REPLAY_CACHE_MAX_ENTRIES = 10_000;
+const MAX_TEXT_FIELD_LENGTH = 10_000;
 
 export interface HooksServerConfig {
   port: number;
@@ -71,7 +75,11 @@ export interface HooksServerHandlers {
   /**
    * Handle a follow-up message to an existing task
    */
-  onTaskMessage?: (action: { taskId: string; message: string }) => Promise<void>;
+  onTaskMessage?: (action: {
+    taskId: string;
+    workspaceId?: string;
+    message: string;
+  }) => Promise<void>;
 
   /**
    * Respond to an approval request for a task
@@ -158,32 +166,32 @@ export class HooksServer {
    */
   async start(): Promise<void> {
     if (!this.config.enabled) {
-      console.log("[HooksServer] Server disabled");
+      log.info("Server disabled");
       return;
     }
 
     if (this.server) {
-      console.log("[HooksServer] Server already running");
+      log.info("Server already running");
       return;
     }
 
     return new Promise((resolve, reject) => {
       this.server = http.createServer((req, res) => {
         this.handleRequest(req, res).catch((err) => {
-          console.error("[HooksServer] Request error:", err);
+          log.error("Request error:", err);
           this.sendJsonResponse(res, 500, { success: false, error: "Internal server error" });
         });
       });
 
       this.server.on("error", (err) => {
-        console.error("[HooksServer] Server error:", err);
+        log.error("Server error:", err);
         this.emitEvent({ action: "error", timestamp: Date.now(), error: String(err) });
         reject(err);
       });
 
       const host = this.config.host || "127.0.0.1";
       this.server.listen(this.config.port, host, () => {
-        console.log(`[HooksServer] Server listening on http://${host}:${this.config.port}`);
+        log.info(`Server listening on http://${host}:${this.config.port}`);
         this.emitEvent({ action: "started", timestamp: Date.now() });
         resolve();
       });
@@ -198,7 +206,7 @@ export class HooksServer {
 
     return new Promise((resolve) => {
       this.server!.close(() => {
-        console.log("[HooksServer] Server stopped");
+        log.info("Server stopped");
         this.emitEvent({ action: "stopped", timestamp: Date.now() });
         this.server = null;
         resolve();
@@ -227,8 +235,10 @@ export class HooksServer {
    * Handle incoming HTTP request
    */
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    // Set CORS headers
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    // Restrict CORS to localhost origins only — webhooks should not be called from external browsers
+    const origin = req.headers.origin || "";
+    const isLocalOrigin = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(origin);
+    res.setHeader("Access-Control-Allow-Origin", isLocalOrigin ? origin : "http://localhost");
     res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CoWork-Token");
 
@@ -282,7 +292,7 @@ export class HooksServer {
     }
 
     if (tokenResult.fromQuery) {
-      console.warn("[HooksServer] Token provided via query param (deprecated)");
+      log.warn("Token provided via query param (deprecated)");
     }
 
     // Handle specific endpoints
@@ -325,7 +335,7 @@ export class HooksServer {
       return;
     }
 
-    const text = body.text?.trim();
+    const text = body.text?.trim()?.slice(0, MAX_TEXT_FIELD_LENGTH);
     if (!text) {
       this.sendJsonResponse(res, 400, { success: false, error: "text required" });
       return;
@@ -338,7 +348,7 @@ export class HooksServer {
         await this.handlers.onWake({ text, mode });
         this.sendJsonResponse(res, 200, { success: true });
       } catch (error) {
-        console.error("[HooksServer] Wake handler error:", error);
+        log.error("Wake handler error:", error);
         this.sendJsonResponse(res, 500, { success: false, error: String(error) });
       }
     } else {
@@ -356,7 +366,7 @@ export class HooksServer {
       return;
     }
 
-    const message = body.message?.trim();
+    const message = body.message?.trim()?.slice(0, MAX_TEXT_FIELD_LENGTH);
     if (!message) {
       this.sendJsonResponse(res, 400, { success: false, error: "message required" });
       return;
@@ -364,7 +374,7 @@ export class HooksServer {
 
     const agentPayload = {
       message,
-      name: body.name?.trim(),
+      name: body.name?.trim()?.slice(0, MAX_TEXT_FIELD_LENGTH),
       wakeMode: (body.wakeMode === "next-heartbeat" ? "next-heartbeat" : "now") as
         | "now"
         | "next-heartbeat",
@@ -387,7 +397,7 @@ export class HooksServer {
         // Return 202 Accepted for async operation
         this.sendJsonResponse(res, result.statusCode ?? 202, result.body ?? { success: true, taskId: result.taskId });
       } catch (error) {
-        console.error("[HooksServer] Agent handler error:", error);
+        log.error("Agent handler error:", error);
         this.sendJsonResponse(res, 500, { success: false, error: String(error) });
       }
     } else {
@@ -408,13 +418,14 @@ export class HooksServer {
       return;
     }
 
-    const taskId = body.taskId?.trim();
+    const taskId = body.taskId?.trim()?.slice(0, 256);
     if (!taskId) {
       this.sendJsonResponse(res, 400, { success: false, error: "taskId required" });
       return;
     }
+    const workspaceId = body.workspaceId?.trim()?.slice(0, 256);
 
-    const message = body.message?.trim();
+    const message = body.message?.trim()?.slice(0, MAX_TEXT_FIELD_LENGTH);
     if (!message) {
       this.sendJsonResponse(res, 400, { success: false, error: "message required" });
       return;
@@ -429,15 +440,19 @@ export class HooksServer {
     }
 
     try {
-      await this.handlers.onTaskMessage({ taskId, message });
+      await this.handlers.onTaskMessage({
+        taskId,
+        ...(workspaceId ? { workspaceId } : {}),
+        message,
+      });
       // Return 202 Accepted for async operation
       this.sendJsonResponse(res, 202, { success: true });
-    } catch (error: Any) {
+    } catch (error) {
       const statusCode =
-        typeof error?.statusCode === "number" && Number.isFinite(error.statusCode)
-          ? error.statusCode
+        typeof (error as Error & { statusCode?: unknown })?.statusCode === "number" && Number.isFinite((error as Error & { statusCode?: unknown }).statusCode)
+          ? (error as Error & { statusCode: number }).statusCode
           : 500;
-      console.error("[HooksServer] Task message handler error:", error);
+      log.error("Task message handler error:", error);
       this.sendJsonResponse(res, statusCode, { success: false, error: String(error) });
     }
   }
@@ -479,7 +494,7 @@ export class HooksServer {
       const httpStatus = status === "not_found" ? 404 : 200;
       this.sendJsonResponse(res, httpStatus, { success: true, status });
     } catch (error) {
-      console.error("[HooksServer] Approval respond handler error:", error);
+      log.error("Approval respond handler error:", error);
       this.sendJsonResponse(res, 500, { success: false, error: String(error) });
     }
   }
@@ -579,7 +594,7 @@ export class HooksServer {
           await this.handlers.onWake({ text: action.text, mode: action.mode });
           this.sendJsonResponse(res, 200, { success: true });
         } catch (error) {
-          console.error("[HooksServer] Wake handler error:", error);
+          log.error("Wake handler error:", error);
           this.sendJsonResponse(res, 500, { success: false, error: String(error) });
         }
       } else {
@@ -615,11 +630,44 @@ export class HooksServer {
               }),
           );
         } catch (error) {
-          console.error("[HooksServer] Agent handler error:", error);
+          log.error("Agent handler error:", error);
           this.sendJsonResponse(res, 500, { success: false, error: String(error) });
         }
       } else {
         this.sendJsonResponse(res, 503, { success: false, error: "Agent handler not configured" });
+      }
+    } else if (action.kind === "task_message") {
+      if (this.handlers.onTaskMessage) {
+        try {
+          await this.handlers.onTaskMessage({
+            taskId: action.taskId,
+            ...(action.workspaceId || selectedMapping.workspaceId
+              ? { workspaceId: action.workspaceId || selectedMapping.workspaceId }
+              : {}),
+            message: action.message,
+          });
+          this.sendJsonResponse(
+            res,
+            action.response?.statusCode ?? 202,
+            buildHookSuccessBody({
+              message: action.response?.message,
+              includeTaskId: action.response?.includeTaskId ?? false,
+              taskId: action.taskId,
+            }),
+          );
+        } catch (error) {
+          const statusCode =
+            typeof (error as Error & { statusCode?: unknown })?.statusCode === "number" && Number.isFinite((error as Error & { statusCode?: unknown }).statusCode)
+              ? (error as Error & { statusCode: number }).statusCode
+              : 500;
+          log.error("Task message handler error:", error);
+          this.sendJsonResponse(res, statusCode, { success: false, error: String(error) });
+        }
+      } else {
+        this.sendJsonResponse(res, 503, {
+          success: false,
+          error: "Task message handler not configured",
+        });
       }
     }
   }
@@ -730,7 +778,7 @@ export class HooksServer {
       const timeout = setTimeout(() => {
         if (done) return;
         done = true;
-        console.warn("[HooksServer] Request body timeout - slow client detected");
+        log.warn("Request body timeout - slow client detected");
         resolve(null);
         req.destroy();
       }, REQUEST_TIMEOUT_MS);
@@ -893,7 +941,7 @@ export class HooksServer {
       try {
         this.handlers.onEvent(event);
       } catch (error) {
-        console.error("[HooksServer] Event handler error:", error);
+        log.error("Event handler error:", error);
       }
     }
   }
