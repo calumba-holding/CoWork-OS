@@ -38,6 +38,11 @@ import {
   writeSpreadsheetPreviewToFile,
 } from "../utils/spreadsheet-preview";
 import type { SpreadsheetPreview } from "../../shared/spreadsheet-preview";
+import type {
+  SpreadsheetPatch,
+  SpreadsheetViewportRequest,
+} from "../../shared/spreadsheet-workbook";
+import { spreadsheetWorkbookSessionService } from "../spreadsheet/SpreadsheetWorkbookSessionService";
 import { buildDocumentPreviewFromFile } from "../utils/document-preview";
 import { writeEditableDocumentBlocksToDocxFile } from "../utils/document-writer";
 import type {
@@ -135,6 +140,9 @@ import {
   LLMRoutingRuntimeState,
   ShellSessionInfo,
   ShellSessionScope,
+  GithubPullRequestReviewSummary,
+  TerminalTabCompletionResult,
+  TerminalTabRunResult,
 } from "../../shared/types";
 import { isTerminalTaskStatus } from "../../shared/task-status";
 import type { MailboxCommitmentState } from "../../shared/mailbox";
@@ -154,6 +162,9 @@ import {
   SearchProviderType,
 } from "../agent/search";
 import { ShellSessionManager } from "../agent/tools/shell-session-manager";
+import { GitHubReviewService } from "../git/GitHubReviewService";
+import { TerminalPtyManager } from "../terminal/TerminalPtyManager";
+import { normalizeTerminalAttachInput } from "../terminal/terminal-input-policy";
 import { HealthManager } from "../health/HealthManager";
 import { ChannelGateway } from "../gateway";
 import { CHANNEL_TYPES } from "../gateway/channels/types";
@@ -251,6 +262,15 @@ import {
   startGoogleWorkspaceOAuth,
   startGoogleWorkspaceOAuthGetLink,
 } from "../utils/google-workspace-oauth";
+import {
+  hasBundledGoogleWorkspaceOAuthClient,
+  resolveGoogleWorkspaceOAuthRequest,
+} from "../utils/google-workspace-oauth-client";
+import {
+  hasGoogleWorkspaceTokens,
+  normalizeGoogleAccountEmail,
+  upsertGoogleWorkspaceAccount,
+} from "../../shared/google-workspace";
 import { setupTaskTraceHandlers } from "./task-trace-handlers";
 import { buildVideoPreviewTranscodeArgs } from "./video-preview-transcode";
 
@@ -290,7 +310,10 @@ import {
   NotificationOverlayManager,
   NativeNotificationCenter,
 } from "../notifications";
-import { setIntegrationAuthNotificationServiceProvider } from "../notifications/integration-auth";
+import {
+  notifyDetectedIntegrationAuthIssue,
+  setIntegrationAuthNotificationServiceProvider,
+} from "../notifications/integration-auth";
 import type {
   NotificationType,
   HooksSettingsData,
@@ -353,7 +376,7 @@ import {
   getActiveTempWorkspaceLeases,
   touchTempWorkspaceLease,
 } from "../utils/temp-workspace-lease";
-import { createLogger } from "../utils/logger";
+import { createLogger, setLogObserver } from "../utils/logger";
 import { isApprovedImportFile } from "../security/file-import-approvals";
 import { FileProvenanceRegistry } from "../security/file-provenance-registry";
 
@@ -1121,6 +1144,241 @@ function looksLikeCodeMultitaskRequest(text: string): boolean {
     "i",
   );
   return codeCue.test(text);
+}
+
+async function resolveWorkspaceContainedCwd(workspacePath: string, cwd?: string): Promise<string> {
+  const workspaceRealPath = await fs.realpath(workspacePath);
+  const candidate = !cwd || cwd === "."
+    ? workspaceRealPath
+    : path.isAbsolute(cwd)
+      ? cwd
+      : path.resolve(workspaceRealPath, cwd);
+  const candidateRealPath = await fs.realpath(candidate);
+  const relative = path.relative(workspaceRealPath, candidateRealPath);
+  if (relative && (relative.startsWith("..") || path.isAbsolute(relative))) {
+    throw new Error("Terminal cwd must stay within the workspace.");
+  }
+  return candidateRealPath;
+}
+
+function assertTerminalShellAllowed(workspace: Workspace): void {
+  if (workspace.permissions?.shell !== true) {
+    throw new Error("Shell permission is required for terminal tabs in this workspace.");
+  }
+}
+
+async function approveTerminalCommand(params: {
+  agentDaemon: AgentDaemon;
+  taskId: string;
+  command: string;
+  cwd: string;
+  timeoutMs: number;
+}): Promise<void> {
+  const taskId = params.taskId.trim();
+  if (!taskId) {
+    throw new Error("A task id is required to run terminal tab commands.");
+  }
+  const blockCheck = GuardrailManager.isCommandBlocked(params.command);
+  if (blockCheck.blocked) {
+    throw new Error(
+      `Command blocked by guardrails: "${params.command}"\nMatched pattern: ${blockCheck.pattern}`,
+    );
+  }
+  if (/\bapply_patch\b/.test(params.command)) {
+    throw new Error("Terminal tabs cannot invoke apply_patch. Use the apply_patch tool directly.");
+  }
+  const approved = await params.agentDaemon.requestApproval(
+    taskId,
+    "run_command",
+    "Review the terminal tab command below before approving.",
+    {
+      command: params.command,
+      cwd: params.cwd,
+      timeout: params.timeoutMs,
+      source: "terminal_tab",
+    },
+  );
+  if (!approved) {
+    throw new Error("User denied command execution");
+  }
+}
+
+function findCompletionTokenStart(line: string, cursor: number): number {
+  let quote: "'" | "\"" | null = null;
+  let escaped = false;
+  for (let index = 0; index < cursor; index += 1) {
+    const char = line[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+    }
+  }
+
+  quote = null;
+  escaped = false;
+  for (let index = cursor - 1; index >= 0; index -= 1) {
+    const char = line[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) return index + 1;
+  }
+  return 0;
+}
+
+function unquoteCompletionToken(token: string): string {
+  if (
+    (token.startsWith("'") && token.endsWith("'")) ||
+    (token.startsWith("\"") && token.endsWith("\""))
+  ) {
+    return token.slice(1, -1);
+  }
+  return token.replace(/\\(\s)/g, "$1");
+}
+
+function quoteCompletionToken(value: string, originalToken: string): string {
+  if (originalToken.startsWith("'")) {
+    return `'${value.replace(/'/g, "'\\''")}`;
+  }
+  if (originalToken.startsWith("\"")) {
+    return `"${value.replace(/(["\\$`])/g, "\\$1")}`;
+  }
+  return value.replace(/([\s"'\\$`!])/g, "\\$1");
+}
+
+function commonPrefix(values: string[]): string {
+  if (values.length === 0) return "";
+  let prefix = values[0] || "";
+  for (const value of values.slice(1)) {
+    while (prefix && !value.startsWith(prefix)) {
+      prefix = prefix.slice(0, -1);
+    }
+  }
+  return prefix;
+}
+
+async function completeTerminalInput(params: {
+  line: string;
+  cursor: number;
+  cwd: string;
+}): Promise<TerminalTabCompletionResult> {
+  const cursor = Math.max(0, Math.min(params.cursor, params.line.length));
+  const tokenStart = findCompletionTokenStart(params.line, cursor);
+  const tokenEnd = cursor;
+  const rawToken = params.line.slice(tokenStart, tokenEnd);
+  const token = unquoteCompletionToken(rawToken);
+  const expandedToken = token.startsWith("~")
+    ? path.join(os.homedir(), token.slice(1))
+    : token;
+  const hasPathSeparator = /[\\/]/.test(expandedToken);
+  const isCommandPosition = params.line.slice(0, tokenStart).trim().length === 0;
+  const isEmptyToken = rawToken.length === 0;
+  const candidateDir = hasPathSeparator
+    ? path.resolve(params.cwd, path.dirname(expandedToken))
+    : params.cwd;
+  const entryPrefix = hasPathSeparator ? path.basename(expandedToken) : expandedToken;
+
+  let matches: string[];
+  if (isCommandPosition && !hasPathSeparator && !isEmptyToken) {
+    const pathDirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+    const names = new Set<string>();
+    await Promise.all(pathDirs.map(async (dir) => {
+      try {
+        const entries = await fs.readdir(dir);
+        await Promise.all(entries.map(async (entry) => {
+          if (!entry.startsWith(entryPrefix)) return;
+          try {
+            const stat = await fs.stat(path.join(dir, entry));
+            if (stat.isFile() && (process.platform === "win32" || (stat.mode & 0o111) !== 0)) {
+              names.add(`${entry} `);
+            }
+          } catch {
+            // Ignore vanished PATH entries.
+          }
+        }));
+      } catch {
+        // Ignore unreadable PATH entries.
+      }
+    }));
+    matches = Array.from(names).sort((a, b) => a.localeCompare(b));
+  } else {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(candidateDir);
+    } catch {
+      return { line: params.line, cursor, matches: [], completed: false };
+    }
+
+    matches = (
+      await Promise.all(
+        entries
+          .filter((entry) => entry.startsWith(entryPrefix))
+          .sort((a, b) => a.localeCompare(b))
+          .map(async (entry) => {
+            try {
+              const stat = await fs.stat(path.join(candidateDir, entry));
+              return `${entry}${stat.isDirectory() ? path.sep : ""}`;
+            } catch {
+              return entry;
+            }
+          }),
+      )
+    );
+  }
+  if (matches.length === 0) {
+    return { line: params.line, cursor, matches: [], completed: false };
+  }
+
+  const prefix = commonPrefix(matches);
+  const replacementName = matches.length === 1
+    ? matches[0] || ""
+    : prefix.length > entryPrefix.length
+      ? prefix
+      : entryPrefix;
+  if (replacementName === entryPrefix && matches.length > 1) {
+    return { line: params.line, cursor, matches, completed: false };
+  }
+
+  const replacementPath = hasPathSeparator
+    ? path.join(path.dirname(expandedToken), replacementName)
+    : replacementName;
+  const replacement = quoteCompletionToken(
+    matches.length === 1 && !replacementName.endsWith(path.sep) && !replacementName.endsWith(" ")
+      ? `${replacementPath} `
+      : replacementPath,
+    rawToken,
+  );
+  const nextLine = `${params.line.slice(0, tokenStart)}${replacement}${params.line.slice(tokenEnd)}`;
+  return {
+    line: nextLine,
+    cursor: tokenStart + replacement.length,
+    matches,
+    completed: true,
+  };
 }
 
 async function planMultitaskLanes(prompt: string, laneCount: number) {
@@ -2455,6 +2713,144 @@ export async function setupIpcHandlers(
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.SPREADSHEET_OPEN_WORKBOOK,
+    async (
+      _,
+      data: {
+        filePath: string;
+        workspacePath?: string;
+        workspaceId?: string;
+      },
+    ) => {
+      const { filePath } = data || {};
+      const requestedWorkspaceId =
+        typeof data?.workspaceId === "string" ? data.workspaceId.trim() : "";
+      const requestedWorkspacePath =
+        typeof data?.workspacePath === "string"
+          ? path.resolve(normalizePotentialPath(data.workspacePath))
+          : "";
+      const workspace = requestedWorkspaceId
+        ? workspaceRepo.findById(requestedWorkspaceId)
+        : workspaceRepo
+            .findAll()
+            .find(
+              (item) =>
+                path.resolve(normalizePotentialPath(item.path)) === requestedWorkspacePath,
+            );
+      if (!workspace) {
+        throw new Error("A registered workspace is required for spreadsheet edits");
+      }
+      const workspacePath = workspace.path;
+      const { resolvedPath, realPath, attemptedPaths } = await resolveExistingPathForViewer(
+        filePath,
+        workspacePath,
+        {
+          requireWorkspaceContainment: true,
+        },
+      );
+      if (!resolvedPath) {
+        const attempted =
+          attemptedPaths.length > 0 ? ` (tried ${attemptedPaths.length} location(s))` : "";
+        return {
+          success: false,
+          error: `File not found: ${filePath}${attempted}`,
+        };
+      }
+
+      const fileReadPath = realPath || resolvedPath;
+      const extension = path.extname(fileReadPath).toLowerCase();
+      const stats = await fs.stat(fileReadPath);
+      const MAX_SPREADSHEET_WORKBOOK_SIZE = 20 * 1024 * 1024;
+      const MAX_DELIMITED_SPREADSHEET_SIZE = 5 * 1024 * 1024;
+      if (
+        extension !== ".xlsx" &&
+        extension !== ".xlsm" &&
+        extension !== ".csv" &&
+        extension !== ".tsv"
+      ) {
+        return {
+          success: false,
+          error: "Only XLSX, XLSM, CSV, and TSV files can be opened in workbook mode",
+        };
+      }
+      if (
+        (extension === ".xlsx" || extension === ".xlsm") &&
+        stats.size > MAX_SPREADSHEET_WORKBOOK_SIZE
+      ) {
+        return {
+          success: false,
+          error: "Spreadsheet too large for workbook mode (max 20MB)",
+        };
+      }
+      if (
+        (extension === ".csv" || extension === ".tsv") &&
+        stats.size > MAX_DELIMITED_SPREADSHEET_SIZE
+      ) {
+        return {
+          success: false,
+          error: "Delimited spreadsheet too large for workbook mode (max 5MB)",
+        };
+      }
+
+      try {
+        return await spreadsheetWorkbookSessionService.openWorkbook({
+          filePath: fileReadPath,
+          workspacePath,
+          fileName: path.basename(fileReadPath),
+        });
+      } catch (error: Any) {
+        return {
+          success: false,
+          error: `Failed to open spreadsheet workbook: ${error.message}`,
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.SPREADSHEET_GET_VIEWPORT,
+    async (_, data: SpreadsheetViewportRequest) =>
+      spreadsheetWorkbookSessionService.getViewport(data),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.SPREADSHEET_APPLY_PATCHES,
+    async (
+      _,
+      data: {
+        sessionId: string;
+        patches: SpreadsheetPatch[];
+      },
+    ) => {
+      const { sessionId, patches } = data || {};
+      if (!sessionId || !Array.isArray(patches)) {
+        return { success: false, error: "Spreadsheet patch data is missing" };
+      }
+      return spreadsheetWorkbookSessionService.applyPatches(sessionId, patches);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.SPREADSHEET_SAVE_WORKBOOK,
+    async (_, data: { sessionId: string }) => {
+      const { sessionId } = data || {};
+      if (!sessionId) {
+        return { success: false, error: "Spreadsheet session id is missing" };
+      }
+      return await spreadsheetWorkbookSessionService.saveWorkbook(sessionId);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.SPREADSHEET_CLOSE_WORKBOOK,
+    async (_, data: { sessionId: string }) => {
+      const { sessionId } = data || {};
+      if (!sessionId) return { success: true };
+      return spreadsheetWorkbookSessionService.closeWorkbook(sessionId);
+    },
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.FILE_UPDATE_SPREADSHEET,
     async (
       _,
@@ -2492,14 +2888,12 @@ export async function setupIpcHandlers(
       const extension = path.extname(fileWritePath).toLowerCase();
       if (
         extension !== ".xlsx" &&
-        extension !== ".xls" &&
-        extension !== ".xlsm" &&
         extension !== ".csv" &&
         extension !== ".tsv"
       ) {
         return {
           success: false,
-          error: "Only local spreadsheet files can be edited in the spreadsheet viewer",
+          error: "Only XLSX, CSV, and TSV files can be edited in the spreadsheet viewer",
         };
       }
 
@@ -3838,12 +4232,18 @@ export async function setupIpcHandlers(
   // Workspace handlers
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_CREATE, async (_, data) => {
     const validated = validateInput(WorkspaceCreateSchema, data, "workspace");
-    const { name, path, permissions } = validated;
+    const { name, path: workspacePath, permissions } = validated;
+
+    const resolvedPath = path.resolve(workspacePath);
+    const PROTECTED_ROOTS = ["/", "/etc", "/usr", "/bin", "/sbin", "/System", "/Library"];
+    if (PROTECTED_ROOTS.includes(resolvedPath)) {
+      throw new Error(`Cannot create a workspace at a protected system path: "${resolvedPath}".`);
+    }
 
     // Check if workspace with this path already exists
-    if (workspaceRepo.existsByPath(path)) {
+    if (workspaceRepo.existsByPath(resolvedPath)) {
       throw new Error(
-        `A workspace with path "${path}" already exists. Please choose a different folder.`,
+        `A workspace with path "${resolvedPath}" already exists. Please choose a different folder.`,
       );
     }
 
@@ -3858,7 +4258,7 @@ export async function setupIpcHandlers(
       shell: permissionSettings.defaultShellEnabled,
     };
 
-    return workspaceRepo.create(name, path, permissions ?? defaultPermissions);
+    return workspaceRepo.create(name, resolvedPath, permissions ?? defaultPermissions);
   });
 
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_LIST, async () => {
@@ -3940,6 +4340,243 @@ export async function setupIpcHandlers(
     }
     return workspaceRepo.findById(id);
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.GITHUB_REVIEW_LIST,
+    async (
+      _,
+      data: {
+        workspacePath: string;
+      },
+    ): Promise<{ success: true; data: GithubPullRequestReviewSummary } | { success: false; error: string }> => {
+      try {
+        if (!data?.workspacePath?.trim()) {
+          return { success: false, error: "Workspace path is required." };
+        }
+        const summary = await GitHubReviewService.getReviewSummary(data.workspacePath);
+        return { success: true, data: summary };
+      } catch (error: Any) {
+        return {
+          success: false,
+          error: error?.message || "Failed to load GitHub review comments.",
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.GITHUB_REVIEW_BUILD_TASK_PROMPT,
+    async (
+      _,
+      data: {
+        workspacePath: string;
+        threadIds?: string[];
+      },
+    ): Promise<{ success: true; prompt: string; summary: GithubPullRequestReviewSummary } | { success: false; error: string }> => {
+      try {
+        if (!data?.workspacePath?.trim()) {
+          return { success: false, error: "Workspace path is required." };
+        }
+        const summary = await GitHubReviewService.getReviewSummary(data.workspacePath);
+        const prompt = GitHubReviewService.buildAddressPrompt(summary, data.threadIds || []);
+        return { success: true, prompt, summary };
+      } catch (error: Any) {
+        return {
+          success: false,
+          error: error?.message || "Failed to build GitHub review task prompt.",
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TERMINAL_TAB_LIST,
+    async (_, data?: { workspaceId?: string }): Promise<ShellSessionInfo[]> => {
+      const workspace = workspaceRepo.findById(data?.workspaceId || "");
+      if (!workspace) throw new Error("Workspace not found.");
+      assertTerminalShellAllowed(workspace);
+      return TerminalPtyManager.getInstance().listTabs(workspace.id);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TERMINAL_TAB_CREATE,
+    async (
+      _event,
+      data: {
+        workspaceId: string;
+        cwd?: string;
+        title?: string;
+      },
+    ): Promise<ShellSessionInfo> => {
+      const workspace = workspaceRepo.findById(data?.workspaceId);
+      if (!workspace) throw new Error("Workspace not found.");
+      assertTerminalShellAllowed(workspace);
+      const cwd = await resolveWorkspaceContainedCwd(workspace.path, data.cwd);
+      return TerminalPtyManager.getInstance().createTab({
+        workspaceId: workspace.id,
+        workspacePath: workspace.path,
+        cwd,
+        title: data.title,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TERMINAL_TAB_RUN,
+    async (
+      _event,
+      data: {
+        tabId: string;
+        workspaceId: string;
+        taskId: string;
+        command: string;
+        cwd?: string;
+        timeoutMs?: number;
+      },
+    ): Promise<TerminalTabRunResult> => {
+      const workspace = workspaceRepo.findById(data?.workspaceId);
+      if (!workspace) throw new Error("Workspace not found.");
+      assertTerminalShellAllowed(workspace);
+      if (!data?.tabId || !data?.command?.trim()) {
+        throw new Error("Terminal tab id and command are required.");
+      }
+      const taskId = typeof data.taskId === "string" ? data.taskId.trim() : "";
+      if (!taskId || !taskRepo.findById(taskId)) {
+        throw new Error("A valid task id is required to run terminal tab commands.");
+      }
+      const cwd = await resolveWorkspaceContainedCwd(workspace.path, data.cwd);
+      const timeoutMs = data.timeoutMs || 60 * 60 * 1000;
+      const manager = TerminalPtyManager.getInstance();
+      const tab = manager.listTabs(workspace.id).find((session) => session.id === data.tabId);
+      if (!tab) {
+        throw new Error("Terminal tab not found for workspace.");
+      }
+      await approveTerminalCommand({
+        agentDaemon,
+        taskId,
+        command: data.command,
+        cwd,
+        timeoutMs,
+      });
+      agentDaemon.logEvent(taskId, "tool_call", {
+        tool: "run_command",
+        command: data.command,
+        cwd,
+        source: "terminal_tab",
+      });
+      const updatedTab = manager.runCommandInTab(data.tabId, data.command);
+      agentDaemon.logEvent(taskId, "tool_result", {
+        tool: "run_command",
+        success: true,
+        exitCode: null,
+        terminationReason: undefined,
+        source: "terminal_tab",
+      });
+      return {
+        tab: updatedTab,
+        success: true,
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        terminationReason: undefined,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TERMINAL_TAB_WRITE,
+    async (event, data: { tabId: string; workspaceId: string; input: string }): Promise<ShellSessionInfo> => {
+      const workspace = workspaceRepo.findById(data?.workspaceId);
+      if (!workspace) throw new Error("Workspace not found.");
+      assertTerminalShellAllowed(workspace);
+      const manager = TerminalPtyManager.getInstance();
+      const tab = manager.listTabs(workspace.id).find((session) => session.id === data.tabId);
+      if (!tab) throw new Error("Terminal tab not found for workspace.");
+      const input = normalizeTerminalAttachInput(data?.input);
+      manager.attachTerminalTabOutput(
+        data.tabId,
+        `webContents:${event.sender.id}`,
+        (outputEvent) => {
+          event.sender.send(IPC_CHANNELS.TERMINAL_TAB_OUTPUT, {
+            tabId: data.tabId,
+            workspaceId: workspace.id,
+            stream: outputEvent.stream,
+            output: outputEvent.output,
+            cwd: outputEvent.cwd,
+            status: outputEvent.status,
+            timestamp: Date.now(),
+          });
+        },
+      );
+      return input ? manager.writeToTab(data.tabId, input) : tab;
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TERMINAL_TAB_RESIZE,
+    async (_, data: { tabId: string; workspaceId: string; cols: number; rows: number }): Promise<ShellSessionInfo> => {
+      const workspace = workspaceRepo.findById(data?.workspaceId);
+      if (!workspace) throw new Error("Workspace not found.");
+      assertTerminalShellAllowed(workspace);
+      const manager = TerminalPtyManager.getInstance();
+      const tab = manager.listTabs(workspace.id).find((session) => session.id === data.tabId);
+      if (!tab) throw new Error("Terminal tab not found for workspace.");
+      return manager.resizeTab(data.tabId, data.cols, data.rows);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TERMINAL_TAB_COMPLETE,
+    async (
+      _,
+      data: { tabId: string; workspaceId: string; line: string; cursor: number; cwd?: string },
+    ): Promise<TerminalTabCompletionResult> => {
+      const workspace = workspaceRepo.findById(data?.workspaceId);
+      if (!workspace) throw new Error("Workspace not found.");
+      assertTerminalShellAllowed(workspace);
+      const manager = TerminalPtyManager.getInstance();
+      const tab = manager.listTabs(workspace.id).find((session) => session.id === data.tabId);
+      if (!tab) throw new Error("Terminal tab not found for workspace.");
+      let cwd = workspace.path;
+      try {
+        cwd = await resolveWorkspaceContainedCwd(workspace.path, data.cwd || tab.cwd);
+      } catch {
+        cwd = await resolveWorkspaceContainedCwd(workspace.path);
+      }
+      return completeTerminalInput({
+        line: String(data.line || ""),
+        cursor: Number.isFinite(data.cursor) ? data.cursor : String(data.line || "").length,
+        cwd,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TERMINAL_TAB_STOP,
+    async (_, data: { tabId: string; workspaceId: string }): Promise<ShellSessionInfo | null> => {
+      const workspace = workspaceRepo.findById(data?.workspaceId);
+      if (!workspace) throw new Error("Workspace not found.");
+      assertTerminalShellAllowed(workspace);
+      const manager = TerminalPtyManager.getInstance();
+      const tab = manager.listTabs(workspace.id).find((session) => session.id === data.tabId);
+      if (!tab) throw new Error("Terminal tab not found for workspace.");
+      return manager.stopTab(data.tabId);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TERMINAL_TAB_CLOSE,
+    async (_, data: { tabId: string; workspaceId: string }): Promise<ShellSessionInfo | null> => {
+      const workspace = workspaceRepo.findById(data?.workspaceId);
+      if (!workspace) throw new Error("Workspace not found.");
+      assertTerminalShellAllowed(workspace);
+      const manager = TerminalPtyManager.getInstance();
+      const tab = manager.listTabs(workspace.id).find((session) => session.id === data.tabId);
+      if (!tab) throw new Error("Terminal tab not found for workspace.");
+      return manager.closeTab(data.tabId);
+    },
+  );
 
   // Task handlers
   ipcMain.handle(IPC_CHANNELS.TASK_CREATE, async (_, data) => {
@@ -6443,7 +7080,10 @@ export async function setupIpcHandlers(
 
   // Google Workspace Settings handlers
   ipcMain.handle(IPC_CHANNELS.GOOGLE_WORKSPACE_GET_SETTINGS, async () => {
-    return GoogleWorkspaceSettingsManager.loadSettings();
+    return {
+      ...GoogleWorkspaceSettingsManager.loadSettings(),
+      builtinOAuthClientAvailable: hasBundledGoogleWorkspaceOAuthClient(),
+    };
   });
 
   ipcMain.handle(
@@ -6462,14 +7102,32 @@ export async function setupIpcHandlers(
       const oauthConfigChanged =
         normalize(existing.clientId) !== normalize(validated.clientId) ||
         normalize(existing.clientSecret) !== normalize(validated.clientSecret) ||
+        existing.connectionMode !== validated.connectionMode ||
         normalizeScopes(existing.scopes) !== normalizeScopes(validated.scopes);
+      const normalizeAccounts = (accounts?: GoogleWorkspaceSettingsData["accounts"]) =>
+        JSON.stringify(
+          (accounts || [])
+            .map((account) => ({
+              email: normalizeGoogleAccountEmail(account.email),
+              accessToken: normalize(account.accessToken),
+              refreshToken: normalize(account.refreshToken),
+              connectionMode: account.connectionMode,
+              scopes: normalizeScopes(account.scopes),
+            }))
+            .sort((a, b) => String(a.email).localeCompare(String(b.email))),
+        );
       const tokenPayloadChanged =
         normalize(existing.accessToken) !== normalize(validated.accessToken) ||
-        normalize(existing.refreshToken) !== normalize(validated.refreshToken);
+        normalize(existing.refreshToken) !== normalize(validated.refreshToken) ||
+        normalizeAccounts(existing.accounts) !== normalizeAccounts(validated.accounts) ||
+        normalizeGoogleAccountEmail(existing.activeAccountEmail) !==
+          normalizeGoogleAccountEmail(validated.activeAccountEmail);
       const nextSettings =
         oauthConfigChanged && !tokenPayloadChanged
           ? {
               ...validated,
+              accounts: undefined,
+              activeAccountEmail: undefined,
               accessToken: undefined,
               refreshToken: undefined,
               tokenExpiresAt: undefined,
@@ -6490,7 +7148,7 @@ export async function setupIpcHandlers(
   ipcMain.handle(IPC_CHANNELS.GOOGLE_WORKSPACE_GET_STATUS, async () => {
     checkRateLimit(IPC_CHANNELS.GOOGLE_WORKSPACE_GET_STATUS);
     const settings = GoogleWorkspaceSettingsManager.loadSettings();
-    if (!settings.accessToken && !settings.refreshToken) {
+    if (!hasGoogleWorkspaceTokens(settings)) {
       return { configured: false, connected: false };
     }
     if (!settings.enabled) {
@@ -6503,6 +7161,7 @@ export async function setupIpcHandlers(
       name: result.name,
       error: result.success ? undefined : result.error,
       missingScopes: result.missingScopes,
+      connectionMode: settings.connectionMode,
     };
   });
 
@@ -6510,7 +7169,8 @@ export async function setupIpcHandlers(
     IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_START,
     async (_, payload) => {
       checkRateLimit(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_START);
-      return startGoogleWorkspaceOAuth(payload);
+      const settings = GoogleWorkspaceSettingsManager.loadSettings();
+      return startGoogleWorkspaceOAuth(resolveGoogleWorkspaceOAuthRequest(payload || {}, settings));
     },
   );
 
@@ -6518,23 +7178,43 @@ export async function setupIpcHandlers(
     IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_GET_LINK,
     async (_, payload) => {
       checkRateLimit(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_GET_LINK);
+      const settings = GoogleWorkspaceSettingsManager.loadSettings();
+      const oauthRequest = resolveGoogleWorkspaceOAuthRequest(payload || {}, settings);
       const url = await startGoogleWorkspaceOAuthGetLink(
-        payload,
+        oauthRequest,
         async (result) => {
           // Tokens arrive in the background after the user completes auth in their browser.
           // Merge into existing settings so other fields (clientId, scopes, etc.) are preserved.
           const existing = await GoogleWorkspaceSettingsManager.loadSettings();
           const tokenExpiresAt = result.expiresIn
             ? Date.now() + result.expiresIn * 1000
-            : existing.tokenExpiresAt;
-          await GoogleWorkspaceSettingsManager.saveSettings({
-            ...existing,
-            enabled: true,
-            accessToken: result.accessToken,
-            refreshToken: result.refreshToken ?? existing.refreshToken,
-            tokenExpiresAt,
-            scopes: result.scopes ?? existing.scopes,
-          });
+            : undefined;
+          const email =
+            normalizeGoogleAccountEmail(result.email) ||
+            normalizeGoogleAccountEmail(oauthRequest?.loginHint) ||
+            normalizeGoogleAccountEmail(existing.loginHint);
+          const nextSettings = email
+            ? upsertGoogleWorkspaceAccount(existing, {
+                email,
+                name: result.email,
+                accessToken: result.accessToken,
+                refreshToken: result.refreshToken,
+                tokenExpiresAt,
+                scopes: result.scopes ?? existing.scopes,
+                connectionMode: oauthRequest?.connectionMode ?? existing.connectionMode,
+                connectedAt: Date.now(),
+              })
+            : {
+                ...existing,
+                enabled: true,
+                connectionMode: oauthRequest?.connectionMode ?? existing.connectionMode,
+                accessToken: result.accessToken,
+                refreshToken: result.refreshToken ?? existing.refreshToken,
+                tokenExpiresAt,
+                scopes: result.scopes ?? existing.scopes,
+              };
+          await GoogleWorkspaceSettingsManager.saveSettings(nextSettings);
+          GoogleWorkspaceSettingsManager.clearCache();
         },
         (err) => {
           logger.error(
@@ -8506,7 +9186,7 @@ export async function setupIpcHandlers(
     IPC_CHANNELS.TEAM_RUN_FIND_BY_ROOT_TASK,
     async (_, rootTaskId: string) => {
       const validated = validateInput(UUIDSchema, rootTaskId, "root task ID");
-      return teamRunRepo.findByRootTaskId(validated) || null;
+      return agentDaemon.ensureCollaborativeRunForParentTask(validated) || null;
     },
   );
 
@@ -10374,6 +11054,15 @@ function setupScrapingHandlers(): void {
     // Check if Python and Scrapling are available
     return new Promise((resolve) => {
       const pythonPath = settings.pythonPath || "python3";
+      if (!/^[a-zA-Z0-9_\-./\\: ]+$/.test(pythonPath)) {
+        resolve({
+          installed: false,
+          pythonAvailable: false,
+          version: null,
+          error: `Invalid Python path: '${pythonPath}'`,
+        });
+        return;
+      }
       const child = spawn(pythonPath, [
         "-c",
         "import scrapling; print(getattr(scrapling, '__version__', 'unknown'))",
@@ -10844,6 +11533,20 @@ function setupNotificationHandlers(): void {
     },
   });
   setIntegrationAuthNotificationServiceProvider(() => notificationService);
+  setLogObserver((event) => {
+    const message = event.args
+      .map((arg) => {
+        if (arg instanceof Error) return arg.message;
+        if (typeof arg === "string") return arg;
+        try {
+          return JSON.stringify(arg);
+        } catch {
+          return String(arg);
+        }
+      })
+      .join(" ");
+    void notifyDetectedIntegrationAuthIssue(new Error(message));
+  });
 
   logger.debug("[Notifications] Service initialized");
 
@@ -11050,6 +11753,13 @@ async function setupHooksHandlers(agentDaemon: AgentDaemon): Promise<void> {
         if (!task) {
           const err: Any = new Error(`Task ${action.taskId} not found`);
           err.statusCode = 404;
+          throw err;
+        }
+        if (action.workspaceId && task.workspaceId !== action.workspaceId) {
+          const err: Any = new Error(
+            `Task ${action.taskId} is not in authorized workspace ${action.workspaceId}`,
+          );
+          err.statusCode = 403;
           throw err;
         }
         void agentDaemon
