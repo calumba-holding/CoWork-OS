@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildIntegrationMentionOptionsFromState } from "../integration-mention-options";
+import { GMAIL_DEFAULT_SCOPES, GOOGLE_WORKSPACE_DEFAULT_SCOPES } from "../../../shared/google-workspace";
 
 describe("buildIntegrationMentionOptionsFromState", () => {
   it("always exposes Browser Use as an @mention option", () => {
@@ -20,10 +21,11 @@ describe("buildIntegrationMentionOptionsFromState", () => {
       builtins: {
         googleWorkspace: {
           enabled: true,
+          connectionMode: "workspace",
           clientId: "",
           clientSecret: "",
           refreshToken: "refresh",
-          scopes: [],
+          scopes: GOOGLE_WORKSPACE_DEFAULT_SCOPES,
           timeoutMs: 20000,
         },
       },
@@ -37,6 +39,34 @@ describe("buildIntegrationMentionOptionsFromState", () => {
       "Inbox",
     ]);
     expect(options.some((option) => option.label === "Google Workspace")).toBe(false);
+    expect(options.find((option) => option.label === "Gmail")?.tools).toEqual(
+      expect.arrayContaining([
+        "gmail_search_emails",
+        "gmail_batch_read_email",
+        "gmail_read_email_thread",
+        "gmail_create_draft",
+        "gmail_send_email",
+        "gmail_action",
+      ]),
+    );
+  });
+
+  it("shows only Gmail and Inbox for Gmail-only Google connections", () => {
+    const options = buildIntegrationMentionOptionsFromState({
+      builtins: {
+        googleWorkspace: {
+          enabled: true,
+          connectionMode: "gmail",
+          refreshToken: "refresh",
+          scopes: GMAIL_DEFAULT_SCOPES,
+          timeoutMs: 20000,
+        },
+      },
+    });
+
+    expect(options.map((option) => option.label)).toEqual(["Browser", "Gmail", "Inbox"]);
+    expect(options.some((option) => option.label === "Google Drive")).toBe(false);
+    expect(options.some((option) => option.label === "Google Calendar")).toBe(false);
   });
 
   it("shows Inbox Agent when a mailbox backend is configured", () => {
