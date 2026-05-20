@@ -26,6 +26,8 @@ export interface AppearanceSettings {
   uiDensity?: UiDensity;
   timelineVerbosity?: TimelineVerbosity;
   devRunLoggingEnabled?: boolean; // Persist npm run dev stdout/stderr to logs/
+  homeResearchVaultEnabled?: boolean;
+  homeNextActionsEnabled?: boolean;
   language?: string; // Persisted language preference (e.g. 'en', 'ja', 'zh')
   disclaimerAccepted?: boolean;
   onboardingCompleted?: boolean;
@@ -1471,6 +1473,18 @@ export type ToolType =
   // Google Workspace (Drive/Gmail/Calendar)
   | "google_drive_action"
   | "gmail_action"
+  | "gmail_search_emails"
+  | "gmail_search_email_ids"
+  | "gmail_batch_read_email"
+  | "gmail_read_email_thread"
+  | "gmail_create_draft"
+  | "gmail_list_drafts"
+  | "gmail_update_draft"
+  | "gmail_send_draft"
+  | "gmail_send_email"
+  | "gmail_apply_labels_to_emails"
+  | "gmail_bulk_label_matching_emails"
+  | "gmail_forward_emails"
   | "mailbox_action"
   | "calendar_action"
   // Apple Calendar (macOS)
@@ -1633,6 +1647,18 @@ export const TOOL_GROUPS = {
     "onedrive_action",
     "google_drive_action",
     "gmail_action",
+    "gmail_search_emails",
+    "gmail_search_email_ids",
+    "gmail_batch_read_email",
+    "gmail_read_email_thread",
+    "gmail_create_draft",
+    "gmail_list_drafts",
+    "gmail_update_draft",
+    "gmail_send_draft",
+    "gmail_send_email",
+    "gmail_apply_labels_to_emails",
+    "gmail_bulk_label_matching_emails",
+    "gmail_forward_emails",
     "mailbox_action",
     "calendar_action",
     "apple_calendar_action",
@@ -1811,6 +1837,18 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   onedrive_action: "network",
   google_drive_action: "network",
   gmail_action: "network",
+  gmail_search_emails: "network",
+  gmail_search_email_ids: "network",
+  gmail_batch_read_email: "network",
+  gmail_read_email_thread: "network",
+  gmail_create_draft: "network",
+  gmail_list_drafts: "network",
+  gmail_update_draft: "network",
+  gmail_send_draft: "network",
+  gmail_send_email: "network",
+  gmail_apply_labels_to_emails: "network",
+  gmail_bulk_label_matching_emails: "network",
+  gmail_forward_emails: "network",
   mailbox_action: "network",
   calendar_action: "network",
   apple_calendar_action: "network",
@@ -2183,6 +2221,8 @@ export interface AgentConfig {
   qualityPasses?: 1 | 2 | 3;
   /** Auto-create an ephemeral collaborative team for this task */
   collaborativeMode?: boolean;
+  /** Internal: this collaborative run visualizes externally spawned child agents only. */
+  childAgentCollaborativeRun?: boolean;
   /** Create a collaborative run from a /multitask command with lane-specific child tasks */
   multitaskMode?: boolean;
   /** Requested number of /multitask lanes */
@@ -3071,6 +3111,11 @@ export interface TaskFollowUpInput {
   quotedAssistantMessage?: QuotedAssistantMessage;
   permissionMode?: PermissionMode;
   shellAccess?: boolean;
+  /**
+   * Non-persistent runtime config for one automated follow-up. Unlike
+   * permissionMode/shellAccess, this must not be written back to the task.
+   */
+  agentConfigOverride?: AgentConfig;
   integrationMentions?: IntegrationMentionSelection[];
 }
 
@@ -3355,10 +3400,11 @@ export interface UnifiedRecallResponse {
   results: UnifiedRecallResult[];
 }
 
-export type ShellSessionScope = "task" | "workspace";
+export type ShellSessionScope = "task" | "workspace" | "tab";
 export type ShellSessionStatus =
   | "inactive"
   | "active"
+  | "running"
   | "resetting"
   | "ended"
   | "fallback";
@@ -3391,6 +3437,75 @@ export interface ShellSessionLifecycleEvent {
   commandId?: string;
   reason?: string;
   timestamp: number;
+}
+
+export interface TerminalTabRunResult {
+  tab: ShellSessionInfo;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  terminationReason?: CommandTerminationReason;
+}
+
+export interface TerminalTabCompletionResult {
+  line: string;
+  cursor: number;
+  matches: string[];
+  completed: boolean;
+}
+
+export interface TerminalTabOutputEvent {
+  tabId: string;
+  workspaceId: string;
+  stream: "stdout" | "stderr";
+  output: string;
+  cwd?: string;
+  status?: ShellSessionStatus;
+  timestamp: number;
+}
+
+export type GithubReviewThreadState =
+  | "open"
+  | "resolved"
+  | "outdated"
+  | "unknown";
+
+export interface GithubPullRequestReviewComment {
+  id: string;
+  author: string;
+  body: string;
+  url: string;
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export interface GithubPullRequestReviewThread {
+  id: string;
+  prNumber: number;
+  repository: string;
+  url: string;
+  path?: string;
+  line?: number;
+  originalLine?: number;
+  diffHunk?: string;
+  author: string;
+  body: string;
+  comments: GithubPullRequestReviewComment[];
+  state: GithubReviewThreadState;
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export interface GithubPullRequestReviewSummary {
+  repository: string;
+  repoRoot: string;
+  branch: string;
+  prNumber?: number;
+  prUrl?: string;
+  baseRefName?: string;
+  headRefName?: string;
+  threads: GithubPullRequestReviewThread[];
 }
 
 export type LLMRoutingReason =
@@ -4834,6 +4949,7 @@ export type AgentTeamRunStatus =
 export type AgentTeamRunPhase =
   | "dispatch"
   | "think"
+  | "execute"
   | "synthesize"
   | "complete";
 
@@ -5678,8 +5794,9 @@ export const DEFAULT_AGENT_ROLES: Omit<
     icon: "🔍",
     color: "#8b5cf6",
     capabilities: ["review", "analyze"],
-    // Default to read-only behavior; reviewers should not modify files or run commands unless explicitly intended.
-    toolRestrictions: { deniedTools: ["group:write", "group:destructive"] },
+    // Default to read-only behavior; reviewers should not modify files.
+    // Shell remains governed by workspace shell permission and command approvals.
+    toolRestrictions: { deniedTools: ["group:write", "delete_file"] },
     autonomyLevel: "specialist",
     isSystem: true,
     isActive: true,
@@ -5693,8 +5810,9 @@ export const DEFAULT_AGENT_ROLES: Omit<
     icon: "🔬",
     color: "#10b981",
     capabilities: ["research", "analyze", "document"],
-    // Default to read-only behavior; research tasks should not modify files or run commands.
-    toolRestrictions: { deniedTools: ["group:write", "group:destructive"] },
+    // Default to read-only behavior; research tasks should not modify files.
+    // Shell remains governed by workspace shell permission and command approvals.
+    toolRestrictions: { deniedTools: ["group:write", "delete_file"] },
     autonomyLevel: "specialist",
     isSystem: true,
     isActive: true,
@@ -5871,7 +5989,7 @@ export const DEFAULT_AGENT_ROLES: Omit<
     icon: "🔎",
     color: "#2563eb",
     capabilities: ["research", "analyze", "document"],
-    toolRestrictions: { deniedTools: ["group:write", "group:destructive"] },
+    toolRestrictions: { deniedTools: ["group:write", "delete_file"] },
     autonomyLevel: "specialist",
     isSystem: true,
     isActive: true,
@@ -5911,7 +6029,7 @@ export const DEFAULT_AGENT_ROLES: Omit<
     icon: "✅",
     color: "#f59e0b",
     capabilities: ["review", "analyze", "research"],
-    toolRestrictions: { deniedTools: ["group:write", "group:destructive"] },
+    toolRestrictions: { deniedTools: ["group:write", "delete_file"] },
     autonomyLevel: "specialist",
     isSystem: true,
     isActive: true,
@@ -7396,6 +7514,22 @@ export const IPC_CHANNELS = {
   FILE_READ_FOR_VIEWER: "file:readForViewer",
   FILE_UPDATE_SPREADSHEET: "file:updateSpreadsheet",
   FILE_UPDATE_DOCUMENT: "file:updateDocument",
+  GITHUB_REVIEW_LIST: "githubReview:list",
+  GITHUB_REVIEW_BUILD_TASK_PROMPT: "githubReview:buildTaskPrompt",
+  TERMINAL_TAB_LIST: "terminalTab:list",
+  TERMINAL_TAB_CREATE: "terminalTab:create",
+  TERMINAL_TAB_RUN: "terminalTab:run",
+  TERMINAL_TAB_WRITE: "terminalTab:write",
+  TERMINAL_TAB_RESIZE: "terminalTab:resize",
+  TERMINAL_TAB_COMPLETE: "terminalTab:complete",
+  TERMINAL_TAB_STOP: "terminalTab:stop",
+  TERMINAL_TAB_CLOSE: "terminalTab:close",
+  TERMINAL_TAB_OUTPUT: "terminalTab:output",
+  SPREADSHEET_OPEN_WORKBOOK: "spreadsheet:openWorkbook",
+  SPREADSHEET_GET_VIEWPORT: "spreadsheet:getViewport",
+  SPREADSHEET_APPLY_PATCHES: "spreadsheet:applyPatches",
+  SPREADSHEET_SAVE_WORKBOOK: "spreadsheet:saveWorkbook",
+  SPREADSHEET_CLOSE_WORKBOOK: "spreadsheet:closeWorkbook",
   BROWSER_WORKBENCH_REGISTER: "browserWorkbench:register",
   BROWSER_WORKBENCH_UNREGISTER: "browserWorkbench:unregister",
   BROWSER_WORKBENCH_STATUS: "browserWorkbench:status",
@@ -7864,6 +7998,8 @@ export const IPC_CHANNELS = {
   GATEWAY_GRANT_ACCESS: "gateway:grantAccess",
   GATEWAY_REVOKE_ACCESS: "gateway:revokeAccess",
   GATEWAY_GENERATE_PAIRING: "gateway:generatePairing",
+  GATEWAY_MESSAGE: "gateway:message",
+  GATEWAY_USERS_UPDATED: "gateway:users-updated",
 
   // Search Settings
   SEARCH_GET_SETTINGS: "search:getSettings",
@@ -8238,6 +8374,11 @@ export const IPC_CHANNELS = {
   CANVAS_CHECKPOINT_RESTORE: "canvas:checkpointRestore",
   CANVAS_CHECKPOINT_DELETE: "canvas:checkpointDelete",
   CANVAS_GET_CONTENT: "canvas:getContent",
+  CANVAS_A2UI_ACTION_FROM_WINDOW: "canvas:a2ui-action-from-window",
+  CANVAS_GET_SESSION_FROM_WINDOW: "canvas:get-session-from-window",
+  CANVAS_AGENT_UPDATE: "canvas:agent-update",
+  CANVAS_REQUEST_SNAPSHOT_FROM_WINDOW: "canvas:request-snapshot-from-window",
+  CANVAS_LOG: "canvas:log",
 
   // Mobile Companion Nodes
   NODE_LIST: "node:list",
@@ -8415,6 +8556,9 @@ export const IPC_CHANNELS = {
   SUBCONSCIOUS_RESET_HISTORY: "subconscious:resetHistory",
   WHATSAPP_GET_INFO: "whatsapp:get-info",
   WHATSAPP_LOGOUT: "whatsapp:logout",
+  WHATSAPP_QR_CODE: "whatsapp:qr-code",
+  WHATSAPP_CONNECTED: "whatsapp:connected",
+  WHATSAPP_STATUS: "whatsapp:status",
 
   // Citation Engine
   CITATION_GET_FOR_TASK: "citation:getForTask",
@@ -9351,11 +9495,28 @@ export interface OneDriveConnectionTestResult {
   driveId?: string;
 }
 
-// Google Drive integration settings
+export interface GoogleWorkspaceAccount {
+  email: string;
+  name?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  tokenExpiresAt?: number;
+  scopes?: string[];
+  connectionMode?: GoogleWorkspaceConnectionMode;
+  connectedAt?: number;
+}
+
+export type GoogleWorkspaceConnectionMode = "gmail" | "workspace";
+
+// Google Drive/Gmail integration settings
 export interface GoogleWorkspaceSettingsData {
   enabled: boolean;
+  connectionMode?: GoogleWorkspaceConnectionMode;
   clientId?: string;
   clientSecret?: string;
+  builtinOAuthClientAvailable?: boolean;
+  accounts?: GoogleWorkspaceAccount[];
+  activeAccountEmail?: string;
   accessToken?: string;
   refreshToken?: string;
   tokenExpiresAt?: number;
