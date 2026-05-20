@@ -94,6 +94,69 @@ describe("TaskExecutor tool allow-list semantics", () => {
     expect(allowlist.size).toBeGreaterThan(0);
   });
 
+  it("keeps selected Gmail integration tools in step-scoped analysis allowlists", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      title: "@Gmail show my last received email",
+      agentConfig: {
+        integrationMentions: [
+          {
+            id: "builtin:gmail",
+            label: "Gmail",
+            providerKey: "google-workspace:gmail",
+            tools: ["gmail_search_emails", "gmail_batch_read_email", "gmail_action"],
+          },
+        ],
+      },
+    };
+
+    const allowlist = (TaskExecutor as Any).prototype.buildStepToolAllowlist.call(
+      executor,
+      { requiredTools: new Set<string>() },
+      "analysis",
+      "general",
+      "Access Gmail through the connected Gmail integration.",
+    );
+
+    expect(allowlist.has("gmail_search_emails")).toBe(true);
+    expect(allowlist.has("gmail_batch_read_email")).toBe(true);
+    expect(allowlist.has("gmail_read_email_thread")).toBe(true);
+    expect(allowlist.has("gmail_action")).toBe(true);
+  });
+
+  it("ignores unrecognized integration mention tool names in step-scoped allowlists", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      title: "@Gmail show my last received email",
+      agentConfig: {
+        integrationMentions: [
+          {
+            id: "builtin:gmail",
+            label: "Gmail",
+            providerKey: "google-workspace:gmail",
+            tools: ["gmail_search_emails", "run_command"],
+          },
+        ],
+      },
+    };
+
+    const allowlist = (TaskExecutor as Any).prototype.buildStepToolAllowlist.call(
+      executor,
+      { requiredTools: new Set<string>() },
+      "analysis",
+      "general",
+      "Access Gmail through the connected Gmail integration.",
+    );
+
+    expect(allowlist.has("gmail_search_emails")).toBe(true);
+    expect(allowlist.has("run_command")).toBe(true);
+    const mentionedTools = (TaskExecutor as Any).prototype.getIntegrationMentionToolAllowlist.call(
+      executor,
+    );
+    expect(mentionedTools.has("gmail_search_emails")).toBe(true);
+    expect(mentionedTools.has("run_command")).toBe(false);
+  });
+
   it("adds native desktop GUI tools for calculator-style steps", () => {
     const executor = Object.create(TaskExecutor.prototype) as Any;
     executor.task = {
@@ -239,6 +302,19 @@ describe("TaskExecutor tool allow-list semantics", () => {
     ) as Set<string>;
 
     expect(requiredTools.has("generate_video")).toBe(true);
+  });
+
+  it("does not infer generate_video for local ffmpeg video inspection steps", () => {
+    const executor = createExecutor();
+    executor.getEffectiveExecutionMode = vi.fn().mockReturnValue("execute");
+    executor.normalizeToolName = vi.fn((name: string) => ({ name }));
+
+    const requiredTools = (executor as Any).extractRequiredToolsFromStepDescription(
+      "Use ffprobe/ffmpeg to read each video's duration.",
+    ) as Set<string>;
+
+    expect(requiredTools.has("generate_video")).toBe(false);
+    expect(requiredTools.has("run_command")).toBe(true);
   });
 
   it("infers get_video_generation_job for polling steps", () => {
