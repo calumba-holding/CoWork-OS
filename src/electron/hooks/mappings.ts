@@ -28,6 +28,7 @@ type HookTransformResult = Partial<{
   text: string;
   mode: "now" | "next-heartbeat";
   message: string;
+  taskId: string;
   wakeMode: "now" | "next-heartbeat";
   name: string;
   sessionKey: string;
@@ -184,6 +185,7 @@ function normalizeHookMapping(
     matchType,
     token: mapping.token?.trim() || undefined,
     action,
+    targetTaskId: mapping.targetTaskId?.trim() || undefined,
     wakeMode,
     name: mapping.name,
     sessionKey: mapping.sessionKey,
@@ -242,6 +244,19 @@ function buildActionFromMapping(
   }
 
   const message = renderTemplate(mapping.messageTemplate ?? "", ctx);
+  if (mapping.action === "task_message") {
+    return {
+      ok: true,
+      action: {
+        kind: "task_message",
+        taskId: renderOptional(mapping.targetTaskId, ctx) || "",
+        workspaceId: renderOptional(mapping.workspaceId, ctx),
+        message,
+        response: mapping.response,
+      },
+    };
+  }
+
   return {
     ok: true,
     action: {
@@ -271,19 +286,37 @@ function buildActionFromMapping(
 function mergeAction(
   base: HookAction,
   override: HookTransformResult,
-  defaultAction: "wake" | "agent",
+  defaultAction: "wake" | "agent" | "task_message",
 ): HookMappingResult {
   if (!override) {
     return validateAction(base);
   }
 
-  const kind = (override.kind ?? base.kind ?? defaultAction) as "wake" | "agent";
+  const kind = (override.kind ?? base.kind ?? defaultAction) as
+    | "wake"
+    | "agent"
+    | "task_message";
 
   if (kind === "wake") {
     const baseWake = base.kind === "wake" ? base : undefined;
     const text = typeof override.text === "string" ? override.text : (baseWake?.text ?? "");
     const mode = override.mode === "next-heartbeat" ? "next-heartbeat" : (baseWake?.mode ?? "now");
     return validateAction({ kind: "wake", text, mode });
+  }
+
+  if (kind === "task_message") {
+    const baseTaskMessage = base.kind === "task_message" ? base : undefined;
+    const taskId =
+      typeof override.taskId === "string" ? override.taskId : (baseTaskMessage?.taskId ?? "");
+    const message =
+      typeof override.message === "string" ? override.message : (baseTaskMessage?.message ?? "");
+    return validateAction({
+      kind: "task_message",
+      taskId,
+      workspaceId: override.workspaceId ?? baseTaskMessage?.workspaceId,
+      message,
+      response: override.response ?? baseTaskMessage?.response,
+    });
   }
 
   const baseAgent = base.kind === "agent" ? base : undefined;
@@ -328,6 +361,9 @@ function validateAction(action: HookAction): HookMappingResult {
 
   if (!action.message?.trim()) {
     return { ok: false, error: "hook mapping requires message" };
+  }
+  if (action.kind === "task_message" && !action.taskId?.trim()) {
+    return { ok: false, error: "hook mapping requires targetTaskId" };
   }
   return { ok: true, action };
 }
