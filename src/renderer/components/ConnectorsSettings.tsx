@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Search, X } from "lucide-react";
 import { ConnectorSetupModal, ConnectorProvider } from "./ConnectorSetupModal";
 import { ConnectorEnvModal, ConnectorEnvField } from "./ConnectorEnvModal";
 import { ConnectorProfileView } from "./ConnectorProfileView";
@@ -701,8 +702,8 @@ const INTEGRATIONS: IntegrationDefinition[] = [
   },
   {
     key: "googleworkspace",
-    name: "Google Workspace",
-    description: "Access Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, and Chat with OAuth.",
+    name: "Gmail",
+    description: "Connect Gmail for inbox search, thread reading, drafts, sending, and labels.",
     component: <GoogleWorkspaceSettings />,
   },
   {
@@ -866,6 +867,10 @@ function getIntegrationCategory(): Exclude<ConnectorCategory, ""> {
   return "productivity";
 }
 
+function normalizeConnectorSearch(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 export function ConnectorsSettings() {
   const [settings, setSettings] = useState<MCPSettingsData | null>(null);
   const [serverStatuses, setServerStatuses] = useState<MCPServerStatus[]>([]);
@@ -891,6 +896,7 @@ export function ConnectorsSettings() {
 
   const [activeFilter, setActiveFilter] = useState<"all" | "connected" | "available">("all");
   const [activeCategory, setActiveCategory] = useState<ConnectorCategory>("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [detailConnector, setDetailConnector] = useState<{
     connector: ConnectorDefinition;
     config: MCPServerConfig | undefined;
@@ -1042,16 +1048,33 @@ export function ConnectorsSettings() {
 
   const connectedCount = connectorRows.filter((r) => r.status?.status === "connected").length;
   const availableCount = connectorRows.filter((r) => r.status?.status !== "connected").length;
+  const normalizedSearchQuery = normalizeConnectorSearch(searchQuery);
 
-  const filteredRows = connectorRows.filter(({ status }) => {
-    if (activeFilter === "connected") return status?.status === "connected";
-    if (activeFilter === "available") return status?.status !== "connected";
-    return true;
-  }).filter(({ connector }) => activeCategory === "" || getConnectorCategory(connector) === activeCategory);
+  const filteredRows = connectorRows
+    .filter(({ status }) => {
+      if (activeFilter === "connected") return status?.status === "connected";
+      if (activeFilter === "available") return status?.status !== "connected";
+      return true;
+    })
+    .filter(({ connector }) => activeCategory === "" || getConnectorCategory(connector) === activeCategory)
+    .filter(({ connector }) => {
+      if (!normalizedSearchQuery) return true;
+      return [connector.name, connector.description, connector.key, connector.registryId].some((value) =>
+        (value || "").toLowerCase().includes(normalizedSearchQuery),
+      );
+    });
 
   const filteredIntegrations = INTEGRATIONS.filter(
     (_integration) => activeCategory === "" || getIntegrationCategory() === activeCategory,
-  );
+  ).filter((integration) => {
+    if (!normalizedSearchQuery) return true;
+    return [integration.name, integration.description, integration.key].some((value) =>
+      value.toLowerCase().includes(normalizedSearchQuery),
+    );
+  });
+  const showIntegrationResults = activeFilter !== "connected" && filteredIntegrations.length > 0;
+  const showConnectorEmpty = filteredRows.length === 0 && !showIntegrationResults;
+  const showMcpDivider = showIntegrationResults && filteredRows.length > 0;
 
   return (
     <div className="settings-section connector-marketplace">
@@ -1082,6 +1105,26 @@ export function ConnectorsSettings() {
         </div>
 
         <div className="cm-toolbar-right">
+          <div className="cm-search" role="search">
+            <Search size={14} strokeWidth={2} aria-hidden="true" />
+            <input
+              type="search"
+              aria-label="Search connectors"
+              placeholder="Search connectors"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                className="cm-search-clear"
+                aria-label="Clear connector search"
+                onClick={() => setSearchQuery("")}
+              >
+                <X size={13} strokeWidth={2} aria-hidden="true" />
+              </button>
+            )}
+          </div>
           <select
             className="cm-category-select"
             value={activeCategory}
@@ -1104,7 +1147,7 @@ export function ConnectorsSettings() {
         </div>
       </div>
 
-      {activeFilter !== "connected" && filteredIntegrations.length > 0 && (
+      {showIntegrationResults && (
         <>
           <div className="cm-section-divider">
             <span className="cm-section-label">Storage &amp; Productivity</span>
@@ -1129,52 +1172,60 @@ export function ConnectorsSettings() {
               </button>
             ))}
           </div>
-          <div className="cm-section-divider">
-            <span className="cm-section-label">MCP connectors</span>
-          </div>
+          {showMcpDivider && (
+            <div className="cm-section-divider">
+              <span className="cm-section-label">MCP connectors</span>
+            </div>
+          )}
         </>
       )}
 
-      <div className="cm-grid">
-        {filteredRows.map(({ connector, config, status }) => {
-          const isConnected = status?.status === "connected";
-          const serverStatus = status?.status || "disconnected";
-          return (
-            <button
-              key={connector.key}
-              className={`cm-card${isConnected ? " cm-card--connected" : ""}`}
-              onClick={() => setDetailConnector({ connector, config, status })}
-            >
-              {isConnected && (
-                <span className="cm-card-connected-badge" aria-label="Connected">
-                  ✓
-                </span>
-              )}
-              <div
-                className="cm-card-icon"
-                style={{ backgroundColor: getConnectorColor(connector.name) }}
+      {(filteredRows.length > 0 || showConnectorEmpty) && (
+        <div className="cm-grid">
+          {filteredRows.map(({ connector, config, status }) => {
+            const isConnected = status?.status === "connected";
+            const serverStatus = status?.status || "disconnected";
+            return (
+              <button
+                key={connector.key}
+                className={`cm-card${isConnected ? " cm-card--connected" : ""}`}
+                onClick={() => setDetailConnector({ connector, config, status })}
               >
-                {connector.name.charAt(0).toUpperCase()}
-              </div>
-              <div className="cm-card-body">
-                <span className="cm-card-name">{connector.name}</span>
-                <span className="cm-card-desc">{connector.description}</span>
-              </div>
-              {config && !isConnected && (
-                <span
-                  className="cm-card-status-dot"
-                  style={{ backgroundColor: getStatusColor(serverStatus) }}
-                  title={getStatusText(serverStatus)}
-                />
-              )}
-            </button>
-          );
-        })}
+                {isConnected && (
+                  <span className="cm-card-connected-badge" aria-label="Connected">
+                    ✓
+                  </span>
+                )}
+                <div
+                  className="cm-card-icon"
+                  style={{ backgroundColor: getConnectorColor(connector.name) }}
+                >
+                  {connector.name.charAt(0).toUpperCase()}
+                </div>
+                <div className="cm-card-body">
+                  <span className="cm-card-name">{connector.name}</span>
+                  <span className="cm-card-desc">{connector.description}</span>
+                </div>
+                {config && !isConnected && (
+                  <span
+                    className="cm-card-status-dot"
+                    style={{ backgroundColor: getStatusColor(serverStatus) }}
+                    title={getStatusText(serverStatus)}
+                  />
+                )}
+              </button>
+            );
+          })}
 
-        {filteredRows.length === 0 && (
-          <div className="cm-empty">No connectors match this filter.</div>
-        )}
-      </div>
+          {showConnectorEmpty && (
+            <div className="cm-empty">
+              {normalizedSearchQuery
+                ? "No connectors match this search."
+                : "No connectors match this filter."}
+            </div>
+          )}
+        </div>
+      )}
 
       {integrationModal && (
         <div className="mcp-modal-overlay" onClick={() => setIntegrationModal(null)}>
