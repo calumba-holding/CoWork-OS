@@ -213,6 +213,24 @@ When an explicit cap exists:
 - `adaptive_unbounded` still soft-lands and can recover bounded follow-up turns before escalating to a safety stop
 - task telemetry records whether the cap came from explicit config, a managed template, or an internal helper flow
 
+## Forked Session Lifecycle
+
+Forked sessions use the same execution runtime as ordinary sessions, but their creation path is intentionally non-executing.
+
+Creation flow:
+
+1. The daemon creates a new task row with a fresh `sessionId` and lineage fields from the source task.
+2. Replayable history is copied from the source task into the forked task.
+3. The forked task remains `pending`.
+4. The renderer selects the forked task and shows the copied transcript.
+5. No executor turn begins until the user sends a prompt in the fork.
+
+This separation is required because a fork is a draft branch, not an implicit continuation request. The UI must not show a running spinner or stop button for a pending fork. The backend must not call `startTask`, route work to a provider, run tools, create a worktree, or emit task-start lifecycle events during fork creation.
+
+After the user sends the first prompt in the fork, execution resumes through the normal follow-up path. The executor restores runtime state from the copied events before building the next prompt, then appends the new user message and starts the turn. From that point forward, the fork behaves like any other active task with an inherited transcript and independent future events.
+
+Forked sessions are listed as top-level recent sessions in the sidebar. The source relationship is still available through `branchFromTaskId`, so detail views can offer parent navigation without changing the session list hierarchy.
+
 ## Output Budget Policy
 
 When `COWORK_LLM_OUTPUT_POLICY=adaptive` is enabled, execution turns use a centralized output-budget resolver instead of depending on scattered per-provider defaults.
