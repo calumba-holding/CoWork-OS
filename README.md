@@ -25,6 +25,7 @@
   <a href="docs/message-box-shortcuts.md">Message Box Shortcuts</a> &middot;
   <a href="docs/ask-inbox-architecture.md">Ask Inbox</a> &middot;
   <a href="docs/everything-workbench.md">Everything Workbench</a> &middot;
+  <a href="docs/terminal-tabs.md">Terminal Tabs</a> &middot;
   <a href="docs/browser-workbench.md">Browser Workbench</a> &middot;
   <a href="docs/showcase.md">Use Cases</a> &middot;
   <a href="docs/release-notes-0.5.45.md">Release Notes 0.5.45</a> &middot;
@@ -44,6 +45,7 @@
 - **AI Super App / Everything App** — CoWork OS is the one local-first app for everyday AI work: coding, email, research, web design, documents, spreadsheets, presentations, PDFs, channels, devices, automations, memory, providers, and approvals all live in one governed workspace.
 - **GUI-first agent management** — Create reusable agents, spawn parallel work, inspect delegated runs, assign tasks, review approvals, and monitor many agents from Agents Hub, Mission Control, task timelines, and visual boards instead of managing everything from a terminal.
 - **Everything Workbench** — Chat, tasks, documents, spreadsheets, presentations, web pages, PDFs, and file outputs live beside the agent. Generate an artifact, open it in CoWork, review or edit it, and ask for follow-up changes without defaulting to separate office apps. [Learn more](docs/everything-workbench.md)
+- **Real Terminal Tabs** — Open multiple xterm.js + node-pty terminals inside the workspace, with native macOS shell and Windows `cmd.exe` behavior, Tab completion, arrows, Ctrl+C, interactive CLI prompts, resizing, closeable tabs, and cwd-only prompts. This moves CoWork further toward one super app for coding, agents, artifacts, browser testing, inbox, automations, and direct terminal work. [Learn more](docs/terminal-tabs.md)
 - **Agents Hub** — Build reusable managed agents from prompts or templates, inspect their tools, skills, files, memory, channels, schedules, and approvals, then run tests or starter prompts as normal main-window tasks. The agent detail screen is configuration-first, not a separate sidebar chat. [Learn more](docs/managed-agents.md)
 - **Browser Workbench / Browser V2** — Test live websites and local apps in a visible in-app browser by default. The agent uses the same right-sidebar/fullscreen browser the user can see, with CDP-backed Browser V2 automation, responsive viewport testing through `browser_emulate`, accessibility snapshot refs, tabs, downloads/uploads, diagnostics, screenshots, annotation, and explicit opt-in for real signed-in Chrome/Edge control. [Learn more](docs/browser-workbench.md) · [Architecture](docs/browser-v2-architecture.md)
 - **Coding, web design, email, and knowledge work** — Use the same app for repository work, frontend/product design, inbox triage, research, docs, spreadsheets, presentations, web pages, PDFs, and long-running operational tasks.
@@ -87,6 +89,7 @@ Stable workflow entry points for the newest high-impact capabilities.
 - **Ideas panel** — curated launchpad of pre-written workflow prompts and capability-aware starting points, with deep links into common tasks.
 - **Research vaults (`llm-wiki`)** — first-class workspace-local knowledge bases inspired by Andrej Karpathy's LLM Wiki concept, with deterministic raw-source capture, Obsidian-friendly notes, filed-back outputs, vault search, and vault-health analysis. [Learn more](docs/llm-wiki.md)
 - **Everything Workbench** — generated documents, spreadsheets, decks, web pages, PDFs, and previews share the same artifact model: task-feed card, sidebar open, fullscreen workspace, follow-up composer, and refresh after the agent finishes the requested edit. It makes CoWork the default place to create, inspect, and revise everyday Word/Excel/PowerPoint-style work. [Learn more](docs/everything-workbench.md)
+- **Terminal Tabs** — real PTY-backed terminal tabs live inside the task workspace, so coding and CLI work can stay beside agent tasks, artifacts, browser previews, and approvals. [Learn more](docs/terminal-tabs.md)
 - **Document artifacts** — task-created Word-style files render as compact artifact cards. `.docx` opens directly in an editable right-sidebar document surface with Google Docs-style controls, save, copy, external-open, fullscreen mode, and the same functional follow-up composer used by spreadsheet artifacts. `.doc`, `.rtf`, `.odt`, `.ott`, `.pages`, and related Word-style formats are recognized with best-effort preview or external-app/folder actions. [Learn more](docs/document-artifacts.md)
 - **Designed editorial documents** — bundled `kami` skill for resumes, one-pagers, white papers, letters, portfolios, diagrams, and slide decks with workspace-local source scaffolding and PDF/PPTX export helpers. [Learn more](docs/skills/kami.md)
 - **Format-aware file preview popup** — clicking any file link in chat opens a unified preview modal that adapts to the format. Built-in support for HTML, Markdown, code (with `highlight.js` syntax colors), JSON / JSONL / GeoJSON (collapsible tree + raw toggle), CSV / TSV (RFC-4180 table), XLSX, DOCX, PDF (with page/OCR summary), images (fit / actual-size toggle, dimensions, alpha checkerboard), video, audio (with duration), LaTeX, and PPTX. Each format gets its own width profile, a header subtitle showing format-specific metadata, and a unified action bar with Copy path, Show in Finder, Open externally, and Close.
@@ -181,7 +184,7 @@ See the [Development Guide](docs/development.md) for prerequisites and details.
 1. **Choose an AI route** — The easiest path for many users is **Sign in with ChatGPT**. If CoWork detects a local Ollama model, it offers that private local route. API-key providers are available for Claude, OpenAI API, Gemini, OpenRouter, Groq, and others, with free-option badges shown where applicable.
 2. **Create a task or start from Ideas** — Describe what you want ("create a weekly plan", "create a quarterly report spreadsheet", "draft a DOCX memo", "build a small landing page") or begin from a curated Ideas prompt. No workspace needed — a private starter workspace is used automatically if you don't select one.
 3. **Choose a mode** — Pick **Chat**, **Execute**, **Plan**, **Analyze**, or **Verified** for the runtime behavior, then optionally toggle **Autonomous** (auto-approve actions), **Collaborative** (multi-agent perspectives), or **Multi-LLM** (compare providers with a judge) per task. For one-shot parallel lane work, start with `/multitask [N] <task>`.
-4. **Monitor execution** — Watch the real-time task timeline as the agent plans, executes, and produces artifacts. Parallel tool bursts are grouped into lane summaries, and shell commands run in a live terminal view where you can see output in real-time, stop execution, or provide input (e.g. `y`/`n`) directly.
+4. **Monitor execution** — Watch the real-time task timeline as the agent plans, executes, and produces artifacts. Parallel tool bursts are grouped into lane summaries, shell commands stay visible, and the workspace can open real terminal tabs for direct interactive CLI work.
 5. **Respond when needed** — Destructive operations require explicit approval (unless Autonomous mode is on), and plan-mode tasks can pause for structured multiple-choice input before continuing.
 
 <p align="center">
@@ -197,6 +200,8 @@ Task-based execution with dynamic re-planning, five runtime modes (Chat, Execute
 
 Skills now follow an additive runtime model: CoWork can proactively shortlist or apply a relevant skill, but the original task remains canonical. Skills add context and scoped execution modifiers instead of replacing the task prompt. [Learn more](docs/skills-runtime-model.md)
 
+Real terminal tabs now sit beside the task runtime: xterm.js renders the terminal, node-pty owns the OS pseudoterminal, macOS uses the user's login shell, and Windows uses `cmd.exe` through ConPTY/winpty. This makes CoWork a stronger everyday developer workbench because repository work, agent execution, approvals, browser testing, and direct CLI sessions no longer require switching to a separate terminal app. [Learn more](docs/terminal-tabs.md)
+
 <p align="center">
   <img src="resources/branding/images/cowork-os-3.webp" alt="Agents Hub" width="700">
   <br><em>Agents Hub collects reusable managed agents, templates, and starter prompts.</em>
@@ -211,6 +216,8 @@ Chronicle is an opt-in desktop-only recent-screen context lane for vague on-scre
 CoWork OS includes `llm-wiki` as a bundled, first-class research-vault workflow inspired by Andrej Karpathy's LLM Wiki idea: keep a `/raw` corpus, build durable linked notes on top, and make the result easy for agents to traverse later.
 
 You can launch it from the GUI with a normal prompt such as `Build a persistent Obsidian-friendly research vault for GRPO papers`, from the welcome/onboarding starter cards, or with `/llm-wiki` when you want explicit slash syntax.
+
+The welcome-screen Research vault browser is optional and disabled by default. Enable it from **Settings > Appearance > Home widgets > Show research vault** when you want the `research/wiki` vault card visible near the composer.
 
 `llm-wiki` creates and maintains a workspace-local markdown wiki with:
 
@@ -272,7 +279,7 @@ The Devices tab turns CoWork OS into a multi-machine control surface. Save and r
 
 ### Automations
 
-Automations are now organized around a hard boundary: **Workflow Intelligence** is the always-on cognitive loop, while `Routines` are the main saved-automation product layered on top of lower-level execution surfaces. `Scheduled Tasks`, `Webhooks`, and `Event Triggers` still exist, but they now also serve as advanced or compiled backends for routines rather than competing first-class automation concepts. Task view can also turn the current task into a real scheduled task from the three-dot menu with `Add automation...`, preserving the source task title, ID, and `cowork://tasks/<taskId>` deeplink. The home dashboard, welcome-screen Next actions, and routines panel surface recent automation suggestions/runs, while Scheduled Tasks shows run health, latest results, delivery status, and task links for generated sessions so you can monitor background systems without hunting through tabs. [Learn more](docs/core-automation.md) | [Task Automations](docs/task-automations.md)
+Automations are now organized around a hard boundary: **Workflow Intelligence** is the always-on cognitive loop, while `Routines` are the main saved-automation product layered on top of lower-level execution surfaces. `Scheduled Tasks`, `Webhooks`, and `Event Triggers` still exist, but they now also serve as advanced or compiled backends for routines rather than competing first-class automation concepts. Task view can turn the current task into a routine from the three-dot menu with `Add automation...`, preserving the source task title, ID, and `cowork://tasks/<taskId>` deeplink while continuing the same thread by default. The home dashboard and routines panel surface recent automation suggestions/runs, while the optional welcome-screen Next actions widget is disabled by default and can be enabled from **Settings > Appearance > Home widgets > Show next actions**. Scheduled Tasks shows run health, latest results, delivery status, and links for generated sessions or continued threads so you can monitor background systems without hunting through tabs. [Learn more](docs/core-automation.md) | [Task Automations](docs/task-automations.md)
 
 <p align="center">
   <img src="resources/branding/images/cowork-os-6.webp" alt="Automations dashboard" width="700">
@@ -564,7 +571,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history of completed features.
 | [Workflow Intelligence](docs/workflow-intelligence.md) | Memory + Heartbeat + Reflection + Dreaming + Suggestions model, reviewable outputs, and feedback learning |
 | [Dreaming](docs/dreaming.md) | Background memory curation, Dreaming runs/candidates, trigger sources, and review-first memory maintenance |
 | [Core Automation](docs/core-automation.md) | Runtime boundary for Workflow Intelligence, automation profiles, and the core harness |
-| [Task Automations](docs/task-automations.md) | Create scheduled tasks directly from a task's overflow menu |
+| [Task Automations](docs/task-automations.md) | Create task-sourced routines and scheduled thread follow-ups from a task's overflow menu |
 | [Heartbeat v3](docs/heartbeat-v3.md) | Default two-lane heartbeat architecture, signals, Pulse, Dispatch, and automation-profile-backed operator semantics |
 | [Security Guide](docs/security-guide.md) | Security model and best practices |
 | [Enterprise Connectors](docs/enterprise-connectors.md) | MCP connector development |
