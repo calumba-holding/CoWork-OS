@@ -16,6 +16,9 @@ import { CanvasManager } from "../../canvas/canvas-manager";
 import { LLMTool } from "../llm/types";
 import * as fs from "fs/promises";
 import * as path from "path";
+import { createLogger } from "../../utils/logger";
+
+const log = createLogger("CanvasTools");
 
 /**
  * CanvasTools provides agent capabilities for visual content rendering
@@ -70,12 +73,12 @@ export class CanvasTools {
       }
 
       if (requestedSession) {
-        console.warn(
-          `[CanvasTools] Provided session ${normalizedSessionId} is unavailable for pushContent (status: ${requestedSession.status}).`,
+        log.warn(
+          `Provided session ${normalizedSessionId} is unavailable for pushContent (status: ${requestedSession.status}).`,
         );
       } else {
-        console.warn(
-          `[CanvasTools] Provided session ${normalizedSessionId} does not exist. Resolving fallback session.`,
+        log.warn(
+          `Provided session ${normalizedSessionId} does not exist. Resolving fallback session.`,
         );
       }
     }
@@ -83,8 +86,8 @@ export class CanvasTools {
     const fallback = this.getLatestActiveSessionForTask(normalizedSessionId);
     if (fallback) {
       if (fallback.id !== normalizedSessionId) {
-        console.warn(
-          `[CanvasTools] Falling back to latest active session ${fallback.id} for canvas_push.`,
+        log.warn(
+          `Falling back to latest active session ${fallback.id} for canvas_push.`,
         );
       }
       return fallback.id;
@@ -110,8 +113,8 @@ export class CanvasTools {
 
     const session = await this.manager.createSession(this.taskId, this.workspace.id, "Auto Canvas");
     this.fallbackSessionId = session.id;
-    console.warn(
-      `[CanvasTools] No active canvas session found for pushContent; created fallback session ${session.id}.`,
+    log.warn(
+      `No active canvas session found for pushContent; created fallback session ${session.id}.`,
     );
     return session.id;
   }
@@ -125,8 +128,8 @@ export class CanvasTools {
     if (session.createdAt < this.sessionCutoff) {
       const message =
         "Canvas session belongs to a previous run. Create a new session with canvas_create for follow-up content instead of reusing an older session.";
-      console.error(
-        `[CanvasTools] ${action} blocked for stale session. sessionId=${sessionId}, createdAt=${session.createdAt}, cutoff=${this.sessionCutoff}`,
+      log.error(
+        `${action} blocked for stale session. sessionId=${sessionId}, createdAt=${session.createdAt}, cutoff=${this.sessionCutoff}`,
       );
       throw new Error(message);
     }
@@ -198,12 +201,12 @@ export class CanvasTools {
         const filePath = path.join(session.sessionDir, sanitizeFilename);
         try {
           resolvedContent = await fs.readFile(filePath, "utf-8");
-          console.warn(
-            `[CanvasTools] canvas_push missing content; reusing existing ${sanitizeFilename} from session ${resolvedSessionId}`,
+          log.warn(
+            `canvas_push missing content; reusing existing ${sanitizeFilename} from session ${resolvedSessionId}`,
           );
         } catch (error) {
-          console.error(
-            `[CanvasTools] Failed to read existing canvas content from ${filePath}:`,
+          log.error(
+            `Failed to read existing canvas content from ${filePath}:`,
             error,
           );
         }
@@ -227,13 +230,13 @@ export class CanvasTools {
           const candidate = await fs.readFile(filePath, "utf-8");
           if (!candidate.includes(defaultMarker)) {
             resolvedContent = candidate;
-            console.warn(
-              `[CanvasTools] canvas_push missing content; copied ${sanitizeFilename} from session ${session.id}`,
+            log.warn(
+              `canvas_push missing content; copied ${sanitizeFilename} from session ${session.id}`,
             );
             break;
           }
         } catch (error) {
-          console.error(`[CanvasTools] Failed to read canvas content from ${filePath}:`, error);
+          log.error(`Failed to read canvas content from ${filePath}:`, error);
         }
       }
     }
@@ -374,8 +377,8 @@ export class CanvasTools {
         transformed = transformed.replace(tag, inlineStyle);
         inlinedCount += 1;
       } catch (error) {
-        console.warn(
-          `[CanvasTools] Failed to inline stylesheet "${href}" for session ${sessionId}:`,
+        log.warn(
+          `Failed to inline stylesheet "${href}" for session ${sessionId}:`,
           error,
         );
       }
