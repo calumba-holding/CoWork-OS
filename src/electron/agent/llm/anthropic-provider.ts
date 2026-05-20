@@ -125,11 +125,19 @@ export class AnthropicProvider implements LLMProvider {
         throw new Error("Request cancelled");
       }
 
+      const REDACTED_HEADER_KEYS = /^(authorization|x-api-key|cookie|set-cookie|proxy-authorization)$/i;
+      const safeHeaders = error.headers
+        ? Object.fromEntries(
+            (Array.from(error.headers.entries()) as [string, string][]).map(([k, v]: [string, string]) =>
+              REDACTED_HEADER_KEYS.test(k) ? [k, "[REDACTED]"] : [k, v],
+            ),
+          )
+        : undefined;
       logger.error("API error:", {
         status: error.status,
         message: error.message,
         type: error.type || error.name,
-        headers: error.headers ? Object.fromEntries(error.headers) : undefined,
+        headers: safeHeaders,
       });
       throw error;
     }
