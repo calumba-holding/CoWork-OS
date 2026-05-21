@@ -155,8 +155,8 @@ describe("MCPSettingsManager batch mode", () => {
     const server = settings.servers[0];
 
     expect(server.command).toBe(process.execPath);
-    expect(server.args?.[0]).toBe("--runAsNode");
-    expect(server.args?.[1]).toContain("/connectors/salesforce-mcp/dist/index.js");
+    expect(server.args).not.toContain("--runAsNode");
+    expect(server.args?.[0]).toContain("/connectors/salesforce-mcp/dist/index.js");
     expect(writeCount).toBe(1);
   });
 });
