@@ -167,6 +167,13 @@ export class MemoryService {
   private static cleanupIntervalHandle?: ReturnType<typeof setInterval>;
   private static db?: import("better-sqlite3").Database;
 
+  private static promptRecallCache = new Map<
+    string,
+    { results: MemorySearchResult[]; createdAt: number }
+  >();
+  private static readonly PROMPT_RECALL_CACHE_TTL_MS = 5 * 60 * 1000;
+  private static readonly PROMPT_RECALL_CACHE_MAX_ENTRIES = 32;
+
   /**
    * Initialize the memory service
    */
@@ -427,11 +434,11 @@ export class MemoryService {
   static search(workspaceId: string, query: string, limit = 20): MemorySearchResult[] {
     this.ensureInitialized();
     const results = this.searchInternal(workspaceId, query, limit);
-    // Record references for tier promotion
     if (this.db && results.length > 0) {
-      for (const r of results) {
-        MemoryTierService.recordReference(this.db, r.id);
-      }
+      MemoryTierService.recordReferenceBatch(
+        this.db,
+        results.map((r) => r.id),
+      );
     }
     return results;
   }
@@ -810,6 +817,75 @@ export class MemoryService {
     return results.filter((result) => !ignoredIds.has(result.id));
   }
 
+  /**
+   * Fast prompt-recall path: local-only BM25 with 5-token cap, no imported-global,
+   * no hybrid semantic scoring, no tier tracking. Results are cached per workspace+prompt.
+   */
+  static searchForPromptRecallFast(
+    workspaceId: string,
+    query: string,
+    limit = 5,
+  ): MemorySearchResult[] {
+    this.ensureInitialized();
+
+    const queryHash = Array.from(query.slice(0, 2500)).reduce(
+      (h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0,
+      0,
+    );
+    const cacheKey = `${workspaceId}:${queryHash}:${query.length}`;
+    const cached = this.promptRecallCache.get(cacheKey);
+    if (cached && Date.now() - cached.createdAt < MemoryService.PROMPT_RECALL_CACHE_TTL_MS) {
+      return cached.results;
+    }
+
+    const rawResults = this.memoryRepo.searchLocalForPromptRecall(
+      workspaceId,
+      query,
+      limit + 5,
+    );
+
+    const filtered = rawResults.filter(
+      (r) =>
+        !this.isPromptRecallIgnoredContent(r.content) &&
+        !MemoryObservationService.isPromptSuppressed(r.id),
+    );
+    const results: MemorySearchResult[] = filtered.slice(0, limit).map((r) => ({
+      id: r.id,
+      snippet: r.snippet,
+      type: r.type,
+      relevanceScore: r.relevanceScore,
+      createdAt: r.createdAt,
+      taskId: r.taskId,
+      source: r.source,
+    }));
+
+    if (this.promptRecallCache.size >= MemoryService.PROMPT_RECALL_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.promptRecallCache.keys().next().value;
+      if (oldestKey !== undefined) this.promptRecallCache.delete(oldestKey);
+    }
+    this.promptRecallCache.set(cacheKey, { results, createdAt: Date.now() });
+
+    return results;
+  }
+
+  static clearPromptRecallCache(): void {
+    this.promptRecallCache.clear();
+  }
+
+  /**
+   * Fast marker-based lookup for background services that search by known
+   * content prefixes (e.g. "[SUGGESTION]", "[PLAYBOOK]"). Bypasses FTS
+   * entirely — uses LIKE, no tier tracking, no hybrid scoring.
+   */
+  static searchByContentMarker(
+    workspaceId: string,
+    marker: string,
+    limit = 50,
+  ): MemorySearchResult[] {
+    this.ensureInitialized();
+    return this.memoryRepo.searchByContentMarker(workspaceId, marker, limit);
+  }
+
   private static isImportedMemoryContent(content: string): boolean {
     const normalized = this.stripPromptRecallIgnoreMarker(content).trimStart();
     return normalized.startsWith("[Imported from ");
@@ -871,10 +947,8 @@ export class MemoryService {
     let relevantMemories: MemorySearchResult[] = [];
     if (taskPrompt && taskPrompt.length > 10) {
       try {
-        // Hybrid recall: use local embeddings + lexical search for better matches.
-        // Keep the query bounded for performance.
         const query = taskPrompt.slice(0, 2500);
-        relevantMemories = this.searchForPromptRecall(workspaceId, query, 10);
+        relevantMemories = this.searchForPromptRecallFast(workspaceId, query, 10);
 
         // Filter out memories that are already in recent
         const recentIds = new Set(recentMemories.map((m) => m.id));
