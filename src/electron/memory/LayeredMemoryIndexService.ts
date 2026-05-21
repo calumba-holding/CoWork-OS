@@ -79,6 +79,18 @@ function topicPath(workspacePath: string, title: string): string {
   return path.join(topicsDir(workspacePath), `${slug}.md`);
 }
 
+async function searchPromptRecallSafe(
+  workspaceId: string,
+  taskPrompt: string,
+  limit: number,
+): Promise<MemorySearchResult[]> {
+  try {
+    return await MemoryService.searchForPromptRecallAsync(workspaceId, taskPrompt, limit);
+  } catch {
+    return [];
+  }
+}
+
 export class LayeredMemoryIndexService {
   static resolveMemoryIndexPath(workspacePath: string): string {
     return memoryIndexPath(workspacePath);
@@ -105,7 +117,7 @@ export class LayeredMemoryIndexService {
     const topicLimit = Math.max(1, params.topicLimit ?? 4);
     await this.ensureLayout(params.workspacePath);
 
-    const memoryHits = MemoryService.searchForPromptRecall(params.workspaceId, params.taskPrompt, topicLimit)
+    const memoryHits = (await searchPromptRecallSafe(params.workspaceId, params.taskPrompt, topicLimit))
       .slice(0, topicLimit)
       .map((entry, index) => {
         const title = topicTitleFromResult(entry, `memory-${index + 1}`);
@@ -161,11 +173,11 @@ export class LayeredMemoryIndexService {
     const curatedContext = CuratedMemoryService.getPromptEntries(params.workspaceId, 5)
       .map((entry) => `- [${entry.target}/${entry.kind}] ${entry.content}`)
       .join("\n");
-    const archiveContext = MemoryService.searchForPromptRecall(
+    const archiveContext = (await searchPromptRecallSafe(
       params.workspaceId,
       params.taskPrompt,
       3,
-    )
+    ))
       .map((entry) => `- [${entry.type}] ${entry.snippet}`)
       .join("\n");
     const memoryContext = [curatedContext, archiveContext].filter(Boolean).join("\n");
