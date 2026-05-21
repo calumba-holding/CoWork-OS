@@ -1347,6 +1347,8 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
       CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
       CREATE INDEX IF NOT EXISTS idx_memories_compressed ON memories(is_compressed);
+      CREATE INDEX IF NOT EXISTS idx_memories_workspace_private
+        ON memories(workspace_id, is_private, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_curated_memory_workspace_target
         ON curated_memory_entries(workspace_id, target, status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_curated_memory_workspace_kind
