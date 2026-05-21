@@ -333,6 +333,61 @@ describe("PermissionEngine", () => {
     expect(result.reason.type).toBe("mode");
   });
 
+  it("prompts for one-time location access by default and disables persistent suggestions", () => {
+    const result = evaluate({
+      toolName: "get_current_location",
+      approvalType: "location_access",
+      mode: "default",
+      allowPersistence: false,
+    });
+
+    expect(result.decision).toBe("ask");
+    expect(result.scopePreview).toContain("get_current_location");
+    expect(result.suggestions.map((entry) => entry.action)).toEqual(["deny_once", "allow_once"]);
+  });
+
+  it("does not allow location access through persisted rules or bypass modes", () => {
+    const rules: PermissionRule[] = [
+      {
+        source: "session",
+        effect: "allow",
+        scope: { kind: "tool", toolName: "get_current_location" },
+      },
+    ];
+
+    for (const mode of ["dont_ask", "bypass_permissions"] as const) {
+      const result = evaluate({
+        toolName: "get_current_location",
+        approvalType: "location_access",
+        mode,
+        rules,
+      });
+
+      expect(result.decision).toBe("ask");
+      expect(result.matchedRule).toBeUndefined();
+      expect(result.suggestions.map((entry) => entry.action)).toEqual(["deny_once", "allow_once"]);
+    }
+  });
+
+  it("denies location access when workspace network capability is disabled", () => {
+    const result = evaluate({
+      workspace: {
+        ...workspace,
+        permissions: {
+          ...workspace.permissions,
+          network: false,
+        },
+      },
+      toolName: "get_current_location",
+      approvalType: "location_access",
+      mode: "default",
+    });
+
+    expect(result.decision).toBe("deny");
+    expect(result.reason.type).toBe("workspace_capability");
+    expect(result.reason.summary).toContain("network");
+  });
+
   it("still enforces workspace network permission for network read tools", () => {
     const result = evaluate({
       workspace: {
