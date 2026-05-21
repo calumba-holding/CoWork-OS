@@ -47,7 +47,7 @@ export class MemoryNudgeService {
       return { triggered: false, reason: "cooldown" };
     }
 
-    const report = MemoryPressureService.analyze(request.workspacePath);
+    const report = await MemoryPressureService.analyze(request.workspacePath);
     const pressureInstructions = MemoryPressureService.buildCompactionInstructions(report);
     const recent = request.taskId
       ? await TranscriptStore.loadRecentSpans(request.workspacePath, request.taskId, 12)
