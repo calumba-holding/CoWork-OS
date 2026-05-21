@@ -7,6 +7,7 @@ const mockSearch = vi.fn();
 vi.mock("../MemoryService", () => ({
   MemoryService: {
     search: (...args: unknown[]) => mockSearch(...args),
+    searchByContentMarker: (...args: unknown[]) => mockSearch(...args),
   },
 }));
 
