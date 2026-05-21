@@ -413,7 +413,7 @@ export interface SessionRuntimeDeps {
   removePinnedUserBlock: (messages: LLMMessage[], tag: string) => void;
   computeSharedContextKey: () => string;
   buildSharedContextBlock: () => string;
-  buildHybridMemoryRecallBlock: (workspaceId: string, query: string) => string;
+  buildHybridMemoryRecallBlock: (workspaceId: string, query: string) => Promise<string>;
   maybePreCompactionMemoryFlush: (opts: Any) => Promise<void>;
   buildCompactionSummaryBlock: (opts: Any) => Promise<string>;
   truncateSummaryBlock: (summary: string, maxTokens: number) => string;
@@ -1323,7 +1323,7 @@ export class SessionRuntime {
       const query = opts.memoryQuery.slice(0, 2500);
       if (query !== lastTurnMemoryRecallQuery) {
         lastTurnMemoryRecallQuery = query;
-        lastTurnMemoryRecallBlock = this.deps.buildHybridMemoryRecallBlock(
+        lastTurnMemoryRecallBlock = await this.deps.buildHybridMemoryRecallBlock(
           this.deps.getWorkspace().id,
           query,
         );
