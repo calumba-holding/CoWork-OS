@@ -236,7 +236,7 @@ function extractArchiveFragments(workspaceId: string, taskPrompt: string): Memor
       estimatedTokens: estimateTokens(memory.summary || memory.content.slice(0, 180)) + 2,
       category: memory.type,
     }));
-    const relevant = MemoryService.searchForPromptRecall(workspaceId, taskPrompt.slice(0, 2500), 5).map(
+    const relevant = MemoryService.searchForPromptRecallFast(workspaceId, taskPrompt.slice(0, 2500), 5).map(
       (result) => ({
         key: fingerprint(`archive:${result.id}`),
         source: "memory" as const,
