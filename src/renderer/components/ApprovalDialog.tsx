@@ -49,6 +49,8 @@ export function ApprovalDialog({ approval, onApprove, onDeny }: ApprovalDialogPr
         return "🌐";
       case "external_service":
         return "🔗";
+      case "location_access":
+        return "📍";
       default:
         return "⚠️";
     }
@@ -61,6 +63,7 @@ export function ApprovalDialog({ approval, onApprove, onDeny }: ApprovalDialogPr
         return "approval-danger";
       case "network_access":
       case "external_service":
+      case "location_access":
         return "approval-warning";
       default:
         return "approval-info";
