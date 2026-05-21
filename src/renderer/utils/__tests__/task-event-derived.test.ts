@@ -144,4 +144,23 @@ describe("deriveSharedTaskEventUiState action blocks", () => {
       "error-3",
     ]);
   });
+
+  it("limits command output sessions when more sessions are running than the UI budget", () => {
+    const shared = deriveSharedTaskEventUiState({
+      rawEvents: Array.from({ length: 20 }, (_, index) =>
+        makeEvent(`command-${index}`, 1_000 + index, "command_output", {
+          type: "start",
+          command: `node script-${index}.js`,
+          output: `$ node script-${index}.js\n`,
+        }),
+      ),
+      task: { id: "task-1", status: "executing" } as Any,
+      workspace: null,
+      verboseSteps: false,
+    });
+
+    expect(shared.commandOutputSessions).toHaveLength(12);
+    expect(shared.commandOutputSessions.every((session) => session.isRunning)).toBe(true);
+    expect(shared.commandOutputSessions[0].command).toBe("node script-8.js");
+  });
 });
