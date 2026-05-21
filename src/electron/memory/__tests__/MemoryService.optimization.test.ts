@@ -108,6 +108,7 @@ function createMockRepos() {
       }
       return count;
     },
+    searchLocalForPromptRecall: vi.fn(() => []),
   };
 
   const embeddingRepo = {
@@ -152,6 +153,16 @@ function setMemoryServiceState() {
   serviceState.summaryRepo = summaryRepo;
   serviceState.settingsRepo = settingsRepo;
   serviceState.markdownIndex = null;
+  serviceState.ftsWorker = null;
+  serviceState.promptRecallDiagnostics = {
+    queries: 0,
+    workerUnavailable: 0,
+    workerFailures: 0,
+    workerEmptyResults: 0,
+    workerHits: 0,
+    lastFailureAt: null,
+    lastFailureMessage: null,
+  };
   serviceState.memoryEmbeddingsByWorkspace = new Map();
   serviceState.importedEmbeddings = new Map();
   serviceState.importedEmbeddingsLoaded = true;
@@ -238,5 +249,49 @@ describe("MemoryService compression optimization", () => {
 
     const recent = MemoryService.getRecent(workspaceId, 10);
     expect(recent.some((memory) => memory.type === "summary")).toBe(true);
+  });
+
+  it("does not fall back to synchronous prompt recall when the FTS worker fails", async () => {
+    const serviceState = MemoryService as Any;
+    const searchLocalSpy = serviceState.memoryRepo.searchLocalForPromptRecall;
+    serviceState.ftsWorker = {
+      searchLocalForPromptRecall: vi.fn(async () => {
+        throw new Error("worker failed");
+      }),
+    };
+
+    const results = await MemoryService.searchForPromptRecallFastAsync(
+      workspaceId,
+      "large task prompt",
+      5,
+    );
+
+    expect(results).toEqual([]);
+    expect(serviceState.ftsWorker.searchLocalForPromptRecall).toHaveBeenCalled();
+    expect(searchLocalSpy).not.toHaveBeenCalled();
+    expect(MemoryService.getPromptRecallDiagnostics()).toMatchObject({
+      queries: 1,
+      workerFailures: 1,
+      lastFailureMessage: "worker failed",
+    });
+  });
+
+  it("records prompt recall diagnostics when the FTS worker is unavailable", async () => {
+    const serviceState = MemoryService as Any;
+    const searchLocalSpy = serviceState.memoryRepo.searchLocalForPromptRecall;
+
+    const results = await MemoryService.searchForPromptRecallFastAsync(
+      workspaceId,
+      "large task prompt",
+      5,
+    );
+
+    expect(results).toEqual([]);
+    expect(searchLocalSpy).not.toHaveBeenCalled();
+    expect(MemoryService.getPromptRecallDiagnostics()).toMatchObject({
+      queries: 1,
+      workerUnavailable: 1,
+      workerFailures: 0,
+    });
   });
 });
