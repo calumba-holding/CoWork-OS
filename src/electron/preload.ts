@@ -2029,6 +2029,31 @@ contextBridge.exposeInMainWorld("electronAPI", {
     workspacePath: string;
     blocks: EditableDocumentBlock[];
   }) => ipcRenderer.invoke(IPC_CHANNELS.FILE_UPDATE_DOCUMENT, data) as Promise<FileViewerResult>,
+  listTerminalTabs: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_TAB_LIST, { workspaceId }) as Promise<ShellSessionInfo[]>,
+  createTerminalTab: (data: { workspaceId: string; cwd?: string; title?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_TAB_CREATE, data) as Promise<ShellSessionInfo>,
+  runTerminalTabCommand: (data: {
+    tabId: string;
+    workspaceId: string;
+    taskId: string;
+    command: string;
+    cwd?: string;
+    timeoutMs?: number;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_TAB_RUN, data) as Promise<TerminalTabRunResult>,
+  writeTerminalTabInput: (data: { tabId: string; workspaceId: string; input: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_TAB_WRITE, data) as Promise<ShellSessionInfo>,
+  resizeTerminalTab: (data: { tabId: string; workspaceId: string; cols: number; rows: number }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_TAB_RESIZE, data) as Promise<ShellSessionInfo>,
+  stopTerminalTab: (data: { tabId: string; workspaceId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_TAB_STOP, data) as Promise<ShellSessionInfo | null>,
+  closeTerminalTab: (data: { tabId: string; workspaceId: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_TAB_CLOSE, data) as Promise<{ success: boolean }>,
+  onTerminalTabOutput: (callback: (event: TerminalTabOutputEvent) => void) => {
+    const handler = (_: Any, event: TerminalTabOutputEvent) => callback(event);
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_TAB_OUTPUT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_TAB_OUTPUT, handler);
+  },
   registerBrowserWorkbenchSession: (data: BrowserWorkbenchSessionRegistration) =>
     ipcRenderer.invoke(IPC_CHANNELS.BROWSER_WORKBENCH_REGISTER, data) as Promise<{ success: true }>,
   unregisterBrowserWorkbenchSession: (data: {
