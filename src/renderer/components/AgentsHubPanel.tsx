@@ -203,6 +203,7 @@ const APPROVAL_TYPE_LABELS: Record<ApprovalType, string> = {
   run_command: "Run command",
   risk_gate: "Risk gate",
   computer_use: "Computer use",
+  location_access: "Location access",
 };
 
 const TOOL_APPROVAL_BEHAVIOR_ORDER: Record<
