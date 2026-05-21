@@ -73,6 +73,11 @@ const GENERATED_ARTIFACT_LINK_RE = new RegExp(
   "gi",
 );
 
+const NON_OUTPUT_ARTIFACT_REFERENCE_RE =
+  /\b(?:planned artifacts?|intended (?:export )?(?:contract|outputs?|paths?)|what i attempted|not successfully (?:written|saved|created)|file persistence (?:is )?(?:still )?blocked|blocked by|blocked part|could not (?:write|save|create)|cannot (?:write|save|create)|failed to (?:write|save|create)|writes? failed|shell\/write failure|disk-write failure)\b/i;
+const OUTPUT_ARTIFACT_REFERENCE_RE =
+  /\b(?:(?:now|successfully)\s+(?:saved|created|wrote|written|generated|exported|produced|rendered)|(?:saved|created|wrote|generated|exported|produced|rendered|validated)\s+(?:files?|artifacts?|outputs?)|artifact ready|output ready|file:|output:)\b/i;
+
 export function getInlinePreviewKindForGeneratedFile(args: {
   path?: unknown;
   mimeType?: unknown;
@@ -139,6 +144,41 @@ function normalizeGeneratedArtifactPathCandidate(candidate: string): string {
   return normalized;
 }
 
+function getLineAtOffset(text: string, offset: number): string {
+  const lineStart = text.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+  const lineEnd = text.indexOf("\n", offset);
+  return text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd);
+}
+
+function getPreviousNonEmptyLines(text: string, offset: number, limit: number): string[] {
+  const lines: string[] = [];
+  let cursor = text.lastIndexOf("\n", Math.max(0, offset - 1));
+  while (cursor > 0 && lines.length < limit) {
+    const previousLineEnd = cursor;
+    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+    const line = text.slice(previousLineStart, previousLineEnd).trim();
+    if (line) lines.push(line);
+    cursor = previousLineStart - 1;
+  }
+  return lines;
+}
+
+function hasPositiveArtifactReference(line: string): boolean {
+  return OUTPUT_ARTIFACT_REFERENCE_RE.test(line);
+}
+
+function isNonOutputArtifactReferenceContext(text: string, start: number): boolean {
+  const currentLine = getLineAtOffset(text, start).trim();
+  if (hasPositiveArtifactReference(currentLine)) return false;
+  if (NON_OUTPUT_ARTIFACT_REFERENCE_RE.test(currentLine)) return true;
+
+  for (const line of getPreviousNonEmptyLines(text, start, 4)) {
+    if (hasPositiveArtifactReference(line)) return false;
+    if (NON_OUTPUT_ARTIFACT_REFERENCE_RE.test(line)) return true;
+  }
+  return false;
+}
+
 export function extractGeneratedArtifactPathsFromText(text: string, limit = 8): string[] {
   if (!text.trim()) return [];
   GENERATED_ARTIFACT_LINK_RE.lastIndex = 0;
@@ -149,6 +189,9 @@ export function extractGeneratedArtifactPathsFromText(text: string, limit = 8): 
   while ((match = GENERATED_ARTIFACT_LINK_RE.exec(text)) && paths.length < limit) {
     const prefix = text.slice(Math.max(0, match.index - 8), match.index);
     if (/https?:\/\/$/i.test(prefix)) continue;
+    if (isNonOutputArtifactReferenceContext(text, match.index)) {
+      continue;
+    }
     const candidate = normalizeGeneratedArtifactPathCandidate(match[1] || match[2] || "");
     if (!candidate) continue;
     const dedupeKey = candidate.toLowerCase();
