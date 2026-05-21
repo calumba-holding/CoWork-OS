@@ -71,7 +71,7 @@ const mocks = vi.hoisted(() => {
     enabled: false,
     transport: "stdio",
     command: process.execPath,
-    args: ["--runAsNode", `/tmp/connectors/${entryId}-mcp/dist/index.js`],
+    args: [`/tmp/connectors/${entryId}-mcp/dist/index.js`],
     env: { ...defaultEnvByEntryId[entryId] },
   });
 
