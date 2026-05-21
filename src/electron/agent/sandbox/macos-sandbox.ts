@@ -95,23 +95,25 @@ export class MacOSSandbox implements ISandbox {
     const spawnOptions: SpawnOptions = {
       cwd,
       env,
-      shell: true,
+      shell: false,
       stdio: ["pipe", "pipe", "pipe"],
     };
 
     if (this.sandboxProfile) {
       // Use sandbox-exec on macOS
       const { profilePath, cleanup } = this.writeTempProfile();
-      proc = spawn(
-        "sandbox-exec",
-        ["-f", profilePath, "/bin/sh", "-c", `${command} ${args.join(" ")}`],
-        spawnOptions,
-      );
+      proc =
+        args.length > 0
+          ? spawn("sandbox-exec", ["-f", profilePath, command, ...args], spawnOptions)
+          : spawn("sandbox-exec", ["-f", profilePath, "/bin/sh", "-c", command], spawnOptions);
       proc.on("close", cleanup);
       proc.on("error", cleanup);
     } else {
       // Fallback without sandbox profile
-      proc = spawn("/bin/sh", ["-c", `${command} ${args.join(" ")}`], spawnOptions);
+      proc =
+        args.length > 0
+          ? spawn(command, args, spawnOptions)
+          : spawn("/bin/sh", ["-c", command], spawnOptions);
     }
     opts.onProcess?.(proc);
 
