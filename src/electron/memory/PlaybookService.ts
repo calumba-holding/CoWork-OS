@@ -25,6 +25,20 @@ export interface PlaybookEntry {
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+const PLAYBOOK_MARKER = "[PLAYBOOK]";
+
+function scorePromptOverlap(prompt: string, text: string): number {
+  const tokens = prompt
+    .toLowerCase()
+    .match(/[a-z0-9]{3,}/g);
+  if (!tokens || tokens.length === 0) return 0;
+  const haystack = text.toLowerCase();
+  let score = 0;
+  for (const token of tokens.slice(0, 16)) {
+    if (haystack.includes(token)) score += 1;
+  }
+  return score;
+}
 
 /**
  * Auto-captures "what worked" patterns from completed tasks and
@@ -142,13 +156,13 @@ export class PlaybookService {
    */
   static getPlaybookForContext(workspaceId: string, taskPrompt: string, maxEntries = 3): string {
     try {
-      // Search with a larger window since many results may not be playbook entries.
-      // Filter by both type ("insight") and the [PLAYBOOK] marker for reliability.
-      const results = MemoryService.search(workspaceId, taskPrompt, 40);
+      // Marker lookup intentionally avoids broad FTS recall on the Electron main
+      // process. Relevance is scored in-process over a bounded result set.
+      const results = MemoryService.searchByContentMarker(workspaceId, PLAYBOOK_MARKER, 80);
       const now = Date.now();
 
       const playbookEntries = results
-        .filter((r) => r.type === "insight" && r.snippet.includes("[PLAYBOOK]"))
+        .filter((r) => r.type === "insight" && r.snippet.includes(PLAYBOOK_MARKER))
         .map((r) => {
           const ageMs = now - r.createdAt;
           let decayFactor = 1.0;
@@ -157,7 +171,8 @@ export class PlaybookService {
           } else if (ageMs > THIRTY_DAYS_MS) {
             decayFactor = 0.8;
           }
-          return { ...r, adjustedScore: (r.relevanceScore ?? 1) * decayFactor };
+          const promptScore = scorePromptOverlap(taskPrompt, r.snippet);
+          return { ...r, adjustedScore: (promptScore + (r.relevanceScore ?? 1)) * decayFactor };
         })
         .sort((a, b) => b.adjustedScore - a.adjustedScore)
         .slice(0, maxEntries);
@@ -188,9 +203,14 @@ export class PlaybookService {
     destinationHints: string[] = [],
   ): Promise<void> {
     try {
-      const results = MemoryService.search(workspaceId, taskPrompt, 20);
+      const results = MemoryService.searchByContentMarker(workspaceId, PLAYBOOK_MARKER, 40);
       const matchingEntries = results
         .filter((r) => r.type === "insight" && r.snippet.includes("[PLAYBOOK]"))
+        .sort(
+          (a, b) =>
+            scorePromptOverlap(taskPrompt, b.snippet) -
+            scorePromptOverlap(taskPrompt, a.snippet),
+        )
         .slice(0, 2);
 
       if (matchingEntries.length === 0) return;
