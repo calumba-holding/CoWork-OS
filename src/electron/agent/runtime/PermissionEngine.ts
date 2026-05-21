@@ -75,6 +75,7 @@ type PermissionFacts = {
   isNetworkAccess: boolean;
   isNonWorkspaceInteraction: boolean;
   isMcp: boolean;
+  isLocationAccess: boolean;
 };
 
 const NETWORK_READ_TOOLS = new Set(["web_search", "web_fetch"]);
@@ -165,7 +166,23 @@ export class PermissionEngine {
     if (hardDecision) {
       return {
         ...hardDecision,
-        suggestions: this.buildSuggestions(request.allowPersistence !== false, facts),
+        suggestions: this.buildSuggestions(
+          request.allowPersistence !== false && !facts.isLocationAccess,
+          facts,
+        ),
+        scopePreview: this.buildScopePreview(request, facts),
+      };
+    }
+
+    if (facts.isLocationAccess) {
+      return {
+        decision: "ask",
+        reason: {
+          type: "mode",
+          mode: request.mode,
+          summary: "Location access always requires explicit one-time approval.",
+        },
+        suggestions: this.buildSuggestions(false, facts),
         scopePreview: this.buildScopePreview(request, facts),
       };
     }
@@ -282,7 +299,10 @@ export class PermissionEngine {
       };
     }
 
-    if ((facts.isExternalSideEffect || facts.isNetworkAccess || facts.isMcp) && permissions.network === false) {
+    if (
+      (facts.isExternalSideEffect || facts.isNetworkAccess || facts.isMcp || facts.isLocationAccess) &&
+      permissions.network === false
+    ) {
       return {
         decision: "deny",
         reason: {
@@ -444,8 +464,10 @@ export class PermissionEngine {
       toolName === "analyze_image" ||
       toolName === "read_pdf_visual" ||
       (toolName === "http_request" && !isHttpRequestReadOnly);
+    const isLocationAccess = approvalType === "location_access" || toolName === "get_current_location";
     const isExternalSideEffect =
       approvalType === "external_service" ||
+      isLocationAccess ||
       isDataExport ||
       toolName.endsWith("_action") ||
       toolName === "voice_call";
@@ -476,6 +498,7 @@ export class PermissionEngine {
       isNetworkAccess,
       isNonWorkspaceInteraction,
       isMcp,
+      isLocationAccess,
     };
   }
 
