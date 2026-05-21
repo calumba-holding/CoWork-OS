@@ -50,6 +50,7 @@ interface NormalizedStdioSpawnCommand {
 }
 
 const WINDOWS_CMD_SHIM_COMMANDS = new Set(["npm", "npx", "pnpm", "yarn", "yarnpkg"]);
+const LOCAL_CONNECTOR_SCRIPT_PATH_REGEX = /(?:^|[\\/])connectors[\\/][^\\/]+[\\/]dist[\\/]index\.js$/i;
 
 export function splitStdioCommandLine(input: string): string[] {
   const tokens: string[] = [];
@@ -204,9 +205,14 @@ export class StdioTransport extends EventEmitter implements MCPTransport {
         });
         const spawnCommand = normalizeStdioSpawnCommand(command, resolvedArgs);
 
-        // When launching via Electron's executable with --runAsNode, force pure
-        // Node mode so macOS doesn't treat child connector processes as GUI apps.
-        if (spawnCommand.command === process.execPath && spawnCommand.args.includes("--runAsNode")) {
+        // When launching local bundled connector scripts via Electron's executable,
+        // force pure Node mode so macOS doesn't treat child connector processes as GUI apps.
+        if (
+          spawnCommand.command === process.execPath &&
+          spawnCommand.args.some(
+            (arg) => typeof arg === "string" && LOCAL_CONNECTOR_SCRIPT_PATH_REGEX.test(arg),
+          )
+        ) {
           processEnv.ELECTRON_RUN_AS_NODE = "1";
         }
 
