@@ -13397,7 +13397,7 @@ function setupMemoryHandlers(): void {
     IPC_CHANNELS.MEMORY_SEARCH,
     async (_, data: { workspaceId: string; query: string; limit?: number }) => {
       try {
-        return MemoryService.search(data.workspaceId, data.query, data.limit);
+        return await MemoryService.searchAsync(data.workspaceId, data.query, data.limit);
       } catch (error) {
         logger.error("[Memory] Failed to search:", error);
         return [];
