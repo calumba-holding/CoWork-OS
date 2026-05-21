@@ -2764,12 +2764,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // WhatsApp event listeners
   onWhatsAppQRCode: (callback: (event: Any, qr: string) => void) => {
     ipcRenderer.on("whatsapp:qr-code", callback);
+    return () => ipcRenderer.removeListener("whatsapp:qr-code", callback);
   },
   onWhatsAppConnected: (callback: () => void) => {
     ipcRenderer.on("whatsapp:connected", callback);
+    return () => ipcRenderer.removeListener("whatsapp:connected", callback);
   },
   onWhatsAppStatus: (callback: (event: Any, data: { status: string; error?: string }) => void) => {
     ipcRenderer.on("whatsapp:status", callback);
+    return () => ipcRenderer.removeListener("whatsapp:status", callback);
   },
 
   // Search Settings APIs
