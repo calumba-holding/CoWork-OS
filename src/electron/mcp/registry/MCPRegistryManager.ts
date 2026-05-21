@@ -118,6 +118,7 @@ const SHIPPED_LOCAL_CONNECTOR_IDS = new Set([
   "figma",
   "vercel",
   "monday",
+  "maps",
   "miro",
   "supabase",
   "excalidraw",
@@ -184,9 +185,10 @@ function getConnectorScriptPath(connectorName: string): string {
 function getConnectorCommandArgs(connectorName: string): { command: string; args: string[] } {
   const scriptPath = getConnectorScriptPath(connectorName);
   return {
-    // Use Electron's bundled Node runtime when possible
+    // Use Electron's bundled Node runtime when possible. The transport sets
+    // ELECTRON_RUN_AS_NODE=1 for these local connector script launches.
     command: process.execPath,
-    args: ["--runAsNode", scriptPath],
+    args: [scriptPath],
   };
 }
 
@@ -232,6 +234,7 @@ function getConnectorEntries(): MCPRegistryEntry[] {
   const figmaCommand = getConnectorCommandArgs("figma-mcp");
   const vercelCommand = getConnectorCommandArgs("vercel-mcp");
   const mondayCommand = getConnectorCommandArgs("monday-mcp");
+  const mapsCommand = getConnectorCommandArgs("maps-mcp");
   // API-key connectors
   const apolloCommand = getConnectorCommandArgs("apollo-mcp");
   const clayCommand = getConnectorCommandArgs("clay-mcp");
@@ -939,6 +942,38 @@ function getConnectorEntries(): MCPRegistryEntry[] {
       tags: ["monday", "project-management", "connector"],
       category: "devtools",
       verified: true,
+    },
+    {
+      id: "maps",
+      name: "Maps",
+      description:
+        "Maps connector for CoWork OS. Search nearby places and walking routes with keyless OSM defaults and optional Google Maps Platform.",
+      version: LOCAL_CONNECTOR_VERSION,
+      author: "CoWork OS",
+      homepage: "https://github.com/CoWork-OS/CoWork-OS",
+      repository: "https://github.com/CoWork-OS/CoWork-OS",
+      license: "MIT",
+      installMethod: "manual",
+      transport: "stdio",
+      defaultCommand: mapsCommand.command,
+      defaultArgs: mapsCommand.args,
+      defaultEnv: {
+        MAPS_PROVIDER: "auto",
+        GOOGLE_MAPS_API_KEY: "",
+        NOMINATIM_BASE_URL: "",
+        OSRM_BASE_URL: "",
+      },
+      tools: [
+        { name: "maps.health", description: "Check maps connector provider configuration" },
+        { name: "maps.search_places", description: "Search nearby places around coordinates" },
+        { name: "maps.place_details", description: "Fetch normalized place details" },
+        { name: "maps.route", description: "Estimate a walking route between coordinates" },
+        { name: "maps.rank_nearby_options", description: "Rank nearby options for urgent errands" },
+      ],
+      tags: ["maps", "places", "location", "openstreetmap", "google-maps", "connector"],
+      category: "productivity",
+      verified: true,
+      featured: true,
     },
     // --- npm-based connectors ---
     {
