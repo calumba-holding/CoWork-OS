@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowLeft, Copy, ExternalLink } from "lucide-react";
 import { getConnectorProfile, type ConnectorProfile } from "../../shared/connector-profiles";
+import { ConnectorBrandIcon } from "./ConnectorBrandIcon";
 import type { ConnectorProvider } from "./ConnectorSetupModal";
 import type { ConnectorEnvField } from "./ConnectorEnvModal";
 
@@ -66,26 +67,6 @@ function getStatusText(status: MCPConnectionStatus): string {
     default:
       return "Disconnected";
   }
-}
-
-function getConnectorColor(name: string): string {
-  const colors = [
-    "#4f46e5",
-    "#0891b2",
-    "#059669",
-    "#d97706",
-    "#dc2626",
-    "#7c3aed",
-    "#db2777",
-    "#65a30d",
-    "#ea580c",
-    "#0284c7",
-  ];
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = (hash * 31 + name.charCodeAt(i)) & 0xffffffff;
-  }
-  return colors[Math.abs(hash) % colors.length];
 }
 
 type MCPRegistryEntry = {
@@ -203,8 +184,6 @@ export function ConnectorProfileView({
   const longDescription = profile?.longDescription ?? connector.description;
   const keyFeatures = profile?.keyFeatures ?? [];
   const examples = profile?.examples ?? [];
-  const connectorColor = getConnectorColor(connector.name);
-
   const handleConnectClick = async () => {
     if (!isInstalled) {
       onInstall(connector);
@@ -269,12 +248,11 @@ export function ConnectorProfileView({
 
         {/* Header: Icon, Title, Tagline, Connect */}
         <div className="cm-profile-header">
-          <div
+          <ConnectorBrandIcon
+            connectorKey={connector.key}
+            name={connector.name}
             className="cm-profile-icon"
-            style={{ backgroundColor: connectorColor }}
-          >
-            {connector.name.charAt(0).toUpperCase()}
-          </div>
+          />
           <div className="cm-profile-header-content">
             <h1 className="cm-profile-title">{connector.name}</h1>
             <p className="cm-profile-tagline">{tagline}</p>
