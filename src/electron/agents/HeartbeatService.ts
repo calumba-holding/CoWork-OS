@@ -1046,7 +1046,7 @@ export class HeartbeatService extends EventEmitter {
     let pressureInstructions = "";
     try {
       pressureInstructions = MemoryPressureService.buildCompactionInstructions(
-        MemoryPressureService.analyze(params.workspacePath),
+        await MemoryPressureService.analyze(params.workspacePath),
       );
     } catch {
       pressureInstructions = "";
