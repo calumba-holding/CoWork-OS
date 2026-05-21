@@ -7704,7 +7704,7 @@ ${skillDescriptions}`;
       {
         name: "run_command",
         description:
-          "Execute a shell command in the workspace directory. IMPORTANT: This tool requires user approval before execution. The user will see the command and can approve or deny it. Use this for installing packages (npm, pip, brew), running build commands, git operations, or any terminal commands.",
+          "Execute a shell command in the workspace directory. IMPORTANT: This tool requires user approval before execution. The user will see the command and can approve or deny it. Use this for installing packages (npm, pip, brew), running build commands, git operations, or terminal commands. Do not use shell heredocs or echo/printf redirection to create artifact files when write_file or edit_file is available; use file tools for file creation and editing.",
         input_schema: {
           type: "object",
           properties: {
