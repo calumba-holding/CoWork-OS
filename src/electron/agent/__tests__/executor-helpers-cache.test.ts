@@ -292,4 +292,13 @@ describe("ToolFailureTracker browser HTTP status handling", () => {
     expect(tracker.recordFailure("write_file", message)).toBe(true);
     expect(tracker.isDisabled("write_file")).toBe(true);
   });
+
+  it("immediately disables get_current_location after desktop geolocation provider failure", () => {
+    const tracker = new ToolFailureTracker();
+    const message =
+      "Desktop geolocation timed out. Do not retry get_current_location in this task.";
+
+    expect(tracker.recordFailure("get_current_location", message)).toBe(true);
+    expect(tracker.isDisabled("get_current_location")).toBe(true);
+  });
 });
