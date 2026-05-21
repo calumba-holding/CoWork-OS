@@ -10,6 +10,11 @@ out/
 release/
 build/healthkit-bridge/
 native/healthkit-bridge/.build/
+build/location-helper-macos/
+build/location-helper-linux/
+build/location-helper-windows/
+native/location-helper-macos/.build/
+native/location-helper-macos/.swiftpm/
 *.app
 *.dmg
 *.exe
