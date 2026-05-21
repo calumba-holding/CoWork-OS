@@ -90,6 +90,17 @@ bounded_research=true
     expect(routed.signals).toContain("live-cloud-sync-status");
   });
 
+  it("routes urgent walkable local errand prompts to execution intent", () => {
+    const routed = IntentRouter.route(
+      "Urgent dress errand",
+      "My kid just fell into the duck pond and the wedding starts in 30 minutes. Where can I walk and buy her a new dress?",
+    );
+
+    expect(routed.intent).toBe("execution");
+    expect(routed.conversationMode).toBe("task");
+    expect(routed.signals).toContain("local-errand-location");
+  });
+
   it("routes vague latest-draft screen-context prompts to execution intent", () => {
     const routed = IntentRouter.route("Draft sync", "sync the latest draft from the same doc");
     expect(routed.intent).toBe("execution");
