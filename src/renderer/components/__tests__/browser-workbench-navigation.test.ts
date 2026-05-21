@@ -36,4 +36,13 @@ describe("Browser workbench navigation controls", () => {
     expect(source).toContain("browser-workbench-device-toolbar");
     expect(source).toContain("has-controlled-viewport");
   });
+
+  it("exposes a toolbar action for opening the current page externally", () => {
+    const source = readFileSync(componentPath, "utf8");
+
+    expect(source).toContain("openCurrentPageExternal");
+    expect(source).toContain("window.electronAPI.openExternal(externalUrl)");
+    expect(source).toContain('aria-label="Open current page in external browser"');
+    expect(source).toContain("getExternalBrowserUrl");
+  });
 });
