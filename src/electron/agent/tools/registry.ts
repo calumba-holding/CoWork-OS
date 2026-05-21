@@ -1514,6 +1514,7 @@ export class ToolRegistry {
     if (canonicalToolName === "Skill") return null;
     if (canonicalToolName === "run_command") return "run_command";
     if (canonicalToolName === "delete_file") return "delete_file";
+    if (canonicalToolName === "get_current_location") return "location_access";
     if (canonicalToolName === "web_fetch") return "network_access";
     if (canonicalToolName === "http_request") {
       return this.isReadOnlyHttpRequestInput(input) ? "network_access" : "data_export";
@@ -1628,6 +1629,7 @@ export class ToolRegistry {
                   ...(approvalTypeForPermission ? { approvalType: approvalTypeForPermission } : {}),
                   toolName: context.request.name,
                   details: approvalDetails,
+                  allowPersistence: approvalTypeForPermission !== "location_access",
                 });
               }
             : undefined,
@@ -1663,11 +1665,14 @@ export class ToolRegistry {
           effectiveApprovalType || "external_service",
           browserUseApproval
             ? `Allow Browser Use to access ${browserUseApproval.origin}?`
+            : effectiveApprovalType === "location_access"
+              ? "Allow CoWork OS to access your current location once?"
             : `Approve tool call: ${context.request.name}`,
           {
             ...approvalDetails,
             reason: pipeline.reason || null,
           },
+          { allowAutoApprove: effectiveApprovalType !== "location_access" },
         );
         if (approved !== true) {
           throw Object.assign(new Error(`Tool "${context.request.name}" approval denied`), {
@@ -1898,6 +1903,9 @@ export class ToolRegistry {
     register("git_commit", async ({ request }) => this.gitTools.gitCommit(request.input));
     register("git_merge_to_base", async () => this.gitTools.gitMergeToBase());
     register("system_info", async () => this.systemTools.getSystemInfo());
+    register("get_current_location", async ({ request }) =>
+      this.systemTools.getCurrentLocation(request.input),
+    );
     register("search_memories", async ({ request }) => this.systemTools.searchMemories(request.input));
     register("memory_search_index", async ({ request }) => this.systemTools.searchMemoryIndex(request.input), readParallelSchedulerSpec);
     register("memory_timeline", async ({ request }) => this.systemTools.memoryTimeline(request.input), readParallelSchedulerSpec);
