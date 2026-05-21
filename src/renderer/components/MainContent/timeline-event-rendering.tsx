@@ -52,6 +52,7 @@ import {
   DeferredMarkdown,
   HighlightedCodePreview,
   MessageCopyButton,
+  MessageForkButton,
   MessageSpeakButton,
   MessageQuoteButton,
   createQuotedAssistantMessage,
@@ -73,6 +74,32 @@ const END_OF_TASK_ARTIFACT_KINDS = new Set<GeneratedInlinePreviewKind>([
   "presentation",
   "document",
 ]);
+
+function getEvidenceSiteLabel(hostname: string): string {
+  const normalized = hostname.replace(/^www\./i, "");
+  const parts = normalized.split(".").filter(Boolean);
+  if (parts.length === 0) return normalized;
+  if (parts.at(-1) === "google") return "google";
+  if (parts.length <= 2) return normalized;
+  return parts.slice(-2).join(".");
+}
+
+function getWebEvidenceDisplay(source: string, snippet: string): {
+  siteLabel: string;
+  label: string;
+} | null {
+  try {
+    const url = new URL(source);
+    const siteLabel = getEvidenceSiteLabel(url.hostname);
+    const label = snippet || siteLabel || source;
+    return {
+      siteLabel,
+      label,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function ClickableFilePath({
   path,
@@ -733,6 +760,7 @@ export function renderEventDetails(
     onOpenPresentationArtifact?: (path: string) => void;
     onOpenWebArtifact?: (path: string) => void;
     onQuoteAssistantMessage?: (quote: QuotedAssistantMessage) => void;
+    onForkTaskSession?: (event: TaskEvent) => void;
     events?: TaskEvent[];
     onViewOutputs?: (taskId: string, primaryOutputPath?: string) => void;
     hideVerificationSteps?: boolean;
@@ -751,6 +779,7 @@ export function renderEventDetails(
   const onOpenPresentationArtifact = options?.onOpenPresentationArtifact;
   const onOpenWebArtifact = options?.onOpenWebArtifact;
   const onQuoteAssistantMessage = options?.onQuoteAssistantMessage;
+  const onForkTaskSession = options?.onForkTaskSession;
   const eventStream = options?.events || [];
   const onViewOutputs = options?.onViewOutputs;
   const summaryMode = options?.summaryMode === true;
@@ -869,17 +898,36 @@ export function renderEventDetails(
                 typeof entry?.sourceUrlOrPath === "string" ? entry.sourceUrlOrPath.trim() : "";
               if (!source) return null;
               const snippet =
-                typeof entry?.snippet === "string" ? stripHtmlTags(entry.snippet) : "";
-              const label = snippet || source;
+                typeof entry?.snippet === "string"
+                  ? stripHtmlTags(entry.snippet).replace(/\s+/g, " ").trim()
+                  : "";
               const isWeb = /^https?:\/\//i.test(source);
+              const webDisplay = isWeb ? getWebEvidenceDisplay(source, snippet) : null;
               return (
                 <li key={`${source}-${index}`} className="evidence-event-details-item">
-                  {isWeb ? (
-                    <a href={source} target="_blank" rel="noreferrer">
-                      {label}
+                  {webDisplay ? (
+                    <a
+                      className="evidence-event-link"
+                      href={source}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={snippet ? `${webDisplay.label}\n${source}` : source}
+                    >
+                      <span
+                        className="evidence-event-favicon"
+                        aria-hidden="true"
+                      >
+                        {webDisplay.siteLabel.charAt(0).toUpperCase()}
+                      </span>
+                      <span className="evidence-event-domain">{webDisplay.siteLabel}</span>
+                      {snippet ? (
+                        <span className="evidence-event-link-title">{webDisplay.label}</span>
+                      ) : null}
                     </a>
                   ) : (
-                    <span>{label}</span>
+                    <span className="evidence-event-link evidence-event-link-static" title={source}>
+                      <span className="evidence-event-link-title">{snippet || source}</span>
+                    </span>
                   )}
                 </li>
               );
@@ -1250,6 +1298,9 @@ export function renderEventDetails(
             <MessageSpeakButton text={event.payload.message} voiceEnabled={voiceEnabled} />
             {quote && onQuoteAssistantMessage && (
               <MessageQuoteButton onQuote={() => onQuoteAssistantMessage(quote)} />
+            )}
+            {event.id && onForkTaskSession && (
+              <MessageForkButton onFork={() => onForkTaskSession(event)} />
             )}
           </div>
         </div>
