@@ -10,6 +10,7 @@ import { GoogleWorkspaceSettings } from "./GoogleWorkspaceSettings";
 import { AgentMailSettings } from "./AgentMailSettings";
 import { DropboxSettings } from "./DropboxSettings";
 import { SharePointSettings } from "./SharePointSettings";
+import { ConnectorBrandIcon } from "./ConnectorBrandIcon";
 
 // Types (matching preload types)
 type MCPConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "error";
@@ -63,6 +64,7 @@ const SHIPPED_CONNECTOR_IDS = new Set([
   "figma",
   "vercel",
   "monday",
+  "maps",
   "miro",
   "supabase",
   "excalidraw",
@@ -241,6 +243,35 @@ const CONNECTORS: ConnectorDefinition[] = [
     description: "Manage projects, boards, and workflows in monday.com.",
     supportsOAuth: false,
     envFields: [{ key: "MONDAY_API_TOKEN", label: "API Token", type: "password" }],
+  },
+  {
+    key: "maps",
+    name: "Maps",
+    registryId: "maps",
+    description: "Nearby place search and walking routes with OSM defaults and optional Google Maps.",
+    supportsOAuth: false,
+    envFields: [
+      {
+        key: "MAPS_PROVIDER",
+        label: "Provider",
+        placeholder: "auto",
+      },
+      {
+        key: "GOOGLE_MAPS_API_KEY",
+        label: "Google Maps API Key (optional)",
+        type: "password",
+      },
+      {
+        key: "NOMINATIM_BASE_URL",
+        label: "Nominatim Base URL (optional)",
+        placeholder: "https://nominatim.openstreetmap.org",
+      },
+      {
+        key: "OSRM_BASE_URL",
+        label: "OSRM Base URL (optional)",
+        placeholder: "https://router.project-osrm.org",
+      },
+    ],
   },
   {
     key: "miro",
@@ -762,26 +793,6 @@ function matchConnector(config: MCPServerConfig, connector: ConnectorDefinition)
   return nameMatch || argsMatch || commandMatch;
 }
 
-function getConnectorColor(name: string): string {
-  const colors = [
-    "#4f46e5",
-    "#0891b2",
-    "#059669",
-    "#d97706",
-    "#dc2626",
-    "#7c3aed",
-    "#db2777",
-    "#65a30d",
-    "#ea580c",
-    "#0284c7",
-  ];
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = (hash * 31 + name.charCodeAt(i)) & 0xffffffff;
-  }
-  return colors[Math.abs(hash) % colors.length];
-}
-
 function getConnectorCategory(connector: ConnectorDefinition): Exclude<ConnectorCategory, ""> {
   if (["salesforce", "hubspot", "zendesk"].includes(connector.key)) {
     return "crm";
@@ -821,6 +832,7 @@ function getConnectorCategory(connector: ConnectorDefinition): Exclude<Connector
       "miro",
       "huggingface",
       "mermaid-chart",
+      "maps",
       "make",
       "smartsheet",
       "airtable",
@@ -1159,12 +1171,11 @@ export function ConnectorsSettings() {
                 className="cm-card"
                 onClick={() => setIntegrationModal(integration)}
               >
-                <div
+                <ConnectorBrandIcon
+                  connectorKey={integration.key}
+                  name={integration.name}
                   className="cm-card-icon"
-                  style={{ backgroundColor: getConnectorColor(integration.name) }}
-                >
-                  {integration.name.charAt(0).toUpperCase()}
-                </div>
+                />
                 <div className="cm-card-body">
                   <span className="cm-card-name">{integration.name}</span>
                   <span className="cm-card-desc">{integration.description}</span>
@@ -1196,12 +1207,11 @@ export function ConnectorsSettings() {
                     ✓
                   </span>
                 )}
-                <div
+                <ConnectorBrandIcon
+                  connectorKey={connector.key}
+                  name={connector.name}
                   className="cm-card-icon"
-                  style={{ backgroundColor: getConnectorColor(connector.name) }}
-                >
-                  {connector.name.charAt(0).toUpperCase()}
-                </div>
+                />
                 <div className="cm-card-body">
                   <span className="cm-card-name">{connector.name}</span>
                   <span className="cm-card-desc">{connector.description}</span>
@@ -1231,12 +1241,11 @@ export function ConnectorsSettings() {
         <div className="mcp-modal-overlay" onClick={() => setIntegrationModal(null)}>
           <div className="cm-integration-modal" onClick={(e) => e.stopPropagation()}>
             <div className="cm-detail-header">
-              <div
+              <ConnectorBrandIcon
+                connectorKey={integrationModal.key}
+                name={integrationModal.name}
                 className="cm-detail-icon"
-                style={{ backgroundColor: getConnectorColor(integrationModal.name) }}
-              >
-                {integrationModal.name.charAt(0).toUpperCase()}
-              </div>
+              />
               <div className="cm-detail-title">
                 <h2>{integrationModal.name}</h2>
                 <p className="cm-detail-subtitle">{integrationModal.description}</p>
