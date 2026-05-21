@@ -28,9 +28,10 @@ const AUTO_SIGNALS_END = "<!-- cowork:auto:signals:end -->";
 
 const MAX_SOURCE_CHARS = 24_000;
 const MAX_ENTITIES_PER_MESSAGE = 40;
+const MAX_MENTIONS_PER_WORKSPACE = 1000;
 const FLUSH_DEBOUNCE_MS = 12_000;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
-const STARTUP_REBUILD_LIMIT = 2500;
+const STARTUP_REBUILD_LIMIT = 500;
 
 function sanitizeInline(text: string): string {
   const cleaned = String(text || "")
@@ -301,6 +302,20 @@ export class CrossSignalService {
 
     const nowMs = Date.now();
     const sectionLines = this.buildSignalsSection(workspaceId, nowMs);
+
+    // Prune stale mentions outside the time window
+    const state = this.stateByWorkspace.get(workspaceId);
+    if (state) {
+      const cutoff = nowMs - WINDOW_MS;
+      for (const [key, mention] of state.mentions) {
+        if (mention.lastSeenAt < cutoff) state.mentions.delete(key);
+      }
+      if (state.mentions.size > MAX_MENTIONS_PER_WORKSPACE) {
+        const sorted = [...state.mentions.entries()].sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
+        const excess = sorted.slice(0, state.mentions.size - MAX_MENTIONS_PER_WORKSPACE);
+        for (const [key] of excess) state.mentions.delete(key);
+      }
+    }
 
     let current = "";
     try {
