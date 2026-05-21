@@ -146,6 +146,21 @@ describe("task event visibility helpers", () => {
     ).toBe(false);
   });
 
+  it("keeps generic stage-start cards in the verbose step feed", () => {
+    expect(
+      shouldShowTaskEventInStepFeed(
+        makeEvent("timeline_group_started", { stage: "DISCOVER" }),
+        { verboseSteps: true },
+      ),
+    ).toBe(true);
+    expect(
+      shouldShowTaskEventInStepFeed(
+        makeEvent("timeline_group_started", { stage: "BUILD" }),
+        { verboseSteps: true },
+      ),
+    ).toBe(true);
+  });
+
   it("keeps sub-stage and custom group cards in the step feed", () => {
     expect(
       shouldShowTaskEventInStepFeed(
@@ -281,6 +296,70 @@ describe("task event visibility helpers", () => {
     expect(filtered.map((e) => e.id)).toEqual(["c"]);
   });
 
+  it("keeps stage starts in verbose mode so running activity does not disappear after pause", () => {
+    const filtered = filterVerboseTimelineNoise([
+      makeEvent(
+        "timeline_group_started",
+        { stage: "DISCOVER", groupLabel: "DISCOVER", message: "Starting DISCOVER" },
+        { id: "discover-start" },
+      ),
+      makeEvent(
+        "timeline_group_started",
+        { stage: "BUILD", groupLabel: "BUILD", message: "Starting BUILD" },
+        { id: "build-start" },
+      ),
+      makeEvent(
+        "timeline_group_finished",
+        { stage: "BUILD", groupLabel: "BUILD", message: "Completed BUILD" },
+        { id: "build-finished" },
+      ),
+    ]);
+
+    expect(filtered.map((event) => event.id)).toEqual(["discover-start", "build-start"]);
+  });
+
+  it("hides stage starts emitted after a blocking verbose failure", () => {
+    const filtered = filterVerboseTimelineNoise([
+      makeEvent(
+        "timeline_group_started",
+        { stage: "DISCOVER", groupLabel: "DISCOVER", message: "Starting DISCOVER" },
+        { id: "discover-start", timestamp: 1000 },
+      ),
+      makeEvent(
+        "timeline_group_started",
+        { stage: "BUILD", groupLabel: "BUILD", message: "Starting BUILD" },
+        { id: "build-start", timestamp: 1100 },
+      ),
+      makeEvent(
+        "timeline_error",
+        {
+          legacyType: "tool_error",
+          tool: "get_current_location",
+          error:
+            "Native desktop geolocation timed out. Do not retry get_current_location in this task; ask the user for a typed address, venue, or nearby landmark.",
+        },
+        { id: "location-timeout", timestamp: 1200 },
+      ),
+      makeEvent(
+        "timeline_group_started",
+        { stage: "FIX", groupLabel: "Applying fixes", message: "Starting Applying fixes" },
+        { id: "post-failure-fix-start", timestamp: 1300, groupId: "stage:fix" },
+      ),
+      makeEvent(
+        "timeline_group_started",
+        { groupLabel: "Custom follow-up" },
+        { id: "custom-after-failure", timestamp: 1400, groupId: "custom:follow-up" },
+      ),
+    ]);
+
+    expect(filtered.map((event) => event.id)).toEqual([
+      "discover-start",
+      "build-start",
+      "location-timeout",
+      "custom-after-failure",
+    ]);
+  });
+
   it("hides request-cancelled llm errors for cancelled tasks", () => {
     const llmError = makeEvent(
       "timeline_error",
@@ -378,7 +457,7 @@ describe("task event visibility helpers", () => {
     expect(filtered.map((e) => e.id)).toEqual(["a", "c", "e"]);
   });
 
-  it("hides stage-boundary group starts in verbose mode but keeps custom groups", () => {
+  it("keeps stage-boundary group starts in verbose mode along with custom groups", () => {
     const filtered = filterVerboseTimelineNoise([
       makeEvent(
         "timeline_group_started",
@@ -401,7 +480,12 @@ describe("task event visibility helpers", () => {
         { id: "custom-start", timestamp: 1300, groupId: "custom:group" },
       ),
     ]);
-    expect(filtered.map((e) => e.id)).toEqual(["custom-start"]);
+    expect(filtered.map((e) => e.id)).toEqual([
+      "fix-start",
+      "build-start",
+      "deliver-start",
+      "custom-start",
+    ]);
   });
 
   it("does not hide custom non-stage group events for completed tasks", () => {
