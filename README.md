@@ -38,19 +38,52 @@
 </p>
 
 <!-- COWORK_PUBLIC_ADOPTION_STATS_START -->
-### Public Adoption Signals
+<div align="center">
 
-| Signal | Current |
-|---|---:|
-| GitHub stars | 338 |
-| GitHub forks | 50 |
-| Installer/server downloads | 875 |
-| Download delta | +2 |
-| npm downloads, last week | 398 |
-| GitHub views, last 14-ish days | 1,581 total / 616 unique |
-| GitHub clones, last 14-ish days | 4,617 total / 1,063 unique |
+<h3>Public Adoption Signals</h3>
 
-Generated 2026-06-02T13:29:24.199Z. These are public GitHub/npm adoption signals, not active-user or in-app telemetry numbers. [Full report](docs/public-adoption-stats.md).
+<table>
+  <thead>
+    <tr>
+      <th align="center">Signal</th>
+      <th align="center">Current</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="left">GitHub stars</td>
+      <td align="center">338</td>
+    </tr>
+    <tr>
+      <td align="left">GitHub forks</td>
+      <td align="center">50</td>
+    </tr>
+    <tr>
+      <td align="left">Installer/server downloads</td>
+      <td align="center">875</td>
+    </tr>
+    <tr>
+      <td align="left">Download delta</td>
+      <td align="center">+2</td>
+    </tr>
+    <tr>
+      <td align="left">npm downloads, last week</td>
+      <td align="center">398</td>
+    </tr>
+    <tr>
+      <td align="left">GitHub views, last 14-ish days</td>
+      <td align="center">1,581 total / 616 unique</td>
+    </tr>
+    <tr>
+      <td align="left">GitHub clones, last 14-ish days</td>
+      <td align="center">4,617 total / 1,063 unique</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><sub>Generated 2026-06-02T13:29:24.199Z. These are public GitHub/npm adoption signals, not active-user or in-app telemetry numbers. <a href="docs/public-adoption-stats.md">Full report</a>.</sub></p>
+
+</div>
 <!-- COWORK_PUBLIC_ADOPTION_STATS_END -->
 
 <p align="center">
