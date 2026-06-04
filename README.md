@@ -52,7 +52,7 @@
   <tbody>
     <tr>
       <td align="left">GitHub stars</td>
-      <td align="center">339</td>
+      <td align="center">340</td>
     </tr>
     <tr>
       <td align="left">GitHub forks</td>
@@ -60,28 +60,28 @@
     </tr>
     <tr>
       <td align="left">Installer/server downloads</td>
-      <td align="center">879</td>
+      <td align="center">884</td>
     </tr>
     <tr>
       <td align="left">Download delta</td>
-      <td align="center">+4</td>
+      <td align="center">+5</td>
     </tr>
     <tr>
       <td align="left">npm downloads, last week</td>
-      <td align="center">398</td>
+      <td align="center">460</td>
     </tr>
     <tr>
       <td align="left">GitHub views, last 14-ish days</td>
-      <td align="center">1,563 total / 615 unique</td>
+      <td align="center">1,522 total / 607 unique</td>
     </tr>
     <tr>
       <td align="left">GitHub clones, last 14-ish days</td>
-      <td align="center">4,505 total / 1,039 unique</td>
+      <td align="center">3,982 total / 963 unique</td>
     </tr>
   </tbody>
 </table>
 
-<p><sub>Generated 2026-06-03T08:28:01.645Z. These are public GitHub/npm adoption signals, not active-user or in-app telemetry numbers. <a href="docs/public-adoption-stats.md">Full report</a>.</sub></p>
+<p><sub>Generated 2026-06-04T07:59:51.712Z. These are public GitHub/npm adoption signals, not active-user or in-app telemetry numbers. <a href="docs/public-adoption-stats.md">Full report</a>.</sub></p>
 
 </div>
 <!-- COWORK_PUBLIC_ADOPTION_STATS_END -->
