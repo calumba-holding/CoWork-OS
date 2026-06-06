@@ -225,7 +225,6 @@ export async function runMontyCode(options: RunMontyOptions): Promise<MontyRunRe
   }
 
   const externalFunctions = options.externalFunctions || {};
-  const externalFnNames = Object.keys(externalFunctions);
   const scriptName = options.scriptName || "monty.py";
 
   const cacheKey = options.cacheKey;
@@ -243,7 +242,6 @@ export async function runMontyCode(options: RunMontyOptions): Promise<MontyRunRe
       const m = new Monty(code, {
         scriptName,
         inputs: ["input"],
-        externalFunctions: externalFnNames,
         typeCheck: false,
       });
       dump = m.dump();
