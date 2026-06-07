@@ -87,6 +87,18 @@ function checkCurrentSignature() {
 }
 
 export function selectSigningPlan(currentSig, identity, signingEnabled = false) {
+  if (currentSig === "invalid") {
+    return {
+      action: "sign",
+      message: identity
+        ? `Electron.app signature is invalid; signing with: ${identity}`
+        : "Electron.app signature is invalid; applying an ad-hoc development signature.",
+      signingIdentity: identity || "-",
+      timestamp: Boolean(identity),
+      useEntitlements: Boolean(identity),
+    };
+  }
+
   if (!signingEnabled) {
     return {
       action: "skip",
@@ -111,6 +123,7 @@ export function selectSigningPlan(currentSig, identity, signingEnabled = false) 
         : "No signing identity configured; applying an ad-hoc development signature.",
     signingIdentity: identity || "-",
     timestamp: Boolean(identity),
+    useEntitlements: Boolean(identity),
   };
 }
 
@@ -139,7 +152,7 @@ export function main(env = process.env) {
     return 0;
   }
 
-  const entitlementsArgs = existsSync(ENTITLEMENTS)
+  const entitlementsArgs = plan.useEntitlements && existsSync(ENTITLEMENTS)
     ? ["--entitlements", ENTITLEMENTS]
     : [];
   const timestampArgs = plan.timestamp ? ["--timestamp"] : [];

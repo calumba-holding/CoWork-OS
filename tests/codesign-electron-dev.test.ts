@@ -23,6 +23,16 @@ describe("codesign_electron_dev", () => {
     });
   });
 
+  it("repairs an invalid Electron.app signature by default", () => {
+    expect(selectSigningPlan("invalid", null)).toEqual({
+      action: "sign",
+      message: "Electron.app signature is invalid; applying an ad-hoc development signature.",
+      signingIdentity: "-",
+      timestamp: false,
+      useEntitlements: false,
+    });
+  });
+
   it("enables signing with an explicit toggle", () => {
     expect(isSigningEnabled({ COWORK_CODESIGN_ENABLE: "1" })).toBe(true);
   });
@@ -37,6 +47,7 @@ describe("codesign_electron_dev", () => {
       message: "Replacing existing team signature with an ad-hoc development signature.",
       signingIdentity: "-",
       timestamp: false,
+      useEntitlements: false,
     });
   });
 
@@ -53,6 +64,7 @@ describe("codesign_electron_dev", () => {
       message: "Signing Electron.app with: Apple Development: Example (TEAMID1234)",
       signingIdentity: "Apple Development: Example (TEAMID1234)",
       timestamp: true,
+      useEntitlements: true,
     });
   });
 });
