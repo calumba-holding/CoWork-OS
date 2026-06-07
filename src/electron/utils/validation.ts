@@ -1433,11 +1433,23 @@ export const AddBlueBubblesChannelSchema = z.object({
   blueBubblesServerUrl: z.string().url().min(1).max(500),
   blueBubblesPassword: z.string().min(1).max(500),
   blueBubblesWebhookPort: z.number().int().min(1024).max(65535).optional(),
+  blueBubblesWebhookSecret: z.string().max(500).optional(),
   blueBubblesAllowedContacts: z.array(z.string().max(100)).max(100).optional(),
   securityMode: SecurityModeSchema.optional(),
   ambientMode: z.boolean().optional(),
   silentUnauthorized: z.boolean().optional(),
   captureSelfMessages: z.boolean().optional(),
+});
+
+export const AddGoogleChatChannelSchema = z.object({
+  type: z.literal("googlechat"),
+  name: z.string().min(1).max(MAX_TITLE_LENGTH),
+  serviceAccountKeyPath: z.string().min(1).max(1000),
+  projectId: z.string().max(200).optional(),
+  webhookPort: z.number().int().min(1024).max(65535).optional(),
+  webhookPath: z.string().min(1).max(200).optional(),
+  webhookSecret: z.string().min(1).max(500),
+  securityMode: SecurityModeSchema.optional(),
 });
 
 export const AddXChannelSchema = z.object({
@@ -1855,6 +1867,7 @@ export const AddChannelSchema = z.discriminatedUnion("type", [
   AddTwitchChannelSchema,
   AddLineChannelSchema,
   AddBlueBubblesChannelSchema,
+  AddGoogleChatChannelSchema,
   AddFeishuChannelSchema,
   AddWeComChannelSchema,
   AddXChannelSchema,

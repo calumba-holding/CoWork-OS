@@ -23,6 +23,7 @@
 import { EventEmitter } from "events";
 import * as http from "http";
 import * as https from "https";
+import { readWebhookSecret, timingSafeEqualString } from "../../utils/webhook-auth";
 
 /**
  * BlueBubbles message
@@ -128,6 +129,8 @@ export interface BlueBubblesClientOptions {
   webhookPort?: number;
   /** Webhook path */
   webhookPath?: string;
+  /** Shared secret required for webhook requests */
+  webhookSecret?: string;
   /** Poll interval if webhooks not available (ms) */
   pollInterval?: number;
   /** Enable verbose logging */
@@ -276,6 +279,12 @@ export class BlueBubblesClient extends EventEmitter {
       return;
     }
 
+    if (!this.verifyWebhookRequest(req)) {
+      res.writeHead(401);
+      res.end();
+      return;
+    }
+
     let body = "";
     req.on("data", (chunk) => {
       body += chunk.toString();
@@ -293,6 +302,15 @@ export class BlueBubblesClient extends EventEmitter {
         res.end();
       }
     });
+  }
+
+  private verifyWebhookRequest(req: http.IncomingMessage): boolean {
+    const secret = this.options.webhookSecret?.trim();
+    if (!secret) {
+      return false;
+    }
+    const provided = readWebhookSecret(req);
+    return Boolean(provided && timingSafeEqualString(provided, secret));
   }
 
   /**

@@ -14,6 +14,7 @@ import * as https from "https";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+import { readWebhookSecret, timingSafeEqualString } from "../../utils/webhook-auth";
 import {
   ChannelAdapter,
   ChannelStatus,
@@ -401,6 +402,11 @@ export class GoogleChatAdapter implements ChannelAdapter {
   ): Promise<void> {
     try {
       const event: GoogleChatEvent = JSON.parse(body);
+      if (!this.verifyWebhookRequest(req, event)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: "Unauthorized" }));
+        return;
+      }
 
       // Handle different event types
       switch (event.type) {
@@ -444,6 +450,15 @@ export class GoogleChatAdapter implements ChannelAdapter {
       res.writeHead(400);
       res.end(JSON.stringify({ error: "Bad Request" }));
     }
+  }
+
+  private verifyWebhookRequest(req: http.IncomingMessage, event: GoogleChatEvent): boolean {
+    const secret = this.config.webhookSecret?.trim();
+    if (!secret) {
+      return false;
+    }
+    const provided = readWebhookSecret(req) || (typeof event.token === "string" ? event.token.trim() : "");
+    return Boolean(provided && timingSafeEqualString(provided, secret));
   }
 
   /**

@@ -30,6 +30,7 @@ import {
   TwitchConfig as _TwitchConfig,
   LineConfig as _LineConfig,
   BlueBubblesConfig as _BlueBubblesConfig,
+  GoogleChatConfig as _GoogleChatConfig,
   EmailConfig as _EmailConfig,
   GatewayEventHandler,
 } from "./channels/types";
@@ -46,6 +47,7 @@ import { MatrixAdapter, createMatrixAdapter } from "./channels/matrix";
 import { TwitchAdapter, createTwitchAdapter } from "./channels/twitch";
 import { LineAdapter, createLineAdapter } from "./channels/line";
 import { BlueBubblesAdapter, createBlueBubblesAdapter } from "./channels/bluebubbles";
+import { createGoogleChatAdapter } from "./channels/google-chat";
 import { EmailAdapter, createEmailAdapter } from "./channels/email";
 import { XAdapter, createXAdapter, type XAdapterConfig } from "./channels/x";
 import {
@@ -632,15 +634,8 @@ export class ChannelGateway {
 
     // Auto-connect if configured
     if (this.config.autoConnect) {
-      const results = await Promise.allSettled([
-        this.connectMicrosoftEmailGraphChannels(),
-        this.router.connectAll(),
-      ]);
-      for (const result of results) {
-        if (result.status === "rejected") {
-          logger.warn("Enabled channel connect group failed:", result.reason);
-        }
-      }
+      await this.connectMicrosoftEmailGraphChannels();
+      await this.router.connectAll();
     }
 
     this.startPendingCleanup();
@@ -659,15 +654,8 @@ export class ChannelGateway {
     if (!this.initialized) {
       await this.initialize();
     }
-    const results = await Promise.allSettled([
-      this.connectMicrosoftEmailGraphChannels(options),
-      this.router.connectAll(options),
-    ]);
-    for (const result of results) {
-      if (result.status === "rejected") {
-        logger.warn("Enabled channel connect group failed:", result.reason);
-      }
-    }
+    await this.connectMicrosoftEmailGraphChannels(options);
+    await this.router.connectAll(options);
   }
 
   /**
@@ -1246,6 +1234,7 @@ export class ChannelGateway {
       ambientMode?: boolean;
       silentUnauthorized?: boolean;
       captureSelfMessages?: boolean;
+      webhookSecret?: string;
     },
   ): Promise<Channel> {
     // Check if BlueBubbles channel already exists
@@ -1263,6 +1252,7 @@ export class ChannelGateway {
         serverUrl,
         password,
         webhookPort,
+        webhookSecret: opts?.webhookSecret || password,
         allowedContacts,
         ...(opts?.ambientMode ? { ambientMode: true } : {}),
         ...(opts?.silentUnauthorized ? { silentUnauthorized: true } : {}),
@@ -1271,6 +1261,47 @@ export class ChannelGateway {
       securityConfig: {
         mode: securityMode,
         allowedUsers: allowedContacts || [],
+        pairingCodeTTL: 300,
+        maxPairingAttempts: 5,
+        rateLimitPerMinute: 30,
+      },
+      status: "disconnected",
+    });
+
+    return channel;
+  }
+
+  /**
+   * Add a new Google Chat channel
+   */
+  async addGoogleChatChannel(
+    name: string,
+    serviceAccountKeyPath: string,
+    projectId?: string,
+    webhookPort: number = 3979,
+    webhookPath: string = "/googlechat/webhook",
+    webhookSecret?: string,
+    securityMode: "open" | "allowlist" | "pairing" = "pairing",
+  ): Promise<Channel> {
+    const existing = this.channelRepo.findByType("googlechat");
+    if (existing) {
+      throw new Error("Google Chat channel already configured. Update or remove it first.");
+    }
+
+    const channel = this.channelRepo.create({
+      type: "googlechat",
+      name,
+      enabled: false,
+      config: {
+        serviceAccountKeyPath,
+        projectId,
+        webhookPort,
+        webhookPath,
+        webhookSecret,
+      },
+      securityConfig: {
+        mode: securityMode,
+        allowedUsers: [],
         pairingCodeTTL: 300,
         maxPairingAttempts: 5,
         rateLimitPerMinute: 30,
@@ -2009,19 +2040,17 @@ export class ChannelGateway {
       .findEnabled()
       .filter((channel) => this.isMicrosoftEmailOAuthChannel(channel));
 
-    await Promise.all(
-      channels.map(async (channel) => {
-        try {
-          await withTimeout(
-            this.connectMicrosoftEmailGraphChannel(channel, options),
-            options.timeoutMs,
-            `Timed out connecting Microsoft Outlook email channel ${channel.id}`,
-          );
-        } catch (error) {
-          console.error("Failed to connect Microsoft Outlook email channel:", error);
-        }
-      }),
-    );
+    for (const channel of channels) {
+      try {
+        await withTimeout(
+          this.connectMicrosoftEmailGraphChannel(channel, options),
+          options.timeoutMs,
+          `Timed out connecting Microsoft Outlook email channel ${channel.id}`,
+        );
+      } catch (error) {
+        console.error("Failed to connect Microsoft Outlook email channel:", error);
+      }
+    }
   }
 
   private async connectMicrosoftEmailGraphChannel(
@@ -2335,10 +2364,29 @@ export class ChannelGateway {
           password: channel.config.password as string,
           webhookPort: channel.config.webhookPort as number | undefined,
           webhookPath: channel.config.webhookPath as string | undefined,
+          webhookSecret: (channel.config.webhookSecret as string | undefined) || (channel.config.password as string),
           pollInterval: channel.config.pollInterval as number | undefined,
           allowedContacts: channel.config.allowedContacts as string[] | undefined,
           responsePrefix: channel.config.responsePrefix as string | undefined,
         });
+
+      case "googlechat":
+        return createGoogleChatAdapter({
+          enabled: channel.enabled,
+          serviceAccountKeyPath: channel.config.serviceAccountKeyPath as string | undefined,
+          serviceAccountKey: channel.config.serviceAccountKey as
+            | _GoogleChatConfig["serviceAccountKey"]
+            | undefined,
+          projectId: channel.config.projectId as string | undefined,
+          webhookPort: channel.config.webhookPort as number | undefined,
+          webhookPath: channel.config.webhookPath as string | undefined,
+          webhookSecret: channel.config.webhookSecret as string | undefined,
+          responsePrefix: channel.config.responsePrefix as string | undefined,
+          deduplicationEnabled: channel.config.deduplicationEnabled as boolean | undefined,
+          autoReconnect: channel.config.autoReconnect as boolean | undefined,
+          maxReconnectAttempts: channel.config.maxReconnectAttempts as number | undefined,
+          pubsubSubscription: channel.config.pubsubSubscription as string | undefined,
+        } as _GoogleChatConfig);
 
       case "email":
         const loomStatePath =

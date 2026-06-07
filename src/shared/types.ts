@@ -9307,6 +9307,7 @@ export interface AddChannelRequest {
   blueBubblesServerUrl?: string;
   blueBubblesPassword?: string;
   blueBubblesWebhookPort?: number;
+  blueBubblesWebhookSecret?: string;
   blueBubblesAllowedContacts?: string[];
   // Email-specific fields
   emailProtocol?: "imap-smtp" | "loom";
@@ -9342,6 +9343,7 @@ export interface AddChannelRequest {
   serviceAccountKeyPath?: string;
   projectId?: string;
   webhookPath?: string;
+  webhookSecret?: string;
   // Feishu-specific fields
   feishuAppId?: string;
   feishuAppSecret?: string;

@@ -12,6 +12,7 @@ import {
   StatusHandler,
 } from "./types";
 import { createLogger } from "../../utils/logger";
+import { timingSafeEqualString } from "../../utils/webhook-auth";
 
 const logger = createLogger("FeishuAdapter");
 
@@ -321,11 +322,12 @@ export class FeishuAdapter implements ChannelAdapter {
       const timestamp = String(req.headers["x-lark-request-timestamp"] || "");
       const nonce = String(req.headers["x-lark-request-nonce"] || "");
       const signature = String(req.headers["x-lark-signature"] || "");
-      if (timestamp && nonce && signature) {
-        const expected = computeFeishuSignature(timestamp, nonce, this.config.encryptKey, rawBody);
-        if (expected !== signature) {
-          throw new Error("Feishu signature validation failed");
-        }
+      if (!timestamp || !nonce || !signature) {
+        throw new Error("Feishu signature headers are required");
+      }
+      const expected = computeFeishuSignature(timestamp, nonce, this.config.encryptKey, rawBody);
+      if (!timingSafeEqualString(expected, signature)) {
+        throw new Error("Feishu signature validation failed");
       }
     }
 
@@ -347,12 +349,13 @@ export class FeishuAdapter implements ChannelAdapter {
             typeof (parsed.header as Record<string, unknown>).token === "string"
           ? ((parsed.header as Record<string, unknown>).token as string)
           : undefined;
-    if (
-      this.config.verificationToken &&
-      token &&
-      token !== this.config.verificationToken
-    ) {
-      throw new Error("Feishu verification token mismatch");
+    if (this.config.verificationToken) {
+      if (!token) {
+        throw new Error("Feishu verification token is required");
+      }
+      if (!timingSafeEqualString(token, this.config.verificationToken)) {
+        throw new Error("Feishu verification token mismatch");
+      }
     }
 
     return parsed;

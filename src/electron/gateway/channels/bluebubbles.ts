@@ -98,6 +98,7 @@ export class BlueBubblesAdapter implements ChannelAdapter {
         password: this.config.password,
         webhookPort: this.config.enableWebhook ? this.config.webhookPort : undefined,
         webhookPath: this.config.webhookPath,
+        webhookSecret: this.config.webhookSecret || this.config.password,
         pollInterval: this.config.pollInterval,
         verbose: process.env.NODE_ENV === "development",
       });

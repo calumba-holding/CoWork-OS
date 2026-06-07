@@ -8313,12 +8313,31 @@ export async function setupIpcHandlers(
           ambientMode: validated.ambientMode ?? false,
           silentUnauthorized: validated.silentUnauthorized ?? false,
           captureSelfMessages: validated.captureSelfMessages ?? false,
+          webhookSecret: validated.blueBubblesWebhookSecret,
         },
       );
 
       // Automatically enable and connect BlueBubbles
       gateway.enableChannel(channel.id).catch((err) => {
         logger.error("Failed to enable BlueBubbles channel:", err);
+      });
+
+      return toPublicChannel(channel, "connecting");
+    }
+
+    if (validated.type === "googlechat") {
+      const channel = await gateway.addGoogleChatChannel(
+        validated.name,
+        validated.serviceAccountKeyPath!,
+        validated.projectId,
+        validated.webhookPort ?? 3979,
+        validated.webhookPath || "/googlechat/webhook",
+        validated.webhookSecret,
+        validated.securityMode || "pairing",
+      );
+
+      gateway.enableChannel(channel.id).catch((err) => {
+        logger.error("Failed to enable Google Chat channel:", err);
       });
 
       return toPublicChannel(channel, "connecting");
@@ -11299,11 +11318,12 @@ function setupMCPHandlers(): void {
         Number.isFinite(requestedPort) &&
         requestedPort >= 1024
       ) {
-        await hostServer.startHttp(Math.floor(requestedPort));
+        const { authToken } = await hostServer.startHttp(Math.floor(requestedPort));
         return {
           success: true,
           transport: "http",
           port: hostServer.getHttpPort(),
+          authToken,
         };
       }
 
@@ -11324,6 +11344,7 @@ function setupMCPHandlers(): void {
       running: hostServer.isRunning(),
       transport: hostServer.getTransportMode(),
       port: hostServer.getHttpPort(),
+      authRequired: hostServer.getTransportMode() === "http",
       toolCount: hostServer.hasToolProvider()
         ? MCPClientManager.getInstance().getAllTools().length
         : 0,

@@ -73,4 +73,48 @@ describe("MCPHostServer resources", () => {
     });
     expect(readResponse?.result?.contents?.[0]?.text).toContain('"ok":true');
   });
+
+  it("requires a bearer token for HTTP MCP requests", async () => {
+    const server = MCPHostServer.getInstance();
+    server.setToolProvider({
+      getTools() {
+        return [];
+      },
+      async executeTool() {
+        return {};
+      },
+    });
+
+    const { authToken } = await server.startHttp(0);
+    const port = server.getHttpPort();
+    expect(port).toBeGreaterThan(0);
+
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: MCP_METHODS.TOOLS_LIST,
+    });
+
+    const unauthenticated = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(unauthenticated.status).toBe(401);
+
+    const authenticated = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${authToken}`,
+      },
+      body,
+    });
+    expect(authenticated.status).toBe(200);
+    await expect(authenticated.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { tools: [] },
+    });
+  });
 });

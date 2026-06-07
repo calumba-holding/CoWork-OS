@@ -31,6 +31,7 @@ export function BlueBubblesSettings({ onStatusChange }: BlueBubblesSettingsProps
   const [serverUrl, setServerUrl] = useState("");
   const [password, setPassword] = useState("");
   const [webhookPort, setWebhookPort] = useState(3101);
+  const [webhookSecret, setWebhookSecret] = useState("");
   const [allowedContacts, setAllowedContacts] = useState("");
   const [ambientMode, setAmbientMode] = useState(false);
   const [captureSelfMessages, setCaptureSelfMessages] = useState(false);
@@ -64,6 +65,7 @@ export function BlueBubblesSettings({ onStatusChange }: BlueBubblesSettingsProps
           setServerUrl((bbChannel.config.serverUrl as string) || "");
           setPassword((bbChannel.config.password as string) || "");
           setWebhookPort((bbChannel.config.webhookPort as number) || 3101);
+          setWebhookSecret((bbChannel.config.webhookSecret as string) || "");
           const contacts = (bbChannel.config.allowedContacts as string[]) || [];
           setAllowedContacts(contacts.join(", "));
           setAmbientMode(Boolean(bbChannel.config.ambientMode));
@@ -133,6 +135,7 @@ export function BlueBubblesSettings({ onStatusChange }: BlueBubblesSettingsProps
         blueBubblesServerUrl: serverUrl.trim(),
         blueBubblesPassword: password.trim(),
         blueBubblesWebhookPort: webhookPort,
+        blueBubblesWebhookSecret: webhookSecret.trim() || undefined,
         blueBubblesAllowedContacts: contactList.length > 0 ? contactList : undefined,
       });
 
@@ -342,6 +345,20 @@ export function BlueBubblesSettings({ onStatusChange }: BlueBubblesSettingsProps
               onChange={(e) => setWebhookPort(parseInt(e.target.value) || 3101)}
             />
             <p className="settings-hint">Port for receiving notifications (default: 3101)</p>
+          </div>
+
+          <div className="settings-field">
+            <label>Webhook Secret (Optional)</label>
+            <input
+              type="password"
+              className="settings-input"
+              placeholder="Defaults to server password"
+              value={webhookSecret}
+              onChange={(e) => setWebhookSecret(e.target.value)}
+            />
+            <p className="settings-hint">
+              Incoming webhook requests must include this secret or the server password
+            </p>
           </div>
 
           <div className="settings-field">

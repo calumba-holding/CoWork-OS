@@ -11,8 +11,11 @@ import {
   EmailChannelConfigSchema,
   AddEmailChannelSchema,
   AddDiscordChannelSchema,
+  AddBlueBubblesChannelSchema,
+  AddGoogleChatChannelSchema,
   AddFeishuChannelSchema,
   AddWeComChannelSchema,
+  AddChannelSchema,
   PersonalityConfigV2Schema,
 } from "../validation";
 import { z } from "zod";
@@ -390,6 +393,42 @@ describe("GuardrailSettingsSchema", () => {
 });
 
 describe("gateway channel schemas", () => {
+  it("validates a BlueBubbles add-channel request with a webhook secret", () => {
+    const result = AddBlueBubblesChannelSchema.safeParse({
+      type: "bluebubbles",
+      name: "BlueBubbles",
+      blueBubblesServerUrl: "https://bluebubbles.example.test",
+      blueBubblesPassword: "server_password",
+      blueBubblesWebhookPort: 3101,
+      blueBubblesWebhookSecret: "webhook_secret_123",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("validates a Google Chat add-channel request with a required webhook secret", () => {
+    const result = AddGoogleChatChannelSchema.safeParse({
+      type: "googlechat",
+      name: "Google Chat Bot",
+      serviceAccountKeyPath: "/tmp/service-account.json",
+      projectId: "project-123",
+      webhookPort: 3979,
+      webhookPath: "/googlechat/webhook",
+      webhookSecret: "webhook_secret_123",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects Google Chat add-channel requests without a webhook secret", () => {
+    const result = AddChannelSchema.safeParse({
+      type: "googlechat",
+      name: "Google Chat Bot",
+      serviceAccountKeyPath: "/tmp/service-account.json",
+      webhookPort: 3979,
+      webhookPath: "/googlechat/webhook",
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("validates a Feishu add-channel request", () => {
     const result = AddFeishuChannelSchema.safeParse({
       type: "feishu",

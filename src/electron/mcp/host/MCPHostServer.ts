@@ -6,9 +6,11 @@
  */
 
 import { EventEmitter } from "events";
+import { randomBytes } from "crypto";
 import * as http from "http";
 import * as readline from "readline";
 import { createLogger } from "../../utils/logger";
+import { readBearerToken, timingSafeEqualString } from "../../utils/webhook-auth";
 import {
   JSONRPCRequest,
   JSONRPCResponse,
@@ -60,6 +62,7 @@ export class MCPHostServer extends EventEmitter {
   private httpServer: http.Server | null = null;
   private transportMode: "stdio" | "http" | null = null;
   private httpPort: number | null = null;
+  private httpAuthToken: string | null = null;
 
   private constructor() {
     super();
@@ -123,10 +126,13 @@ export class MCPHostServer extends EventEmitter {
     this.emit("started");
   }
 
-  async startHttp(port: number): Promise<void> {
+  async startHttp(port: number): Promise<{ authToken: string }> {
     if (this.running) {
       logger.info("Already running");
-      return;
+      if (this.transportMode !== "http" || !this.httpAuthToken) {
+        throw new Error("MCP host is already running on a non-HTTP transport");
+      }
+      return { authToken: this.httpAuthToken };
     }
     if (!this.toolProvider) {
       throw new Error("Tool provider not set");
@@ -135,18 +141,41 @@ export class MCPHostServer extends EventEmitter {
     this.running = true;
     this.initialized = true;
     this.transportMode = "http";
+    this.httpAuthToken = randomBytes(32).toString("base64url");
 
     this.httpServer = http.createServer(async (req, res) => {
       try {
         if (req.method === "GET" && req.url === "/health") {
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ ok: true, transport: "http", port: this.httpPort }));
+          res.end(
+            JSON.stringify({
+              ok: true,
+              transport: "http",
+              port: this.httpPort,
+              authRequired: true,
+            }),
+          );
           return;
         }
 
         if (req.method !== "POST" || req.url !== "/mcp") {
           res.writeHead(404, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "Not found" }));
+          return;
+        }
+
+        if (!this.isAllowedHttpRequest(req)) {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 0,
+              error: {
+                code: MCP_ERROR_CODES.INTERNAL_ERROR,
+                message: "Unauthorized",
+              },
+            }),
+          );
           return;
         }
 
@@ -178,12 +207,17 @@ export class MCPHostServer extends EventEmitter {
       this.httpServer?.once("error", reject);
       this.httpServer?.listen(port, "127.0.0.1", () => {
         this.httpServer?.off("error", reject);
+        const address = this.httpServer?.address();
+        if (address && typeof address === "object") {
+          this.httpPort = address.port;
+        }
         resolve();
       });
     });
-    this.httpPort = port;
-    logger.info(`Listening on http://127.0.0.1:${port}/mcp`);
+    this.httpPort = this.httpPort ?? port;
+    logger.info(`Listening on http://127.0.0.1:${this.httpPort}/mcp`);
     this.emit("started");
+    return { authToken: this.httpAuthToken };
   }
 
   /**
@@ -211,6 +245,7 @@ export class MCPHostServer extends EventEmitter {
     this.initialized = false;
     this.transportMode = null;
     this.httpPort = null;
+    this.httpAuthToken = null;
     this.emit("stopped");
 
     logger.info("Stopped");
@@ -229,6 +264,10 @@ export class MCPHostServer extends EventEmitter {
 
   getHttpPort(): number | null {
     return this.httpPort;
+  }
+
+  getHttpAuthToken(): string | null {
+    return this.httpAuthToken;
   }
 
   /**
@@ -509,6 +548,43 @@ export class MCPHostServer extends EventEmitter {
       req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
       req.on("error", reject);
     });
+  }
+
+  private isAllowedHttpRequest(req: http.IncomingMessage): boolean {
+    if (!this.isLoopbackHostHeader(req.headers.host)) {
+      return false;
+    }
+    const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
+    if (origin && !this.isLoopbackOrigin(origin)) {
+      return false;
+    }
+    const token = readBearerToken(req.headers.authorization);
+    return Boolean(token && this.httpAuthToken && timingSafeEqualString(token, this.httpAuthToken));
+  }
+
+  private isLoopbackHostHeader(hostHeader: string | undefined): boolean {
+    // Host/origin checks are defense-in-depth against DNS rebinding; the bearer
+    // token is the real gate. A missing Host header is allowed (some clients
+    // omit it) because the token is still required below.
+    if (!hostHeader) return true;
+    const host = hostHeader.trim().toLowerCase();
+    return (
+      host === "localhost" ||
+      host.startsWith("localhost:") ||
+      host === "127.0.0.1" ||
+      host.startsWith("127.0.0.1:") ||
+      host === "[::1]" ||
+      host.startsWith("[::1]:") ||
+      host === "::1"
+    );
+  }
+
+  private isLoopbackOrigin(origin: string): boolean {
+    try {
+      return this.isLoopbackHostHeader(new URL(origin).host);
+    } catch {
+      return false;
+    }
   }
 
   /**

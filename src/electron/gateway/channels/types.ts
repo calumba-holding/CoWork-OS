@@ -453,6 +453,8 @@ export interface BlueBubblesConfig extends ChannelConfig {
   webhookPort?: number;
   /** Webhook path (default: /bluebubbles/webhook) */
   webhookPath?: string;
+  /** Shared secret required on incoming webhook requests */
+  webhookSecret?: string;
   /** Poll interval in ms if webhooks not available (default: 5000) */
   pollInterval?: number;
   /** Response prefix for bot messages */
@@ -612,6 +614,8 @@ export interface GoogleChatConfig extends ChannelConfig {
   webhookPort?: number;
   /** Webhook path (default: /googlechat/webhook) */
   webhookPath?: string;
+  /** Shared secret required on incoming webhook requests */
+  webhookSecret?: string;
   /** Bot display name */
   displayName?: string;
   /** Response prefix for bot replies */

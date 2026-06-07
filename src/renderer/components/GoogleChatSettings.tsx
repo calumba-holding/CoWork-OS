@@ -30,6 +30,7 @@ export function GoogleChatSettings({ onStatusChange }: GoogleChatSettingsProps) 
   const [projectId, setProjectId] = useState("");
   const [webhookPort, setWebhookPort] = useState("3979");
   const [webhookPath, setWebhookPath] = useState("/googlechat/webhook");
+  const [webhookSecret, setWebhookSecret] = useState("");
   const [channelName, setChannelName] = useState("Google Chat Bot");
   const [securityMode, setSecurityMode] = useState<SecurityMode>("pairing");
 
@@ -94,7 +95,7 @@ export function GoogleChatSettings({ onStatusChange }: GoogleChatSettingsProps) 
   }, [channel?.id, loadChannel]);
 
   const handleAddChannel = async () => {
-    if (!serviceAccountKeyPath.trim()) return;
+    if (!serviceAccountKeyPath.trim() || !webhookSecret.trim()) return;
 
     try {
       setSaving(true);
@@ -107,11 +108,13 @@ export function GoogleChatSettings({ onStatusChange }: GoogleChatSettingsProps) 
         projectId: projectId.trim() || undefined,
         webhookPort: parseInt(webhookPort) || 3979,
         webhookPath: webhookPath.trim() || "/googlechat/webhook",
+        webhookSecret: webhookSecret.trim(),
         securityMode,
       });
 
       setServiceAccountKeyPath("");
       setProjectId("");
+      setWebhookSecret("");
       await loadChannel();
     } catch (error: Any) {
       setTestResult({ success: false, error: error.message });
@@ -317,6 +320,20 @@ export function GoogleChatSettings({ onStatusChange }: GoogleChatSettingsProps) 
           </div>
 
           <div className="settings-field">
+            <label>Webhook Secret</label>
+            <input
+              type="password"
+              className="settings-input"
+              placeholder="Shared webhook secret"
+              value={webhookSecret}
+              onChange={(e) => setWebhookSecret(e.target.value)}
+            />
+            <p className="settings-hint">
+              Require incoming Google Chat webhook requests to include this shared secret
+            </p>
+          </div>
+
+          <div className="settings-field">
             <label>Security Mode</label>
             <select
               className="settings-select"
@@ -349,7 +366,7 @@ export function GoogleChatSettings({ onStatusChange }: GoogleChatSettingsProps) 
           <button
             className="button-primary"
             onClick={handleAddChannel}
-            disabled={saving || !serviceAccountKeyPath.trim()}
+            disabled={saving || !serviceAccountKeyPath.trim() || !webhookSecret.trim()}
           >
             {saving ? "Adding..." : "Add Google Chat Bot"}
           </button>
