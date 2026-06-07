@@ -32,6 +32,22 @@ describe("Codex Security plugin pack", () => {
         "codex-security:validation",
       ]),
     );
+    expect(manifest.slashCommands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "security-scan",
+          skillId: "codex-security:security-scan",
+        }),
+        expect.objectContaining({
+          name: "security-diff-scan",
+          skillId: "codex-security:security-diff-scan",
+        }),
+        expect.objectContaining({
+          name: "deep-security-scan",
+          skillId: "codex-security:deep-security-scan",
+        }),
+      ]),
+    );
     for (const skill of manifest.skillDirectories as Array<{ path: string }>) {
       expect(
         fs.existsSync(

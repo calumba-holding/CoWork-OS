@@ -16,6 +16,7 @@ import { promisify } from "util";
 import { app } from "electron";
 import { InstallSecurityOutcome } from "../../shared/types";
 import { getCapabilityBundleSecurityService } from "../security/capability-bundle-security";
+import { assertNetworkPolicyAllowed } from "../security/network-policy";
 import { validateManifest } from "./loader";
 import { PluginManifest } from "./types";
 
@@ -209,10 +210,7 @@ function parseGitUrl(input: string): { url: string; name: string } | null {
   }
   // SSH URL
   else if (url.startsWith("git@")) {
-    const match = url.match(/git@[^:]+:(.+?)(?:\.git)?$/);
-    if (!match) return null;
-    const parts = match[1].split("/");
-    name = parts[parts.length - 1];
+    return null;
   } else {
     return null;
   }
@@ -242,7 +240,12 @@ export async function installFromGit(
   // Parse and validate URL
   const parsed = parseGitUrl(gitUrl);
   if (!parsed) {
-    return { success: false, error: `Invalid git URL: ${gitUrl}` };
+    return { success: false, error: `Invalid or unsupported git URL: ${gitUrl}` };
+  }
+  try {
+    assertNetworkPolicyAllowed({ url: parsed.url, toolName: "plugin_pack_git_install" });
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 
   // Check git availability
@@ -401,6 +404,7 @@ export async function installFromUrl(
   let tempDir: string | null = null;
 
   try {
+    assertNetworkPolicyAllowed({ url, toolName: "plugin_pack_url_install" });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 

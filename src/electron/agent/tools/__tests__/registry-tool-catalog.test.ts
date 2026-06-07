@@ -189,11 +189,14 @@ describe("ToolRegistry tool catalog versioning", () => {
     expect(secondTools.some((tool) => tool.name === "mcp_alpha")).toBe(true);
   });
 
-  it("only advertises security scan helpers for Codex Security tasks", () => {
+  it("no longer registers security scan helpers as tools (migrated to codex-security plugin skills)", () => {
     mockBuiltinSettings.version = "security-scan-gating";
     const normalRegistry = new ToolRegistry(createWorkspace(), createDaemon(), "task-normal");
     expect(normalRegistry.getTools().some((tool) => tool.name === "security_scan_prepare")).toBe(false);
 
+    // Even Codex Security tasks no longer get built-in security_scan_* tools; the scan
+    // capability now lives in the codex-security plugin pack (security-scan,
+    // security-diff-scan, deep-security-scan skills).
     const securityRegistry = new ToolRegistry(
       createWorkspace(),
       createDaemon(),
@@ -202,7 +205,7 @@ describe("ToolRegistry tool catalog versioning", () => {
       undefined,
       true,
     );
-    expect(securityRegistry.getTools().some((tool) => tool.name === "security_scan_prepare")).toBe(true);
+    expect(securityRegistry.getTools().some((tool) => tool.name === "security_scan_prepare")).toBe(false);
   });
 
   it("annotates MCP tool descriptions with the source server name", () => {

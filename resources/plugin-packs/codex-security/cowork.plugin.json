@@ -9,9 +9,9 @@
   "icon": "🛡️",
   "category": "Engineering",
   "tryAsking": [
-    "$codex-security:security-scan Run a security scan on this repository",
-    "$codex-security:security-diff-scan Review this branch diff for security regressions",
-    "$codex-security:deep-security-scan Run a deep repository-wide security scan"
+    "$security-scan Run a security scan on this repository",
+    "$security-diff-scan Review this branch diff for security regressions",
+    "$deep-security-scan Run a deep repository-wide security scan"
   ],
   "skillDirectories": [
     {
@@ -65,17 +65,17 @@
   ],
   "slashCommands": [
     {
-      "name": "codex-security:security-scan",
+      "name": "security-scan",
       "description": "Run a repository-wide or scoped-path Codex Security scan",
       "skillId": "codex-security:security-scan"
     },
     {
-      "name": "codex-security:security-diff-scan",
+      "name": "security-diff-scan",
       "description": "Run a security review of a Git-backed diff",
       "skillId": "codex-security:security-diff-scan"
     },
     {
-      "name": "codex-security:deep-security-scan",
+      "name": "deep-security-scan",
       "description": "Run a deeper multi-pass repository-wide Codex Security scan",
       "skillId": "codex-security:deep-security-scan"
     }

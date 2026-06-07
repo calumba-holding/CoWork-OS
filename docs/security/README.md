@@ -8,6 +8,7 @@ This documentation covers the security architecture of CoWork OS, an AI-powered 
 2. [Trust Boundaries](./trust-boundaries.md) - Understanding workspace, channel, and network boundaries
 3. [Configuration Guide](./configuration-guide.md) - How to configure security settings
 4. [Best Practices](./best-practices.md) - Recommended security settings and practices
+5. [June 2026 Security Hardening](./security-hardening-2026-06.md) - Deep scan finding closures and defense-in-depth changes
 
 ## Quick Start
 
