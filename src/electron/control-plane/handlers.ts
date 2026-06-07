@@ -7,6 +7,7 @@
 import { app, ipcMain, BrowserWindow } from "electron";
 import { randomUUID } from "crypto";
 import * as fs from "fs/promises";
+import * as fsSync from "fs";
 import os from "os";
 import path from "path";
 import { z } from "zod";
@@ -141,6 +142,40 @@ function getEverydayAgentService(deps: ControlPlaneMethodDeps): EverydayAgentSer
     everydayAgentService = new EverydayAgentService(deps.dbManager.getDatabase());
   }
   return everydayAgentService;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase();
+  return value === "127.0.0.1" || value === "localhost" || value === "::1" || value === "[::1]";
+}
+
+function writeLocalControlPlaneConnectionFile(settings: {
+  host: string;
+  port: number;
+  token: string;
+}): void {
+  if (!settings.token || !isLoopbackHost(settings.host)) return;
+  try {
+    const filePath = path.join(getUserDataDir(), "control-plane-local.json");
+    const payload = {
+      version: 1,
+      url: `ws://${settings.host}:${settings.port}`,
+      token: settings.token,
+      pid: process.pid,
+      updatedAt: Date.now(),
+    };
+    fsSync.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    try {
+      fsSync.chmodSync(filePath, 0o600);
+    } catch {
+      // Best-effort on platforms without POSIX permissions.
+    }
+  } catch (error) {
+    console.warn("[ControlPlane] Failed to write local CLI connection file:", error);
+  }
 }
 
 function toNodePlatform(platform?: string): "ios" | "android" | "macos" | "linux" | "windows" {
@@ -2265,6 +2300,11 @@ export async function startControlPlaneFromSettings(
       }
       const addr = controlPlaneServer.getAddress();
       const tailscale = getExposureStatus();
+      writeLocalControlPlaneConnectionFile({
+        host: settings.host,
+        port: settings.port,
+        token: settings.token,
+      });
       return {
         ok: true,
         address: addr || undefined,
@@ -2375,6 +2415,13 @@ export async function startControlPlaneFromSettings(
     }
 
     const address = controlPlaneServer?.getAddress();
+    if (address && settings.enabled) {
+      writeLocalControlPlaneConnectionFile({
+        host: settings.host,
+        port: settings.port,
+        token: settings.token,
+      });
+    }
     return {
       ok: true,
       address: address || undefined,

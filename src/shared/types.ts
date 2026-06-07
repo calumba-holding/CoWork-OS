@@ -2128,6 +2128,8 @@ export interface AgentConfig {
   sideChatTurnContext?: string;
   /** Internal scheduled-job identifier used to prevent duplicate cron task creation after restarts. */
   scheduledJobId?: string;
+  /** Internal ownership metadata for tasks launched from the standalone CLI. */
+  cli?: CliTaskOwnership;
   /** User-selected integration mentions for soft tool-routing guidance. */
   integrationMentions?: IntegrationMentionSelection[];
   /** Optional origin channel that created the task (used for channel-aware gating) */
@@ -2343,6 +2345,19 @@ export interface AgentConfig {
    * Defined after `ResearchWorkflowConfig` in this file.
    */
   researchWorkflow?: ResearchWorkflowConfig;
+}
+
+export interface CliTaskOwnership {
+  owner: "cowork-run";
+  runId: string;
+  pid: number;
+  startedAt: number;
+  cwd: string;
+  mode: "attached" | "detached";
+  interruptPolicy: "cancel" | "detach";
+  lastSeenAt?: number;
+  endedAt?: number;
+  exitCode?: number;
 }
 
 /**

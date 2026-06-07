@@ -2677,6 +2677,21 @@ export class ApprovalRepository {
     return rows.map((row) => this.mapRowToApproval(row));
   }
 
+  findPending(limit = 100): ApprovalRequest[] {
+    const safeLimit =
+      typeof limit === "number" && Number.isFinite(limit) && limit > 0
+        ? Math.min(1000, Math.floor(limit))
+        : 100;
+    const stmt = this.db.prepare(`
+      SELECT * FROM approvals
+      WHERE status = 'pending'
+      ORDER BY requested_at ASC
+      LIMIT ?
+    `);
+    const rows = stmt.all(safeLimit) as Any[];
+    return rows.map((row) => this.mapRowToApproval(row));
+  }
+
   private mapRowToApproval(row: Any): ApprovalRequest {
     return {
       id: row.id,

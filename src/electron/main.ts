@@ -1087,6 +1087,72 @@ registerTaskDeeplinkProtocol();
 applyApplicationIdentity();
 applyStableUserDataPath();
 
+const CLI_DIRECT_RUN_FLAG = "--cowork-cli-direct-run";
+const CLI_APPROVAL_RESPONSE_FLAG = "--cowork-cli-approval-response";
+
+function isCliDirectRunMode(): boolean {
+  return process.argv.includes(CLI_DIRECT_RUN_FLAG);
+}
+
+function getCliDirectRunArgv(): string[] {
+  const index = process.argv.indexOf(CLI_DIRECT_RUN_FLAG);
+  return index >= 0 ? process.argv.slice(index + 1) : [];
+}
+
+function getArgValueFrom(argv: string[], flag: string): string | undefined {
+  const index = argv.indexOf(flag);
+  if (index < 0) return undefined;
+  const value = argv[index + 1];
+  return value && !value.startsWith("--") ? value : undefined;
+}
+
+function getCliApprovalResponseArgv(argv: string[]): { approvalId: string; approved: boolean } | null {
+  if (!argv.includes(CLI_APPROVAL_RESPONSE_FLAG)) return null;
+  const approvalId = getArgValueFrom(argv, "--approval-id") || "";
+  if (!approvalId) return null;
+  return {
+    approvalId,
+    approved: argv.includes("--approved"),
+  };
+}
+
+async function handleCliApprovalResponse(request: { approvalId: string; approved: boolean }): Promise<void> {
+  if (!agentDaemon) {
+    logger.warn("CLI approval response received before agent daemon was ready");
+    return;
+  }
+  const result = await agentDaemon.respondToApproval(request.approvalId, request.approved);
+  logger.info(
+    `CLI approval response ${request.approved ? "approved" : "rejected"} ${request.approvalId}: ${result}`,
+  );
+}
+
+async function runCliDirectMode(): Promise<void> {
+  try {
+    process.env.COWORK_HEADLESS = "1";
+    await app.whenReady();
+    const directRunPath = path.join(app.getAppPath(), "dist", "cli", "cli", "direct-run.js");
+    if (!fsSync.existsSync(directRunPath)) {
+      throw new Error(
+        `CoWork CLI runtime is missing at ${directRunPath}. Run npm run build:cli or reinstall CoWork OS.`,
+      );
+    }
+    // oxlint-disable-next-line typescript-eslint(no-require-imports)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const directRun = require(directRunPath) as { main: (argv: string[]) => Promise<number> };
+    const code = await directRun.main(getCliDirectRunArgv());
+    app.quit();
+    process.exit(code);
+  } catch (error) {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    app.quit();
+    process.exit(1);
+  }
+}
+
+if (isCliDirectRunMode()) {
+  void runCliDirectMode();
+} else {
 // Ensure only one CoWork OS instance runs at a time.
 // Without this, a second instance can mark in-flight tasks as "orphaned" (failed) and contend on the DB.
 const gotTheLock = app.requestSingleInstanceLock();
@@ -1142,6 +1208,11 @@ if (!gotTheLock) {
 
   app.on("second-instance", (_event, argv) => {
     if (HEADLESS) return;
+    const approvalResponse = getCliApprovalResponseArgv(argv);
+    if (approvalResponse) {
+      void handleCliApprovalResponse(approvalResponse);
+      return;
+    }
     const taskId = extractTaskDeeplinkArg(argv);
     if (taskId) {
       openTaskDeeplink(taskId);
@@ -1154,6 +1225,12 @@ if (!gotTheLock) {
     // If the window was closed (but app kept running), recreate it.
     createWindow();
   });
+
+  const startupApprovalResponse = getCliApprovalResponseArgv(process.argv);
+  if (startupApprovalResponse) {
+    logger.warn("CLI approval response requested, but no existing CoWork OS instance accepted it");
+    app.exit(1);
+  }
 
   function createWindow() {
     const isMac = process.platform === "darwin";
@@ -4395,3 +4472,4 @@ if (!gotTheLock) {
     return validEntries;
   });
 } // single-instance guard
+} // CLI direct-run guard

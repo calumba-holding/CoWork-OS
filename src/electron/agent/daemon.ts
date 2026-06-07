@@ -48,6 +48,7 @@ import {
   Workspace,
   WorkspacePermissions,
   AgentConfig,
+  CliTaskOwnership,
   AgentType,
   ActivityActorType,
   ActivityType,
@@ -161,6 +162,10 @@ import { buildEntropySweepPrompt, collectBlastRadiusPaths } from "./post-task-en
 import { OrchestrationGraphEngine, type OrchestrationGraphNodeInput } from "./orchestration/OrchestrationGraphEngine";
 import { OrchestrationGraphRepository } from "./orchestration/OrchestrationGraphRepository";
 import { MCPClientManager } from "../mcp/client/MCPClientManager";
+
+export interface AgentDaemonOptions {
+  startupRecovery?: boolean;
+}
 
 const log = createLogger("AgentDaemon");
 
@@ -440,7 +445,10 @@ export class AgentDaemon extends EventEmitter {
   private static readonly TRANSIENT_RETRY_ERROR_REGEX =
     /^Transient provider error\.\s*Retry\s+\d+\/\d+\s+in\s+\d+s\./i;
 
-  constructor(private dbManager: DatabaseManager) {
+  constructor(
+    private dbManager: DatabaseManager,
+    private options: AgentDaemonOptions = {},
+  ) {
     super();
     const db = dbManager.getDatabase();
     this.taskRepo = new TaskRepository(db);
@@ -538,6 +546,32 @@ export class AgentDaemon extends EventEmitter {
       typeof message === "string" &&
       AgentDaemon.TRANSIENT_RETRY_ERROR_REGEX.test(message.trim())
     );
+  }
+
+  private isStaleAttachedCliTask(task: Task): boolean {
+    if (isTerminalTaskStatus(task.status)) return false;
+    const cli = this.getCliTaskOwnership(task);
+    if (!cli || cli.mode !== "attached" || cli.endedAt) return false;
+    if (this.isPidAlive(cli.pid)) return false;
+    const lastSeenAt = cli.lastSeenAt || cli.startedAt || task.updatedAt || task.createdAt;
+    return Date.now() - lastSeenAt > 30_000;
+  }
+
+  private getCliTaskOwnership(task: Task): CliTaskOwnership | undefined {
+    const cli = task.agentConfig?.cli;
+    if (!cli || cli.owner !== "cowork-run" || typeof cli.runId !== "string") return undefined;
+    return cli;
+  }
+
+  private isPidAlive(pid: unknown): boolean {
+    if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      return code === "EPERM";
+    }
   }
 
   setTeamOrchestrator(orchestrator: AgentTeamOrchestrator | null): void {
@@ -951,6 +985,11 @@ export class AgentDaemon extends EventEmitter {
   async initialize(): Promise<void> {
     this.orchestrationGraphEngine.start();
 
+    if (this.options.startupRecovery === false) {
+      await this.queueManager.initialize([], []);
+      return;
+    }
+
     // Hard-switch migration: eagerly normalize active/incomplete task events to timeline v2.
     const activeAndIncompleteTasks = this.taskRepo.findByStatus([
       "queued",
@@ -981,6 +1020,20 @@ export class AgentDaemon extends EventEmitter {
       for (const task of inconsistentPersistedTasks) {
         this.taskRepo.update(task.id, {
           status: deriveCanonicalTaskStatus(task),
+        });
+      }
+    }
+
+    const staleAttachedCliTasks = activeAndIncompleteTasks.filter((task) =>
+      this.isStaleAttachedCliTask(task),
+    );
+    if (staleAttachedCliTasks.length > 0) {
+      console.warn(
+        `[AgentDaemon] Cancelling ${staleAttachedCliTasks.length} stale attached CLI task(s) whose owner process exited`,
+      );
+      for (const task of staleAttachedCliTasks) {
+        this.cancelTaskRecord(task.id, "CLI task owner exited before completion", {
+          completedAt: Date.now(),
         });
       }
     }

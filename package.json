@@ -1,7 +1,7 @@
 {
   "name": "cowork-os",
   "version": "0.5.48",
-  "description": "CoWork OS - GUI-first local AI super app and everything app for coding, email, agents, documents, spreadsheets, presentations, web design, automations, and agentic work",
+  "description": "CoWork OS - GUI-first, CLI-capable local AI super app and everything app for coding, email, agents, documents, spreadsheets, presentations, web design, automations, and agentic work",
   "overrides": {
     "@whiskeysockets/baileys": {
       "libsignal": "https://codeload.github.com/WhiskeySockets/libsignal-node/tar.gz/1c30d7d7e76a3b0aa120b04dc6a26f5a12dccf67",
@@ -64,12 +64,14 @@
     "CHANGELOG.md",
     "LICENSE",
     "tsconfig.json",
+    "tsconfig.cli.json",
     "tsconfig.daemon.json",
     "tsconfig.electron.json",
     "tsconfig.node.json",
     "vite.config.ts"
   ],
   "bin": {
+    "cowork": "bin/cowork-cli.js",
     "cowork-os": "bin/cowork.js",
     "coworkctl": "bin/coworkctl.js",
     "coworkd": "bin/coworkd.js",
@@ -99,10 +101,11 @@
     "dev:electron": "tsc -p tsconfig.electron.json && cross-env ELECTRON_RUN_AS_NODE= NODE_ENV=development electron .",
     "tunnel-relay:dev": "npm run build:electron && node dist/electron/electron/tunnels/relay.js",
     "tunnel-relay:test": "npm run build:electron && node scripts/smoke-secure-mcp-tunnel.mjs",
-    "build": "npm run build:react && npm run build:healthkit-bridge && npm run build:location-helper-macos && npm run build:location-helpers && concurrently -n electron,daemon \"npm run build:electron\" \"npm run build:daemon\" && npm run build:connectors",
+    "build": "npm run build:react && npm run build:healthkit-bridge && npm run build:location-helper-macos && npm run build:location-helpers && concurrently -n electron,daemon,cli \"npm run build:electron\" \"npm run build:daemon\" \"npm run build:cli\" && npm run build:connectors",
     "build:react": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "build:daemon": "tsc -p tsconfig.daemon.json",
+    "build:cli": "tsc -p tsconfig.cli.json",
     "build:connectors": "concurrently -n salesforce,jira,hubspot,zendesk,servicenow,linear,asana,okta,resend,discord,google-workspace,figma,vercel,monday,finance-data,maps \"tsc -p connectors/salesforce-mcp/tsconfig.json\" \"tsc -p connectors/jira-mcp/tsconfig.json\" \"tsc -p connectors/hubspot-mcp/tsconfig.json\" \"tsc -p connectors/zendesk-mcp/tsconfig.json\" \"tsc -p connectors/servicenow-mcp/tsconfig.json\" \"tsc -p connectors/linear-mcp/tsconfig.json\" \"tsc -p connectors/asana-mcp/tsconfig.json\" \"tsc -p connectors/okta-mcp/tsconfig.json\" \"tsc -p connectors/resend-mcp/tsconfig.json\" \"tsc -p connectors/discord-mcp/tsconfig.json\" \"tsc -p connectors/google-workspace-mcp/tsconfig.json\" \"tsc -p connectors/figma-mcp/tsconfig.json\" \"tsc -p connectors/vercel-mcp/tsconfig.json\" \"tsc -p connectors/monday-mcp/tsconfig.json\" \"tsc -p connectors/finance-data-mcp/tsconfig.json\" \"tsc -p connectors/maps-mcp/tsconfig.json\"",
     "prepack": "npm run build",
     "release:smoke": "npm run build && node scripts/release-smoke-install.mjs",
