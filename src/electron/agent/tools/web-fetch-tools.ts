@@ -24,13 +24,76 @@ export class WebFetchTools {
   }
 
   private ensureDomainAllowed(url: string): void {
-    const decision = evaluateNetworkPolicy({ url, toolName: "web_fetch" });
+    this.ensureNetworkAllowed(url, "web_fetch");
+  }
+
+  private ensureNetworkAllowed(url: string, toolName: string): void {
+    const decision = evaluateNetworkPolicy({ url, toolName });
     this.daemon.logEvent(this.taskId, "network_policy_decision", decision);
     if (decision.action === "allow") return;
     if (decision.reason === "legacy_guardrail_domain_denied") {
       throw new Error(`Domain not allowed: "${url}"`);
     }
     throw new Error(`Network access denied for "${url}": ${decision.reason}`);
+  }
+
+  private async fetchWithPolicyCheckedRedirects(
+    url: string,
+    init: RequestInit,
+    toolName: string,
+    followRedirects = true,
+  ): Promise<Response> {
+    let currentUrl = url;
+    let currentInit: RequestInit = { ...init };
+
+    for (let redirectCount = 0; redirectCount <= 10; redirectCount += 1) {
+      const parsedUrl = new URL(currentUrl);
+      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        throw new Error("Only HTTP and HTTPS URLs are supported");
+      }
+      this.ensureNetworkAllowed(parsedUrl.toString(), toolName);
+
+      const response = await fetch(currentUrl, {
+        ...currentInit,
+        redirect: "manual",
+      });
+
+      if (!followRedirects || !this.isRedirectResponse(response.status)) {
+        return response;
+      }
+
+      const location = response.headers.get("location");
+      if (!location) {
+        return response;
+      }
+
+      const nextUrl = new URL(location, parsedUrl);
+      if (!["http:", "https:"].includes(nextUrl.protocol)) {
+        throw new Error("Only HTTP and HTTPS redirect URLs are supported");
+      }
+      this.ensureNetworkAllowed(nextUrl.toString(), toolName);
+
+      currentUrl = nextUrl.toString();
+      currentInit = this.buildRedirectInit(currentInit, response.status);
+    }
+
+    throw new Error("Too many redirects");
+  }
+
+  private isRedirectResponse(status: number): boolean {
+    return [301, 302, 303, 307, 308].includes(status);
+  }
+
+  private buildRedirectInit(init: RequestInit, status: number): RequestInit {
+    const method = String(init.method || "GET").toUpperCase();
+    if (status === 303 || ((status === 301 || status === 302) && method === "POST")) {
+      const { body: _body, ...rest } = init;
+      return {
+        ...rest,
+        method: "GET",
+      };
+    }
+    return { ...init };
   }
 
   /**
@@ -146,22 +209,24 @@ export class WebFetchTools {
       if (!["http:", "https:"].includes(parsedUrl.protocol)) {
         throw new Error("Only HTTP and HTTPS URLs are supported");
       }
-      this.ensureDomainAllowed(parsedUrl.toString());
 
       // Fetch with timeout
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
 
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
+      const response = await this.fetchWithPolicyCheckedRedirects(
+        url,
+        {
+          signal: controller.signal,
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
         },
-        redirect: "follow",
-      });
+        "web_fetch",
+      );
 
       clearTimeout(timeout);
 
@@ -279,17 +344,6 @@ export class WebFetchTools {
       if (!["http:", "https:"].includes(parsedUrl.protocol)) {
         throw new Error("Only HTTP and HTTPS URLs are supported");
       }
-      const decision = evaluateNetworkPolicy({
-        url: parsedUrl.toString(),
-        toolName: "http_request",
-      });
-      this.daemon.logEvent(this.taskId, "network_policy_decision", decision);
-      if (decision.action !== "allow") {
-        if (decision.reason === "legacy_guardrail_domain_denied") {
-          throw new Error(`Domain not allowed: "${parsedUrl.toString()}"`);
-        }
-        throw new Error(`Network access denied for "${parsedUrl.toString()}": ${decision.reason}`);
-      }
 
       // Setup abort controller for timeout
       const controller = new AbortController();
@@ -305,13 +359,17 @@ export class WebFetchTools {
       };
 
       // Make the request
-      const response = await fetch(normalizedUrl, {
-        method,
-        headers: requestHeaders,
-        body: ["POST", "PUT", "PATCH"].includes(method) ? body : undefined,
-        signal: controller.signal,
-        redirect: followRedirects ? "follow" : "manual",
-      });
+      const response = await this.fetchWithPolicyCheckedRedirects(
+        normalizedUrl,
+        {
+          method,
+          headers: requestHeaders,
+          body: ["POST", "PUT", "PATCH"].includes(method) ? body : undefined,
+          signal: controller.signal,
+        },
+        "http_request",
+        followRedirects,
+      );
 
       clearTimeout(timeoutId);
 

@@ -10,6 +10,7 @@ type InlineHtmlPreviewAssetsOptions = {
   workspaceRoot?: string;
   readTextFile?: (filePath: string) => Promise<string>;
   statFile?: (filePath: string) => Promise<{ size: number }>;
+  realpathFile?: (filePath: string) => Promise<string>;
 };
 
 const STYLE_LINK_RE = /<link\b[^>]*>/gi;
@@ -65,14 +66,26 @@ async function readInlineableAsset(
   assetPath: string,
   state: {
     totalBytes: number;
+    workspaceRoot?: string;
     readTextFile: (filePath: string) => Promise<string>;
     statFile: (filePath: string) => Promise<{ size: number }>;
+    realpathFile: (filePath: string) => Promise<string>;
   },
 ): Promise<string | null> {
-  const stat = await state.statFile(assetPath);
+  let readablePath = assetPath;
+  if (state.workspaceRoot) {
+    const [realWorkspaceRoot, realAssetPath] = await Promise.all([
+      state.realpathFile(state.workspaceRoot),
+      state.realpathFile(assetPath),
+    ]);
+    const relative = path.relative(realWorkspaceRoot, realAssetPath);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+    readablePath = realAssetPath;
+  }
+  const stat = await state.statFile(readablePath);
   if (stat.size > MAX_INLINE_ASSET_BYTES) return null;
   if (state.totalBytes + stat.size > MAX_TOTAL_INLINE_ASSET_BYTES) return null;
-  const content = await state.readTextFile(assetPath);
+  const content = await state.readTextFile(readablePath);
   state.totalBytes += stat.size;
   return content;
 }
@@ -83,9 +96,10 @@ export async function inlineLocalHtmlPreviewAssets({
   workspaceRoot,
   readTextFile = (filePath) => fs.readFile(filePath, "utf-8"),
   statFile = (filePath) => fs.stat(filePath),
+  realpathFile = (filePath) => fs.realpath(filePath),
 }: InlineHtmlPreviewAssetsOptions): Promise<string> {
   const baseDir = path.dirname(htmlFilePath);
-  const state = { totalBytes: 0, readTextFile, statFile };
+  const state = { totalBytes: 0, workspaceRoot, readTextFile, statFile, realpathFile };
   let output = htmlContent;
 
   const styleReplacements: Array<{ tag: string; replacement: string }> = [];

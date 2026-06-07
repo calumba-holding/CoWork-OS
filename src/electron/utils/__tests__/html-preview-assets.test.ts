@@ -94,4 +94,25 @@ describe("inlineLocalHtmlPreviewAssets", () => {
     expect(result).not.toContain('href="/assets/app.css"');
     expect(result).not.toContain('src="/assets/app.js"');
   });
+
+  it("does not inline symlinked assets that resolve outside the workspace", async () => {
+    const workspace = path.join(tempRoot, "workspace");
+    const outside = path.join(tempRoot, "outside");
+    const pageDir = path.join(workspace, ".cowork");
+    await fs.mkdir(pageDir, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    await fs.writeFile(path.join(outside, "secret.css"), "body { background: secret; }");
+    await fs.symlink(path.join(outside, "secret.css"), path.join(pageDir, "secret.css"));
+    const htmlPath = path.join(pageDir, "index.html");
+    const html = '<link rel="stylesheet" href="secret.css">';
+
+    const result = await inlineLocalHtmlPreviewAssets({
+      htmlContent: html,
+      htmlFilePath: htmlPath,
+      workspaceRoot: workspace,
+    });
+
+    expect(result).toBe(html);
+    expect(result).not.toContain("background: secret");
+  });
 });

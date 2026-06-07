@@ -1050,20 +1050,33 @@ describe("WebFetchTools", () => {
     });
 
     describe("redirect handling", () => {
-      it("should follow redirects by default", async () => {
+      it("should follow redirects by default after policy-checking each destination", async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 302,
+          statusText: "Found",
+          headers: new Map([["location", "https://example.com/final"]]),
+          text: async () => "",
+        });
         mockFetch.mockResolvedValueOnce({
           ok: true,
           status: 200,
           statusText: "OK",
-          headers: new Map(),
+          headers: new Map([["content-type", "text/plain"]]),
           text: async () => "Final destination",
         });
 
-        await webFetchTools.httpRequest({ url: "https://example.com/redirect" });
+        const result = await webFetchTools.httpRequest({ url: "https://example.com/redirect" });
 
+        expect(result.success).toBe(true);
+        expect(result.body).toBe("Final destination");
         expect(mockFetch).toHaveBeenCalledWith(
           "https://example.com/redirect",
-          expect.objectContaining({ redirect: "follow" }),
+          expect.objectContaining({ redirect: "manual" }),
+        );
+        expect(mockFetch).toHaveBeenCalledWith(
+          "https://example.com/final",
+          expect.objectContaining({ redirect: "manual" }),
         );
       });
 
@@ -1085,6 +1098,26 @@ describe("WebFetchTools", () => {
           "https://example.com/redirect",
           expect.objectContaining({ redirect: "manual" }),
         );
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+
+      it("should reject redirects to domains denied by network policy", async () => {
+        vi.spyOn(GuardrailManager, "isDomainAllowed").mockImplementation((url: string) => {
+          return !url.includes("blocked.example");
+        });
+        mockFetch.mockResolvedValueOnce({
+          ok: false,
+          status: 302,
+          statusText: "Found",
+          headers: new Map([["location", "https://blocked.example/final"]]),
+          text: async () => "",
+        });
+
+        const result = await webFetchTools.httpRequest({ url: "https://example.com/redirect" });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toContain("Domain not allowed");
+        expect(mockFetch).toHaveBeenCalledTimes(1);
       });
     });
 

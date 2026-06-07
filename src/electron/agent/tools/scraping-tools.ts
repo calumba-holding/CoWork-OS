@@ -4,6 +4,7 @@ import { Workspace } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { LLMTool } from "../llm/types";
 import { ScrapingSettingsManager } from "../../scraping/scraping-settings";
+import { evaluateNetworkPolicy } from "../../security/network-policy";
 
 /**
  * ScrapingTools provides advanced web scraping capabilities powered by Scrapling.
@@ -250,6 +251,26 @@ export class ScrapingTools {
     return await this.callBridge("status", {});
   }
 
+  // NOTE: This only validates the URL(s) handed to the Scrapling bridge. The
+  // bridge itself may follow redirects/links that are not re-checked here, so
+  // this is not full parity with WebFetchTools' per-hop redirect validation.
+  private ensureNetworkAllowed(url: string, toolName: string): string {
+    const parsedUrl = new URL(url);
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      throw new Error("Only HTTP and HTTPS URLs are supported");
+    }
+    const normalizedUrl = parsedUrl.toString();
+    const decision = evaluateNetworkPolicy({ url: normalizedUrl, toolName });
+    this.daemon.logEvent(this.taskId, "network_policy_decision", decision);
+    if (decision.action === "allow") {
+      return normalizedUrl;
+    }
+    if (decision.reason === "legacy_guardrail_domain_denied") {
+      throw new Error(`Domain not allowed: "${normalizedUrl}"`);
+    }
+    throw new Error(`Network access denied for "${normalizedUrl}": ${decision.reason}`);
+  }
+
   private async scrapePage(input: {
     url: string;
     fetcher?: string;
@@ -262,13 +283,15 @@ export class ScrapingTools {
     max_content_length?: number;
   }): Promise<Any> {
     const settings = ScrapingSettingsManager.loadSettings();
+    const normalizedUrl = this.ensureNetworkAllowed(input.url, "scrape_page");
 
     this.daemon.logEvent(this.taskId, "log", {
-      message: `Scraping: ${input.url} (fetcher: ${input.fetcher || settings.defaultFetcher})`,
+      message: `Scraping: ${normalizedUrl} (fetcher: ${input.fetcher || settings.defaultFetcher})`,
     });
 
     const params: Record<string, Any> = {
       ...input,
+      url: normalizedUrl,
       fetcher: input.fetcher || settings.defaultFetcher,
       headless: input.headless ?? settings.headless,
       timeout: settings.timeout,
@@ -284,7 +307,7 @@ export class ScrapingTools {
     this.daemon.logEvent(this.taskId, "tool_result", {
       tool: "scrape_page",
       result: {
-        url: input.url,
+        url: normalizedUrl,
         success: result.success,
         contentLength: result.content?.length || 0,
         title: result.title,
@@ -301,13 +324,15 @@ export class ScrapingTools {
     max_content_length?: number;
   }): Promise<Any> {
     const settings = ScrapingSettingsManager.loadSettings();
+    const normalizedUrls = input.urls.map((url) => this.ensureNetworkAllowed(url, "scrape_multiple"));
 
     this.daemon.logEvent(this.taskId, "log", {
-      message: `Batch scraping ${input.urls.length} URLs`,
+      message: `Batch scraping ${normalizedUrls.length} URLs`,
     });
 
     const params: Record<string, Any> = {
       ...input,
+      urls: normalizedUrls,
       fetcher: input.fetcher || settings.defaultFetcher,
       max_content_length: input.max_content_length || 50000,
     };
@@ -332,13 +357,15 @@ export class ScrapingTools {
     fetcher?: string;
   }): Promise<Any> {
     const settings = ScrapingSettingsManager.loadSettings();
+    const normalizedUrl = this.ensureNetworkAllowed(input.url, "scrape_extract");
 
     this.daemon.logEvent(this.taskId, "log", {
-      message: `Extracting structured data from: ${input.url}`,
+      message: `Extracting structured data from: ${normalizedUrl}`,
     });
 
     const params: Record<string, Any> = {
       ...input,
+      url: normalizedUrl,
       fetcher: input.fetcher || settings.defaultFetcher,
     };
 
@@ -347,7 +374,7 @@ export class ScrapingTools {
     this.daemon.logEvent(this.taskId, "tool_result", {
       tool: "scrape_extract",
       result: {
-        url: input.url,
+        url: normalizedUrl,
         success: result.success,
         extractType: input.extract_type || "auto",
       },
@@ -367,13 +394,18 @@ export class ScrapingTools {
     headless?: boolean;
   }): Promise<Any> {
     const settings = ScrapingSettingsManager.loadSettings();
+    const steps = input.steps.map((step) => ({
+      ...step,
+      ...(step.url ? { url: this.ensureNetworkAllowed(step.url, "scrape_session") } : {}),
+    }));
 
     this.daemon.logEvent(this.taskId, "log", {
-      message: `Running scraping session with ${input.steps.length} steps`,
+      message: `Running scraping session with ${steps.length} steps`,
     });
 
     const params: Record<string, Any> = {
       ...input,
+      steps,
       headless: input.headless ?? settings.headless,
     };
 
@@ -383,7 +415,7 @@ export class ScrapingTools {
       tool: "scrape_session",
       result: {
         success: result.success,
-        stepCount: input.steps.length,
+        stepCount: steps.length,
       },
     });
 
