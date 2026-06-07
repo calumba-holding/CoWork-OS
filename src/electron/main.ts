@@ -303,6 +303,13 @@ const IMPORT_ENV_SETTINGS_MODE = getEnvSettingsImportModeFromArgsOrEnv();
 const logger = createLogger("Main");
 const cronLogger = createLogger("Cron");
 let startupLaneStartedAt = Date.now();
+
+function shouldAutoEnableDesktopControlPlane(): boolean {
+  if (HEADLESS) return false;
+  const raw = (process.env.COWORK_DESKTOP_AUTO_CONTROL_PLANE || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 const logStartupLane = (lane: string, extra: Record<string, unknown> = {}): void => {
   logger.info(
     `[StartupLane] ${JSON.stringify({
@@ -1436,64 +1443,37 @@ if (!gotTheLock) {
     const deferredStartupTasks: Array<{
       name: string;
       task: () => Promise<void>;
-      delayMs?: number;
     }> = [];
     const startupQuietMode = isStartupQuietMode();
     if (startupQuietMode) {
       logger.info("Startup quiet mode enabled; background autostart is disabled.");
     }
-    const deferStartupTask = (
-      name: string,
-      task: () => Promise<void>,
-      options: { delayMs?: number } = {},
-    ): void => {
-      deferredStartupTasks.push({ name, task, delayMs: options.delayMs });
+    const deferStartupTask = (name: string, task: () => Promise<void>): void => {
+      deferredStartupTasks.push({ name, task });
     };
     const runDeferredStartupTasks = (): void => {
       logStartupLane("post_interactive_startup", {
         event: "deferred_tasks_scheduled",
         taskCount: deferredStartupTasks.length,
       });
-      const maxConcurrentTasks = 2;
-      let nextTaskIndex = 0;
-      let activeTaskCount = 0;
-      let firstTaskStarted = false;
-
-      const scheduleNext = (): void => {
-        while (
-          activeTaskCount < maxConcurrentTasks &&
-          nextTaskIndex < deferredStartupTasks.length
-        ) {
-          const currentIndex = nextTaskIndex;
-          const { name, task, delayMs } = deferredStartupTasks[currentIndex];
-          nextTaskIndex += 1;
-          activeTaskCount += 1;
-          const effectiveDelayMs = delayMs ?? 2500 + currentIndex * 500;
-          const timer = setTimeout(() => {
-            if (!firstTaskStarted) {
-              firstTaskStarted = true;
-              logStartupLane("idle_startup", { event: "first_deferred_task_start" });
-            }
-            const startedAt = Date.now();
-            void task()
-              .then(() => {
-                logger.info(
-                  `Deferred startup task "${name}" completed in ${Date.now() - startedAt} ms`,
-                );
-              })
-              .catch((error) => {
-                logger.error(`Deferred startup task "${name}" failed:`, error);
-              })
-              .finally(() => {
-                activeTaskCount = Math.max(0, activeTaskCount - 1);
-                scheduleNext();
-              });
-          }, effectiveDelayMs);
-          timer.unref?.();
-        }
-      };
-
-      scheduleNext();
+      deferredStartupTasks.forEach(({ name, task }, index) => {
+        const timer = setTimeout(() => {
+          if (index === 0) {
+            logStartupLane("idle_startup", { event: "first_deferred_task_start" });
+          }
+          const startedAt = Date.now();
+          void task()
+            .then(() => {
+              logger.info(
+                `Deferred startup task "${name}" completed in ${Date.now() - startedAt} ms`,
+              );
+            })
+            .catch((error) => {
+              logger.error(`Deferred startup task "${name}" failed:`, error);
+            });
+        }, 250 + index * 50);
+        timer.unref?.();
+      });
     };
 
     const resolvedUserDataDir = startupUserDataDir || applyStableUserDataPath();
@@ -1546,23 +1526,13 @@ if (!gotTheLock) {
         await notificationService?.add(params);
       },
     });
-    const usageInsightsProjector = UsageInsightsProjector.initialize(
-      dbManager.getDatabase(),
-    );
+    UsageInsightsProjector.initialize(dbManager.getDatabase()).warm();
     if (startupQuietMode) {
-      usageInsightsProjector.warm();
       await dbManager.runPostStartupMaintenance();
     } else {
-      deferStartupTask(
-        "usage-insights-warm",
-        async () => {
-          usageInsightsProjector.warm();
-        },
-        { delayMs: 5000 },
+      deferStartupTask("database-maintenance", () =>
+        dbManager.runPostStartupMaintenance(),
       );
-      deferStartupTask("database-maintenance", () => dbManager.runPostStartupMaintenance(), {
-        delayMs: 8000,
-      });
     }
     const tempWorkspaceRoot = path.join(
       os.tmpdir(),
@@ -2825,6 +2795,8 @@ if (!gotTheLock) {
           const notificationService = getNotificationService();
           await notificationService?.add(params);
         },
+        recordAutomationOutcome: async (outcome) =>
+          automationOutcomeService?.record(outcome),
         captureMemory: (
           workspaceId,
           taskId,
@@ -2848,8 +2820,6 @@ if (!gotTheLock) {
         coreMemoryCandidateService: coreMemoryCandidateService || undefined,
         coreMemoryDistiller: coreMemoryDistiller || undefined,
         coreLearningPipelineService: coreLearningPipelineService || undefined,
-        recordAutomationOutcome: async (outcome) =>
-          automationOutcomeService?.record(outcome),
       };
 
       heartbeatService = new HeartbeatService(heartbeatDeps);
@@ -3236,8 +3206,6 @@ if (!gotTheLock) {
             `Channels auto-connect complete: loaded=${connectedStats.loaded}, enabled=${connectedStats.enabled}, connected=${connectedStats.connected}`,
           );
           startXMentionBridge();
-        }, {
-          delayMs: 12000,
         });
       }
       // Initialize update manager with main window reference
@@ -3260,6 +3228,7 @@ if (!gotTheLock) {
       // Auto-start control plane if enabled (and register methods/bridge)
       await startControlPlaneFromSettings({
         deps: { agentDaemon, dbManager, channelGateway, getRoutineService: () => routineService },
+        forceEnable: FORCE_ENABLE_CONTROL_PLANE || shouldAutoEnableDesktopControlPlane(),
       });
 
       // ── Gap features: triggers, briefing, file hub, web access ───────
