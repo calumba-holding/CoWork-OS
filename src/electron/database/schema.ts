@@ -1876,6 +1876,29 @@ export class DatabaseManager {
         FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
       );
 
+      CREATE TABLE IF NOT EXISTS pending_memory_writes (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        task_id TEXT,
+        target TEXT NOT NULL,
+        action TEXT NOT NULL,
+        origin TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        old_value TEXT,
+        proposed_value TEXT,
+        reason TEXT,
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        risk_score REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        reviewed_at INTEGER,
+        reviewed_by TEXT,
+        resolution TEXT,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+        FOREIGN KEY (task_id) REFERENCES tasks(id)
+      );
+
       -- Per-workspace memory settings
       CREATE TABLE IF NOT EXISTS memory_settings (
         workspace_id TEXT PRIMARY KEY,
@@ -1922,6 +1945,8 @@ export class DatabaseManager {
         ON dreaming_candidates(run_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_dreaming_candidates_workspace_status
         ON dreaming_candidates(workspace_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_pending_memory_writes_workspace_status
+        ON pending_memory_writes(workspace_id, status, created_at DESC);
 
       -- Workspace Markdown Memory Index (for kit notes, docs, and other durable markdown context)
       CREATE TABLE IF NOT EXISTS memory_markdown_files (
@@ -5724,6 +5749,38 @@ export class DatabaseManager {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       schemaLogger.error("[DatabaseManager] Curated memory migration failed:", msg);
+    }
+
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS pending_memory_writes (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          task_id TEXT,
+          target TEXT NOT NULL,
+          action TEXT NOT NULL,
+          origin TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          old_value TEXT,
+          proposed_value TEXT,
+          reason TEXT,
+          evidence_json TEXT NOT NULL DEFAULT '[]',
+          risk_score REAL NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at INTEGER NOT NULL,
+          reviewed_at INTEGER,
+          reviewed_by TEXT,
+          resolution TEXT,
+          FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+          FOREIGN KEY (task_id) REFERENCES tasks(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_memory_writes_workspace_status
+          ON pending_memory_writes(workspace_id, status, created_at DESC);
+      `);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      schemaLogger.error("[DatabaseManager] Pending memory write migration failed:", msg);
     }
 
     this.db.exec(`

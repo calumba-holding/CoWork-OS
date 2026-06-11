@@ -252,12 +252,12 @@ Your data stays on your machine and only goes to the LLM provider you explicitly
 
 ### Encrypted Settings Storage (SecureSettingsRepository)
 
-All settings are now stored encrypted in the database using the `SecureSettingsRepository`:
+Settings stored through `SecureSettingsRepository` are encrypted inside the local SQLite database. The SQLite file itself is a normal `better-sqlite3` database, not a whole-file SQLCipher database:
 
 | Data | Location | Encryption |
 |------|----------|------------|
 | All Settings | `app.getPath('userData')/cowork-os.db` | OS Keychain + AES-256 |
-| Database | `app.getPath('userData')/cowork-os.db` | Settings encrypted per-category |
+| Database file | `app.getPath('userData')/cowork-os.db` | Plain SQLite file; selected settings and sensitive fields are encrypted per category/feature |
 | Machine ID | `app.getPath('userData')/.cowork-machine-id` | Stable identifier for encryption |
 
 Typical `userData` locations:
@@ -300,6 +300,18 @@ All these are stored encrypted in the database:
 | `tailscale` | Tailscale integration settings |
 | `queue` | Task queue settings |
 | `tray` | Menu bar/tray settings |
+
+### Memory Write Governance
+
+Memory Write Approval is configured in **Settings → Memory Hub**. It can stage durable memory writes before commit:
+
+- `off`: writes commit immediately
+- `curated_only`: curated hot-memory edits wait for review
+- `external_only`: Supermemory/external-provider writes wait for review
+- `background_only`: automatic capture, Dreaming, distillation, and external mirroring wait for review
+- `all`: every durable memory write waits for review
+
+Pending rows live in `pending_memory_writes` inside the normal SQLite database. Since that table is not whole-file encrypted, CoWork blocks sensitive external-memory payloads before queueing them. Approvals first claim rows as `applying`, then replay the write with the gate bypassed and mark it `applied`; duplicate or stale approve attempts fail instead of replaying again.
 
 ### Data Integrity
 
@@ -731,12 +743,12 @@ CoWork OS is designed with security in mind:
 ### Guardrails Settings Location
 
 All guardrail settings can be configured at:
-- **Database**: Stored encrypted in `app.getPath('userData')/cowork-os.db` (category: `guardrails`)
+- **Database**: stored as an encrypted `guardrails` category inside `app.getPath('userData')/cowork-os.db`
 - **UI**: Settings (gear icon) → Guardrails tab
 
 ### Settings Migration
 
-Legacy JSON settings files are automatically migrated to the encrypted database:
+Legacy JSON settings files are automatically migrated into encrypted `SecureSettingsRepository` categories:
 - Migration creates a `.migration-backup` file before proceeding
 - On successful migration, both backup and original are deleted
 - On failed migration, backup is preserved for recovery

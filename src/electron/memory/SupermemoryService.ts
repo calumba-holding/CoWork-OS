@@ -6,6 +6,7 @@ import type {
 } from "../../shared/types";
 import type { Workspace } from "../../shared/types";
 import { SecureSettingsRepository } from "../database/SecureSettingsRepository";
+import { MemoryWriteGate, type MemoryWriteOrigin } from "./MemoryWriteGate";
 
 const STORAGE_KEY = "supermemory";
 const DEFAULT_BASE_URL = "https://api.supermemory.ai";
@@ -321,8 +322,45 @@ export class SupermemoryService {
     content: string;
     containerTag?: string;
     metadata?: Record<string, unknown>;
-  }): Promise<{ containerTag: string; memoryIds: string[] }> {
+    taskId?: string;
+    origin?: MemoryWriteOrigin;
+    skipMemoryWriteGate?: boolean;
+  }): Promise<{
+    containerTag: string;
+    memoryIds: string[];
+    staged?: boolean;
+    pendingId?: string;
+    blocked?: boolean;
+    error?: string;
+  }> {
     const containerTag = this.resolveContainerTag(args.workspace, args.containerTag);
+    if (!args.skipMemoryWriteGate) {
+      const gate = MemoryWriteGate.evaluate({
+        workspaceId: args.workspace.id,
+        taskId: args.taskId,
+        target: "external",
+        action: "remember",
+        origin: args.origin || "agent_tool",
+        summary: "Save memory to Supermemory",
+        payload: {
+          content: args.content,
+          containerTag,
+          metadata: args.metadata || {},
+        },
+        proposedValue: args.content,
+        reason:
+          typeof args.metadata?.source === "string"
+            ? `source:${args.metadata.source}`
+            : undefined,
+      });
+      if (!gate.allowed) {
+        if ("blocked" in gate) {
+          return { containerTag, memoryIds: [], blocked: true, error: gate.error };
+        }
+        return { containerTag, memoryIds: [], staged: true, pendingId: gate.pendingId };
+      }
+    }
+
     const response = await this.request<SupermemoryRememberResponse>("/v4/memories", {
       method: "POST",
       body: JSON.stringify({
@@ -377,6 +415,8 @@ export class SupermemoryService {
     memoryType: string;
     content: string;
     createdAt?: number;
+    origin?: MemoryWriteOrigin;
+    skipMemoryWriteGate?: boolean;
   }): Promise<void> {
     const settings = this.loadSettings();
     if (!this.isConfigured() || settings.mirrorMemoryWrites === false) {
@@ -384,6 +424,25 @@ export class SupermemoryService {
     }
 
     const containerTag = this.resolveContainerTag(args.workspace);
+    if (!args.skipMemoryWriteGate) {
+      const gate = MemoryWriteGate.evaluate({
+        workspaceId: args.workspace.id,
+        taskId: args.taskId,
+        target: "external",
+        action: "mirror",
+        origin: args.origin || "external_mirror",
+        summary: `Mirror ${args.memoryType} memory to Supermemory`,
+        payload: {
+          content: args.content,
+          containerTag,
+          memoryType: args.memoryType,
+          createdAt: args.createdAt || Date.now(),
+        },
+        proposedValue: args.content,
+      });
+      if (!gate.allowed) return;
+    }
+
     await this.request(
       "/v3/documents",
       {

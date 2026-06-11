@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Memory Write Governance docs**: documented approval modes for durable archive, curated, background, and external memory writes; clarified the pending approval queue lifecycle; documented sensitive external-memory blocking before queue persistence; and corrected storage docs to distinguish encrypted settings/fields from the normal SQLite database file.
 - **Architecture design orchestration**: added bundled Rhino, Blender, and ComfyUI MCP connectors plus the `architecture-design` skill for concept architecture workflows. The connectors are local-only, enforce project-root file boundaries, expose registry/capability metadata, and document setup, safety, and artifact expectations across the connector and skill docs.
 - **Cross-platform desktop location**: `get_current_location` now works on macOS (Core Location), Windows (Windows.Devices.Geolocation via PowerShell), and Linux (GeoClue2 via gdbus). Each platform uses a bundled helper script that outputs a standard JSON envelope; the `DesktopLocationService` tries the first available provider. The macOS helper now includes the `com.apple.security.personal-information.location` entitlement required for Core Location authorization. Location access requires explicit one-time user permission on each platform and cannot be auto-approved or persisted.
 - **xAI Grok OAuth / SuperGrok provider docs**: documented the new `xai-oauth` provider option, SuperGrok browser sign-in flow, `grok-4.3` default model, token-refresh behavior, xAI API-key alternative, and related provider-count updates across README, getting started, provider, migration, status, feature, and positioning docs.
@@ -880,7 +881,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Content Fallback**: Use assistant output as content when not explicitly provided
   - **Validation Errors**: Return helpful error messages for missing required fields
 - **Channel User Repository** - Track user-channel mappings in database
-- **Encrypted Settings Storage (SecureSettingsRepository)** - All settings now stored encrypted in database
+- **Encrypted Settings Storage (SecureSettingsRepository)** - settings now store encrypted values/categories inside the local SQLite database
   - **OS Keychain Integration**: Settings encrypted using native OS keychain (macOS Keychain, Windows DPAPI, Linux libsecret)
   - **Fallback Encryption**: App-level AES-256 encryption when OS keychain unavailable
   - **Stable Machine ID**: Persistent machine identifier survives hostname changes and system updates

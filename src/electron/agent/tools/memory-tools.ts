@@ -3,6 +3,7 @@ import type { Workspace } from "../../../shared/types";
 import type { AgentDaemon } from "../daemon";
 import { MemoryService } from "../../memory/MemoryService";
 import { CuratedMemoryService } from "../../memory/CuratedMemoryService";
+import { MemoryWriteGate } from "../../memory/MemoryWriteGate";
 import type { MemoryType } from "../../database/repositories";
 
 /**
@@ -146,6 +147,9 @@ export class MemoryTools {
   }): Promise<{
     success: boolean;
     memoryId?: string;
+    staged?: boolean;
+    pendingId?: string;
+    message?: string;
     error?: string;
   }> {
     this.daemon.logEvent(this.taskId, "tool_call", {
@@ -155,12 +159,52 @@ export class MemoryTools {
     });
 
     try {
+      const gate = MemoryWriteGate.evaluate({
+        workspaceId: this.workspace.id,
+        taskId: this.taskId,
+        target: "archive",
+        action: "add",
+        origin: "agent_tool",
+        summary: `Save ${input.type} memory`,
+        payload: {
+          type: input.type,
+          content: input.content,
+        },
+        proposedValue: input.content,
+      });
+      if (!gate.allowed) {
+        if ("blocked" in gate) {
+          this.daemon.logEvent(this.taskId, "tool_result", {
+            tool: "memory_save",
+            success: false,
+            blocked: true,
+          });
+          return {
+            success: false,
+            error: gate.error,
+          };
+        }
+        this.daemon.logEvent(this.taskId, "tool_result", {
+          tool: "memory_save",
+          success: true,
+          staged: true,
+          pendingId: gate.pendingId,
+        });
+        return {
+          success: true,
+          staged: true,
+          pendingId: gate.pendingId,
+          message: "Memory write is pending user approval.",
+        };
+      }
+
       const memory = await MemoryService.capture(
         this.workspace.id,
         this.taskId,
         input.type as MemoryType,
         input.content,
         false,
+        { origin: "tool", skipMemoryWriteGate: true },
       );
 
       if (!memory) {
@@ -206,6 +250,9 @@ export class MemoryTools {
     success: boolean;
     entryId?: string;
     updatedFile?: ".cowork/USER.md" | ".cowork/MEMORY.md";
+    staged?: boolean;
+    pendingId?: string;
+    message?: string;
     error?: string;
   }> {
     this.daemon.logEvent(this.taskId, "tool_call", {
@@ -219,6 +266,7 @@ export class MemoryTools {
       const result = await CuratedMemoryService.curate({
         workspaceId: this.workspace.id,
         taskId: this.taskId,
+        origin: "agent_tool",
         ...input,
       });
       this.daemon.logEvent(this.taskId, "tool_result", {
@@ -226,12 +274,17 @@ export class MemoryTools {
         success: result.success,
         entryId: result.entry?.id,
         updatedFile: result.updatedFile,
+        staged: result.staged,
+        pendingId: result.pendingId,
         error: result.error,
       });
       return {
         success: result.success,
         ...(result.entry?.id ? { entryId: result.entry.id } : {}),
         ...(result.updatedFile ? { updatedFile: result.updatedFile } : {}),
+        ...(result.staged ? { staged: true } : {}),
+        ...(result.pendingId ? { pendingId: result.pendingId } : {}),
+        ...(result.staged ? { message: "Memory write is pending user approval." } : {}),
         ...(result.error ? { error: result.error } : {}),
       };
     } catch (error) {

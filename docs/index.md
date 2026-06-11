@@ -184,7 +184,7 @@ features:
   - title: Chronicle
     details: Opt-in desktop recent-screen context for vague on-screen references, with Memory Hub controls, local passive capture, `screen_context` recall, pause/resume, and Mission Control evidence.
   - title: Optional Supermemory
-    details: Add Supermemory as an external memory lane with prompt-time profile injection, explicit external memory tools, and optional mirroring of non-private local memory captures, while keeping CoWork's local memory system primary.
+    details: Add Supermemory as an external memory lane with prompt-time profile injection, explicit external memory tools, optional mirroring of non-private local memory captures, and Memory Write Approval controls for external writes, while keeping CoWork's local memory system primary.
   - title: Runtime Orchestration
     details: SessionRuntime owns task-session state, session checklists, visible-tool render caching, prompt-cache state, resume snapshots, and task projection while the turn kernel handles each active turn; sectioned prompts, stable-prefix prompt caching, graph-backed delegation, typed worker roles, semantic batch summaries, and terminal-state-safe resume logic keep execution, verification, and follow-up work coherent.
   - title: Managed Agents

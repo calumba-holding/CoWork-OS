@@ -554,13 +554,14 @@ Configure in **Settings** > **Voice**.
 | **Verbatim Quote Recall** | `search_quotes` returns exact spans with provenance from transcripts, task messages, imported memories, and indexed workspace markdown when the agent needs “what was actually said?” |
 | **Topic Packs** | `memory_topics_load` loads focused packs from `.cowork/memory/topics`, and `refresh: false` performs a true read-only lookup over existing topic files |
 | **Memory Hub Preview And Inspector** | Memory Hub shows the current `L0/L1` payload, the `L2/L3` layers excluded from default injection, structured observation search, detail/timeline views, token estimates, privacy filters, metadata editing, promotion, redaction, suppression, and explicit metadata rebuild |
+| **Memory Write Governance** | Optional approval modes can stage durable archive, curated, background, and external-provider writes before commit. Pending writes are reviewed in Memory Hub, approvals are atomically claimed as `applying`, and sensitive external-memory payloads are blocked before they can be stored in the queue. [Flow](workspace-memory-flow.md#memory-write-governance) |
 | **Supermemory Provider** | Optional external provider lane with prompt-time profile injection, explicit `supermemory_profile` / `supermemory_search` / `supermemory_remember` / `supermemory_forget` tools, and optional mirroring of non-private `MemoryService.capture(...)` writes |
 | **Privacy Protection** | Auto-detects sensitive patterns (API keys, passwords, tokens) |
 | **Unified Search** | `search_memories` searches archive memory plus indexed `.cowork/` markdown with hybrid semantic + BM25 ranking |
 | **LLM Compression** | Summarizes observations for ~10x token efficiency |
 | **Prompt Defaults** | `L0 Identity` and `L1 Essential Story` are injected by default; archive injection is off by default; `L2/L3` recall stays explicit and tool-driven |
 | **Temporal Knowledge Graph** | Relationships can carry `valid_from` / `valid_to`, `kg_invalidate_edge` closes an active fact without deleting history, and historical reads can opt into `as_of` |
-| **ChatGPT History Import** | Import your full ChatGPT conversation history — eliminates cold start. All data stored locally and encrypted. [Details below](#chatgpt-history-import) |
+| **ChatGPT History Import** | Import your full ChatGPT conversation history to reduce cold start. Imported content stays local in SQLite and uses memory privacy filtering; selected sensitive settings/fields are encrypted separately. [Details below](#chatgpt-history-import) |
 | **Per-Workspace Settings** | Enable/disable, privacy modes, retention policies |
 | **Optional External Memory Provider** | Supermemory can be enabled from Memory Hub for prompt-time profile injection, explicit external memory tools, and optional mirroring of non-private local memory captures. [Guide](supermemory.md) |
 
@@ -568,7 +569,7 @@ Configure in **Settings** > **Voice**.
 
 Inline privacy controls are also available during capture: `<no-memory>` disables automatic capture for that task content, and `<private>...</private>` redacts the marked segment from captured memory. Redacted and suppressed observations are excluded from prompt recall, and private/redacted/suppressed entries are not mirrored to Supermemory.
 
-Supermemory is additive, not a replacement for local memory. CoWork still keeps the workspace kit, curated hot memory, archive memory, structured observation metadata, Dreaming candidates, transcript recall, and knowledge graph locally. The current integration mirrors local memory captures only when you opt in; it does not yet stream every chat turn into Supermemory conversations. See [Structured Memory Observations](memory-observations.md), [Dreaming](dreaming.md), and [Supermemory Integration](supermemory.md).
+Supermemory is additive, not a replacement for local memory. CoWork still keeps the workspace kit, curated hot memory, archive memory, structured observation metadata, Dreaming candidates, transcript recall, and knowledge graph locally. Memory Write Governance can require approval before external writes or mirrors are committed; sensitive external-memory payloads are blocked rather than stored in the pending queue. The current integration mirrors local memory captures only when you opt in; it does not yet stream every chat turn into Supermemory conversations. See [Structured Memory Observations](memory-observations.md), [Dreaming](dreaming.md), [Workspace Memory Flow](workspace-memory-flow.md#memory-write-governance), and [Supermemory Integration](supermemory.md).
 
 Configure in **Settings** > **Memory Hub**.
 
@@ -596,7 +597,7 @@ Import your full ChatGPT conversation history into CoWork OS's memory system. In
 ### Security & Privacy
 
 - **Stored locally only** — All imported data is written to the local SQLite database on your Mac. Nothing is uploaded, synced, or sent anywhere.
-- **Encrypted at rest** — The database is protected by the same AES-256 encryption and OS keychain integration used for all CoWork OS data.
+- **Local protected storage** — Imported history is stored in the local SQLite database; selected sensitive settings/fields use OS keychain/AES-backed encryption, while memory import content relies on local storage controls and privacy filtering rather than whole-file database encryption.
 - **Privacy filtering** — The same auto-detection that filters API keys, passwords, and tokens from regular memories applies to imported history.
 - **No provider access** — Imported memories are injected into prompts locally. Your ChatGPT history is never sent back to OpenAI or any other provider — only the relevant snippets are included in task context.
 - **Deletable** — You can clear all imported memories at any time from Settings > Memory Hub.

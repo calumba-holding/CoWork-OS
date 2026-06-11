@@ -88,6 +88,7 @@ import type {
   ImageGenProfile,
   MemoryFeaturesSettings,
   MemoryLayerPreviewPayload,
+  MemoryWriteApprovalItem,
   MemoryObservationBackfillStatus,
   MemoryObservationMetadata,
   MemoryObservationSearchQuery,
@@ -3794,6 +3795,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.MEMORY_FEATURES_SAVE_SETTINGS, settings),
   getMemoryLayerPreview: (workspaceId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MEMORY_FEATURES_GET_LAYER_PREVIEW, workspaceId),
+  listMemoryWriteApprovals: (data?: { workspaceId?: string; limit?: number }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_WRITE_APPROVALS_LIST, data),
+  getMemoryWriteApproval: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_WRITE_APPROVALS_GET, id),
+  approveMemoryWriteApproval: (data: { id: string; workspaceId?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_WRITE_APPROVALS_APPROVE, data),
+  rejectMemoryWriteApproval: (data: { id: string; workspaceId?: string; reason?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_WRITE_APPROVALS_REJECT, data),
+  countMemoryWriteApprovals: (workspaceId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MEMORY_WRITE_APPROVALS_COUNT, workspaceId),
   getSupermemorySettings: () => ipcRenderer.invoke(IPC_CHANNELS.SUPERMEMORY_GET_SETTINGS),
   saveSupermemorySettings: (settings: SupermemorySettings) =>
     ipcRenderer.invoke(IPC_CHANNELS.SUPERMEMORY_SAVE_SETTINGS, settings),
@@ -6944,6 +6955,11 @@ export interface ElectronAPI {
   getMemoryFeaturesSettings: () => Promise<MemoryFeaturesSettings>;
   saveMemoryFeaturesSettings: (settings: MemoryFeaturesSettings) => Promise<{ success: boolean }>;
   getMemoryLayerPreview: (workspaceId: string) => Promise<MemoryLayerPreviewPayload | null>;
+  listMemoryWriteApprovals: (data?: { workspaceId?: string; limit?: number }) => Promise<MemoryWriteApprovalItem[]>;
+  getMemoryWriteApproval: (id: string) => Promise<MemoryWriteApprovalItem | null>;
+  approveMemoryWriteApproval: (data: { id: string; workspaceId?: string }) => Promise<MemoryWriteApprovalItem>;
+  rejectMemoryWriteApproval: (data: { id: string; workspaceId?: string; reason?: string }) => Promise<MemoryWriteApprovalItem>;
+  countMemoryWriteApprovals: (workspaceId?: string) => Promise<{ pending: number }>;
   getSupermemorySettings: () => Promise<SupermemoryConfigStatus>;
   saveSupermemorySettings: (settings: SupermemorySettings) => Promise<{ success: boolean }>;
   testSupermemoryConnection: () => Promise<{ success: boolean; error?: string }>;

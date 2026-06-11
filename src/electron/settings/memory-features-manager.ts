@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS: MemoryFeaturesSettings = {
   sessionRecallEnabled: true,
   topicMemoryEnabled: true,
   defaultArchiveInjectionEnabled: false,
+  memoryWriteApprovalMode: "off",
   autoPromoteToCuratedMemoryEnabled: false,
   structuredObservationsEnabled: true,
   progressiveRecallToolsEnabled: true,
@@ -92,11 +93,26 @@ function normalizeSettings(settings: MemoryFeaturesSettings): MemoryFeaturesSett
     sessionRecallEnabled: settings.sessionRecallEnabled !== false,
     topicMemoryEnabled: settings.topicMemoryEnabled !== false,
     defaultArchiveInjectionEnabled: isEnabled(settings.defaultArchiveInjectionEnabled),
+    memoryWriteApprovalMode: normalizeMemoryWriteApprovalMode(settings.memoryWriteApprovalMode),
     autoPromoteToCuratedMemoryEnabled: isEnabled(settings.autoPromoteToCuratedMemoryEnabled),
     structuredObservationsEnabled: settings.structuredObservationsEnabled !== false,
     progressiveRecallToolsEnabled: settings.progressiveRecallToolsEnabled !== false,
     memoryInspectorEnabled: settings.memoryInspectorEnabled !== false,
   };
+}
+
+function normalizeMemoryWriteApprovalMode(
+  value: MemoryFeaturesSettings["memoryWriteApprovalMode"],
+): NonNullable<MemoryFeaturesSettings["memoryWriteApprovalMode"]> {
+  switch (value) {
+    case "curated_only":
+    case "external_only":
+    case "background_only":
+    case "all":
+      return value;
+    default:
+      return "off";
+  }
 }
 
 export class MemoryFeaturesManager {

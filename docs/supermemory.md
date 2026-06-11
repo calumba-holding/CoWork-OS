@@ -9,6 +9,7 @@ This integration is intentionally modeled after the Hermes-style provider shape:
 - explicit external memory tools
 - optional prompt-time profile injection
 - optional background mirroring of local memory writes
+- optional Memory Write Approval gating before external writes commit
 - guarded failure behavior so provider outages do not break the main agent loop
 
 Supermemory does **not** replace CoWork's local memory system. CoWork keeps its own archive memory, curated hot memory, workspace kit files, transcript recall, and knowledge graph. Supermemory is an additional external memory lane.
@@ -29,6 +30,8 @@ It also adds two optional runtime behaviors:
 - **Prompt profile injection**: fetches a scoped Supermemory profile and appends it as soft context during chat, execution, and follow-up turns
 - **Memory mirroring**: mirrors non-private CoWork memory captures into Supermemory as indexed external documents
 
+Supermemory write paths also participate in Memory Write Governance. If Memory Hub is set to `external_only`, `background_only`, or `all`, external `remember` and mirror writes are staged for user review before they leave the local runtime.
+
 ---
 
 ## Setup
@@ -39,8 +42,9 @@ It also adds two optional runtime behaviors:
 4. Paste your Supermemory API key.
 5. Leave the default base URL unless you are self-hosting.
 6. Choose a container-tag template.
-7. Save settings.
-8. Click **Test Connection**.
+7. Choose whether Memory Write Approval should govern external writes.
+8. Save settings.
+9. Click **Test Connection**.
 
 The default base URL is:
 
@@ -82,6 +86,12 @@ CoWork treats Supermemory results as **soft context**:
 - lower priority than the current user message
 - separate from the local workspace kit and local archive memory
 
+Write behavior is governed separately from read behavior. `supermemory_profile` and `supermemory_search` read from the external lane when enabled. `supermemory_remember` and mirror writes can be:
+
+- committed immediately when Memory Write Approval is `off`
+- staged in `pending_memory_writes` when the mode covers external/background writes
+- blocked before staging when the payload contains obvious secrets such as API keys, tokens, credentials, bearer tokens, or private keys
+
 ---
 
 ## Prompt Injection
@@ -106,6 +116,7 @@ The injected block is wrapped as pinned profile-style context, but it remains ad
 
 If **Mirror Memory Writes** is enabled, CoWork mirrors non-private archive-memory captures into Supermemory.
 Structured observation metadata remains local-first and authoritative for privacy decisions.
+If Memory Write Approval covers background or external writes, a mirror attempt is staged in the approval queue and only sent after approval.
 
 Current mirroring source:
 
@@ -121,6 +132,7 @@ Current exclusions:
 - private/strict-mode memory entries are not mirrored
 - redacted and suppressed structured observations are not mirrored
 - clipboard-only/private sensitive content remains local
+- sensitive external-memory payloads are blocked before being stored in the pending approval queue
 - this integration does not currently stream every chat turn into Supermemory conversations
 
 That last point matters: CoWork currently mirrors memory captures, not the full conversation transcript lifecycle.
@@ -169,6 +181,8 @@ Use it for:
 - project facts
 - stable context worth keeping outside the local machine
 
+If Memory Write Approval covers external writes, the tool returns a pending approval id instead of creating the external memory immediately. If the payload contains obvious secrets, CoWork blocks the write rather than persisting it to the approval queue.
+
 ### `supermemory_forget`
 
 Forgets an external memory by:
@@ -215,6 +229,8 @@ Current safeguards:
 - short request timeout
 - best-effort prompt injection
 - best-effort background mirroring
+- approval staging for external/background writes when Memory Write Approval is enabled
+- pre-queue blocking for sensitive external-memory payloads
 - circuit breaker after repeated request failures
 
 When the circuit breaker opens, CoWork pauses Supermemory requests temporarily and keeps running with local memory only.
@@ -235,6 +251,8 @@ Important boundaries:
 - CoWork's local memory remains the primary durable memory system
 - Supermemory is optional and external
 - mirrored local memory writes can leave the device
+- external writes can be approval-gated before leaving the device
+- obvious secrets in external-memory payloads are blocked before they are stored in the pending queue
 - private memory entries are not mirrored
 - workspace kit files remain local and governed by CoWork's existing memory/runtime policies
 

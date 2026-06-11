@@ -18,6 +18,7 @@ import type {
   MemoryFeaturesSettings,
   SupermemoryConfigStatus,
   SupermemorySearchMode,
+  MemoryWriteApprovalItem,
   Workspace,
   WorkspaceKitStatus,
 } from "../../shared/types";
@@ -42,6 +43,7 @@ const DEFAULT_FEATURES: MemoryFeaturesSettings = {
   durableContextFreshTailCount: 64,
   durableContextLargePayloadThreshold: 25000,
   durableContextSummaryModel: "",
+  memoryWriteApprovalMode: "off",
 };
 
 type BadgeTone = "neutral" | "success" | "warning" | "error";
@@ -99,6 +101,9 @@ export function MemoryHubSettings(props?: {
   const [observationBusy, setObservationBusy] = useState(false);
   const [observationBackfillStatus, setObservationBackfillStatus] =
     useState<MemoryObservationBackfillStatus | null>(null);
+  const [pendingMemoryWrites, setPendingMemoryWrites] = useState<MemoryWriteApprovalItem[]>([]);
+  const [memoryApprovalBusyId, setMemoryApprovalBusyId] = useState<string>("");
+  const [memoryApprovalsLoading, setMemoryApprovalsLoading] = useState(false);
   const [awarenessConfig, setAwarenessConfig] = useState<AwarenessConfig | null>(null);
   const [awarenessBeliefs, setAwarenessBeliefs] = useState<AwarenessBelief[]>([]);
   const [awarenessSummary, setAwarenessSummary] = useState<AwarenessSummary | null>(null);
@@ -159,6 +164,7 @@ export function MemoryHubSettings(props?: {
     void refreshKit();
     void refreshLayerPreview();
     void refreshObservationBackfillStatus();
+    void refreshMemoryApprovals();
     void searchObservations();
     void refreshAwareness();
     void refreshAutonomy();
@@ -260,6 +266,61 @@ export function MemoryHubSettings(props?: {
       setObservationBackfillStatus(status);
     } catch (error) {
       logger.error("Failed to load memory observation backfill status:", error);
+    }
+  };
+
+  const refreshMemoryApprovals = async () => {
+    if (!selectedWorkspaceId) return;
+    try {
+      setMemoryApprovalsLoading(true);
+      const items = await window.electronAPI.listMemoryWriteApprovals({
+        workspaceId: selectedWorkspaceId,
+        limit: 50,
+      });
+      setPendingMemoryWrites(items);
+    } catch (error) {
+      logger.error("Failed to load pending memory writes:", error);
+      setPendingMemoryWrites([]);
+    } finally {
+      setMemoryApprovalsLoading(false);
+    }
+  };
+
+  const approveMemoryWrite = async (id: string) => {
+    if (!selectedWorkspaceId || !id) return;
+    try {
+      setMemoryApprovalBusyId(id);
+      const result = await window.electronAPI.approveMemoryWriteApproval({
+        id,
+        workspaceId: selectedWorkspaceId,
+      });
+      if (result.status === "failed") {
+        window.alert(result.resolution || "Approved memory write failed to apply.");
+      }
+      await Promise.all([refreshMemoryApprovals(), refreshLayerPreview(), refreshKit()]);
+    } catch (error) {
+      logger.error("Failed to approve memory write:", error);
+    } finally {
+      setMemoryApprovalBusyId("");
+    }
+  };
+
+  const rejectMemoryWrite = async (id: string) => {
+    if (!selectedWorkspaceId || !id) return;
+    const reason = window.prompt("Reason for rejecting this memory write?", "Rejected from Memory Hub");
+    if (reason === null) return;
+    try {
+      setMemoryApprovalBusyId(id);
+      await window.electronAPI.rejectMemoryWriteApproval({
+        id,
+        workspaceId: selectedWorkspaceId,
+        reason,
+      });
+      await refreshMemoryApprovals();
+    } catch (error) {
+      logger.error("Failed to reject memory write:", error);
+    } finally {
+      setMemoryApprovalBusyId("");
     }
   };
 
@@ -497,6 +558,17 @@ export function MemoryHubSettings(props?: {
     } finally {
       setSaving(false);
     }
+  };
+
+  const renderPendingPayload = (item: MemoryWriteApprovalItem): string => {
+    const payload = item.payload || {};
+    const visible = {
+      proposedValue: item.proposedValue,
+      oldValue: item.oldValue,
+      reason: item.reason,
+      payload,
+    };
+    return JSON.stringify(visible, null, 2);
   };
 
   const saveAwarenessConfig = async (nextConfig: AwarenessConfig) => {
@@ -883,6 +955,30 @@ export function MemoryHubSettings(props?: {
               <span className="toggle-slider" />
             </label>
           </div>
+        </div>
+
+        <div className="settings-form-group">
+          <label className="settings-label">Memory Write Approval</label>
+          <select
+            value={features.memoryWriteApprovalMode || "off"}
+            onChange={(e) =>
+              saveFeatures({
+                memoryWriteApprovalMode: e.target.value as MemoryFeaturesSettings["memoryWriteApprovalMode"],
+              })
+            }
+            className="settings-select"
+            disabled={saving}
+          >
+            <option value="off">Off</option>
+            <option value="curated_only">Curated memory only</option>
+            <option value="external_only">External memory only</option>
+            <option value="background_only">Background writes only</option>
+            <option value="all">All durable memory writes</option>
+          </select>
+          <p className="settings-form-hint">
+            Staged writes appear in the pending queue before they change hot memory, archive memory,
+            or external memory providers.
+          </p>
         </div>
       </div>
 
@@ -2225,6 +2321,95 @@ export function MemoryHubSettings(props?: {
 
         {selectedWorkspaceId && (
           <>
+            <div className="settings-card memory-hub-top-gap">
+              <div className="memory-hub-row-center">
+                <div className="memory-hub-grow">
+                  <div className="memory-hub-primary-label">
+                    Pending Memory Writes
+                  </div>
+                  <p className="settings-form-hint memory-hub-hint-tight">
+                    Review staged archive, curated, and external memory writes for this workspace.
+                  </p>
+                </div>
+                <div className="memory-hub-stack-gap">
+                  <span className={badgeClass(pendingMemoryWrites.length > 0 ? "warning" : "success")}>
+                    {pendingMemoryWrites.length} pending
+                  </span>
+                  <button
+                    className="settings-button"
+                    onClick={() => void refreshMemoryApprovals()}
+                    disabled={memoryApprovalsLoading}
+                  >
+                    {memoryApprovalsLoading ? "Refreshing..." : "Refresh"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="memory-hub-top-gap">
+                {pendingMemoryWrites.length === 0 ? (
+                  <div className="settings-empty">No pending memory writes.</div>
+                ) : (
+                  <div className="memory-list" style={{ maxHeight: "360px" }}>
+                    {pendingMemoryWrites.map((item) => {
+                      const isExternal = item.target === "external";
+                      const busy = memoryApprovalBusyId === item.id;
+                      return (
+                        <div key={item.id} className="memory-list-item">
+                          <div className="memory-hub-row">
+                            <div className="memory-hub-grow">
+                              <div className="memory-hub-stack-wrap">
+                                <span className={badgeClass(isExternal ? "warning" : "neutral")}>
+                                  {item.target}
+                                </span>
+                                <span className={badgeClass("neutral")}>{item.action}</span>
+                                <span className={badgeClass(item.origin === "agent_tool" ? "success" : "warning")}>
+                                  {item.origin}
+                                </span>
+                                <span className={badgeClass(item.riskScore >= 0.7 ? "warning" : "neutral")}>
+                                  risk {Math.round(item.riskScore * 100)}%
+                                </span>
+                              </div>
+                              <div className="memory-hub-text-block-primary">
+                                {item.summary}
+                              </div>
+                              <div className="memory-hub-caption">
+                                {formatTimestamp(item.createdAt) || "Unknown time"}
+                                {item.taskId ? ` • task ${item.taskId}` : ""}
+                              </div>
+                              {isExternal && (
+                                <div className="memory-hub-caption memory-hub-top-gap-sm">
+                                  External write: approving this can send the shown content to the configured provider.
+                                </div>
+                              )}
+                              <pre className="memory-approval-payload">
+                                {renderPendingPayload(item)}
+                              </pre>
+                            </div>
+                            <div className="memory-hub-stack-gap memory-hub-toggle-shrink">
+                              <button
+                                className="settings-button primary"
+                                onClick={() => void approveMemoryWrite(item.id)}
+                                disabled={busy}
+                              >
+                                Approve
+                              </button>
+                              <button
+                                className="settings-button settings-button-danger"
+                                onClick={() => void rejectMemoryWrite(item.id)}
+                                disabled={busy}
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
             <ChronicleSettingsCard />
             <MemorySettings
               workspaceId={selectedWorkspaceId}

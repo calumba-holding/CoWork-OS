@@ -217,7 +217,16 @@ export class SupermemoryTools {
   async remember(input: {
     content: string;
     containerTag?: string;
-  }): Promise<{ success: boolean; containerTag: string; memoryIds: string[] }> {
+  }): Promise<{
+    success: boolean;
+    containerTag: string;
+    memoryIds: string[];
+    staged?: boolean;
+    pendingId?: string;
+    blocked?: boolean;
+    error?: string;
+    message?: string;
+  }> {
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "supermemory_remember",
       hasContainerTag: Boolean(input.containerTag),
@@ -233,7 +242,44 @@ export class SupermemoryTools {
         taskId: this.taskId,
         workspaceId: this.workspace.id,
       },
+      taskId: this.taskId,
+      origin: "agent_tool",
     });
+
+    if (result.blocked) {
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "supermemory_remember",
+        success: false,
+        blocked: true,
+        containerTag: result.containerTag,
+      });
+      return {
+        success: false,
+        containerTag: result.containerTag,
+        memoryIds: [],
+        blocked: true,
+        error: result.error,
+        message: result.error,
+      };
+    }
+
+    if (result.staged) {
+      this.daemon.logEvent(this.taskId, "tool_result", {
+        tool: "supermemory_remember",
+        success: true,
+        staged: true,
+        pendingId: result.pendingId,
+        containerTag: result.containerTag,
+      });
+      return {
+        success: true,
+        containerTag: result.containerTag,
+        memoryIds: [],
+        staged: true,
+        pendingId: result.pendingId,
+        message: "External memory write is pending user approval.",
+      };
+    }
 
     this.daemon.logEvent(this.taskId, "tool_result", {
       tool: "supermemory_remember",

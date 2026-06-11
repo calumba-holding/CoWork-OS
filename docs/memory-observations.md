@@ -93,7 +93,9 @@ suppressed and redacted observations are excluded from both search-based recall 
 prompt recall.
 
 Supermemory mirroring remains additive and opt-in. Private, redacted, and suppressed local entries
-must not be mirrored.
+must not be mirrored. When Memory Write Approval is enabled for external or background writes,
+eligible mirror attempts are staged for review before leaving the device. Sensitive external-memory
+payloads are blocked before they can be stored in the pending approval queue.
 
 ## Backfill And Migration
 

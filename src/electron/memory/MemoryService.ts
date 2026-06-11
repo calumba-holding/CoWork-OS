@@ -32,6 +32,7 @@ import { MarkdownMemoryIndexService } from "./MarkdownMemoryIndexService";
 import { MemoryTierService } from "./MemoryTierService";
 import { SupermemoryService } from "./SupermemoryService";
 import { MemoryObservationService } from "./MemoryObservationService";
+import { MemoryWriteGate, type MemoryWriteOrigin } from "./MemoryWriteGate";
 import type { CoreMemoryScopeKind } from "../../shared/types";
 import { MemoryFeaturesManager } from "../settings/memory-features-manager";
 import { createLogger } from "../utils/logger";
@@ -110,6 +111,7 @@ export interface MemoryCaptureOptions {
   candidateId?: string;
   scopeKind?: CoreMemoryScopeKind;
   scopeRef?: string;
+  skipMemoryWriteGate?: boolean;
 }
 
 interface CompressionQueueEntry {
@@ -202,6 +204,7 @@ export class MemoryService {
 
     const db = dbManager.getDatabase();
     this.db = db;
+    MemoryWriteGate.initialize(dbManager);
     this.memoryRepo = new MemoryRepository(db);
     this.embeddingRepo = new MemoryEmbeddingRepository(db);
     this.summaryRepo = new MemorySummaryRepository(db);
@@ -326,6 +329,29 @@ export class MemoryService {
         ? privacyPrepared.content.slice(0, 10000) + "\n[... truncated]"
         : privacyPrepared.content;
 
+    const compressionOrigin = options?.origin ?? (taskId ? "task" : "unknown");
+    if (!options?.skipMemoryWriteGate) {
+      const gate = MemoryWriteGate.evaluate({
+        workspaceId,
+        taskId,
+        target: "archive",
+        action: "add",
+        origin: this.mapCaptureOriginToWriteOrigin(compressionOrigin),
+        summary: `Save ${type} memory`,
+        payload: {
+          type,
+          content: truncatedContent,
+          isPrivate: finalIsPrivate,
+          options: this.summarizeCaptureOptions(options),
+        },
+        proposedValue: truncatedContent,
+        reason: options?.signalFamily,
+      });
+      if (!gate.allowed) {
+        return null;
+      }
+    }
+
     // Create memory
     const memory = this.memoryRepo.create({
       workspaceId,
@@ -337,7 +363,6 @@ export class MemoryService {
       isPrivate: finalIsPrivate,
     });
 
-    const compressionOrigin = options?.origin ?? (taskId ? "task" : "unknown");
     this.recordCompressionCapture(workspaceId, compressionOrigin);
     const compressionPriority = this.deriveCompressionPriority(
       type,
@@ -424,6 +449,7 @@ export class MemoryService {
         memoryType: type,
         content: truncatedContent,
         createdAt: memory.createdAt,
+        origin: "external_mirror",
       }).catch((error) => {
         logger.warn("[MemoryService] Failed to mirror memory to Supermemory:", error);
       });
@@ -571,6 +597,42 @@ export class MemoryService {
     } catch {
       return this.mergeLexicalOnly(lexicalLocal, lexicalImportedGlobal, limit);
     }
+  }
+
+  private static mapCaptureOriginToWriteOrigin(origin: MemoryCaptureOrigin): MemoryWriteOrigin {
+    switch (origin) {
+      case "tool":
+        return "agent_tool";
+      case "heartbeat":
+      case "proactive":
+        return "background";
+      case "system":
+        return "distill";
+      case "task":
+      case "chronicle":
+      case "playbook":
+      case "import":
+      case "unknown":
+      default:
+        return "auto_capture";
+    }
+  }
+
+  private static summarizeCaptureOptions(
+    options: MemoryCaptureOptions | undefined,
+  ): Record<string, unknown> | undefined {
+    if (!options) return undefined;
+    return {
+      origin: options.origin,
+      batchKey: options.batchKey,
+      priority: options.priority,
+      signalFamily: options.signalFamily,
+      profileId: options.profileId,
+      coreTraceId: options.coreTraceId,
+      candidateId: options.candidateId,
+      scopeKind: options.scopeKind,
+      scopeRef: options.scopeRef,
+    };
   }
 
   private static mergeLexicalOnly(

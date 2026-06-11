@@ -25,6 +25,30 @@ Chronicle fits this model as a **screen-context evidence source**, not as a fift
 
 ---
 
+## Memory Write Governance
+
+Durable memory writes pass through `MemoryWriteGate` before they commit when approval is enabled. The default mode is `off`, which preserves existing behavior. Stricter modes can be set through memory feature settings, or with `COWORK_MEMORY_WRITE_APPROVAL_MODE` for headless/local validation:
+
+- `curated_only`: stage writes to the hot `.cowork/USER.md` / `.cowork/MEMORY.md` layer.
+- `external_only`: stage writes before anything is saved or mirrored to Supermemory.
+- `background_only`: stage background, distillation, Dreaming, and mirror writes while allowing explicit agent tool saves.
+- `all`: stage every durable archive, curated, and external memory write.
+
+Pending writes are stored in `pending_memory_writes` with target layer, action, origin, proposed value, old value when available, evidence metadata, and risk score. The main SQLite database is a normal `better-sqlite3` database with selected encrypted settings/fields, not a whole-file SQLCipher database, so sensitive external-memory payloads are blocked before they are persisted to the approval queue. Explicit tools return the pending id when a write is staged so the runtime can surface the review item instead of reporting a committed write.
+
+Approving a pending write first atomically claims the row as `applying`, replays the stored payload with the write gate bypassed, then marks the row `applied`. Rejecting a write marks it `rejected` without calling the target memory service. Failed replays are marked `failed` with the error text for audit.
+
+The approval gate sits in front of all durable memory write surfaces:
+
+- `memory_save` and automatic `MemoryService.capture(...)` archive writes
+- `memory_curate`, Dreaming accepted candidates, and Core Memory Distiller promotions
+- `supermemory_remember` and optional Supermemory mirroring
+- external provider mirror hooks through `ExternalMemoryProvider`
+
+Read-only recall tools are not staged. Search, profile fetch, inspector views, and prompt synthesis read from the current committed memory layers.
+
+---
+
 ## Overview
 
 ```text

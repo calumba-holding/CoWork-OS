@@ -152,6 +152,7 @@ describe("MemoryFeaturesManager", () => {
       sessionRecallEnabled: true,
       topicMemoryEnabled: true,
       defaultArchiveInjectionEnabled: false,
+      memoryWriteApprovalMode: "off",
       autoPromoteToCuratedMemoryEnabled: false,
       structuredObservationsEnabled: true,
       progressiveRecallToolsEnabled: true,

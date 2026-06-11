@@ -91,6 +91,8 @@ export interface MemoryFeaturesSettings {
   topicMemoryEnabled?: boolean;
   /** Keep legacy archive memory out of default prompt injection. */
   defaultArchiveInjectionEnabled?: boolean;
+  /** Require approval before durable memory writes are committed. */
+  memoryWriteApprovalMode?: "off" | "curated_only" | "external_only" | "background_only" | "all";
   /** Promote only explicit/high-signal facts into curated memory. */
   autoPromoteToCuratedMemoryEnabled?: boolean;
   /** Store structured sidecar metadata for archive memories. */
@@ -99,6 +101,29 @@ export interface MemoryFeaturesSettings {
   progressiveRecallToolsEnabled?: boolean;
   /** Show the Memory Hub observation inspector. */
   memoryInspectorEnabled?: boolean;
+}
+
+export type MemoryWriteApprovalStatus = "pending" | "applying" | "applied" | "rejected" | "failed";
+
+export interface MemoryWriteApprovalItem {
+  id: string;
+  workspaceId: string;
+  taskId?: string;
+  target: string;
+  action: string;
+  origin: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  oldValue?: string;
+  proposedValue?: string;
+  reason?: string;
+  evidence: Array<Record<string, unknown>>;
+  riskScore: number;
+  status: MemoryWriteApprovalStatus;
+  createdAt: number;
+  reviewedAt?: number;
+  reviewedBy?: string;
+  resolution?: string;
 }
 
 export type MemoryObservationPrivacyState = "normal" | "private" | "redacted" | "suppressed";
@@ -8731,6 +8756,11 @@ export const IPC_CHANNELS = {
   MEMORY_FEATURES_GET_SETTINGS: "memoryFeatures:getSettings",
   MEMORY_FEATURES_SAVE_SETTINGS: "memoryFeatures:saveSettings",
   MEMORY_FEATURES_GET_LAYER_PREVIEW: "memoryFeatures:getLayerPreview",
+  MEMORY_WRITE_APPROVALS_LIST: "memoryWriteApprovals:list",
+  MEMORY_WRITE_APPROVALS_GET: "memoryWriteApprovals:get",
+  MEMORY_WRITE_APPROVALS_APPROVE: "memoryWriteApprovals:approve",
+  MEMORY_WRITE_APPROVALS_REJECT: "memoryWriteApprovals:reject",
+  MEMORY_WRITE_APPROVALS_COUNT: "memoryWriteApprovals:count",
   SUPERMEMORY_GET_SETTINGS: "supermemory:getSettings",
   SUPERMEMORY_SAVE_SETTINGS: "supermemory:saveSettings",
   SUPERMEMORY_TEST_CONNECTION: "supermemory:testConnection",

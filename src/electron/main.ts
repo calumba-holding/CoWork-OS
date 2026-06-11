@@ -131,6 +131,7 @@ import {
 } from "./cron/workspace-context";
 import { MemoryService } from "./memory/MemoryService";
 import { CuratedMemoryService } from "./memory/CuratedMemoryService";
+import { MemoryWriteGate } from "./memory/MemoryWriteGate";
 import { DreamingRepository } from "./memory/DreamingRepository";
 import { DreamingService } from "./memory/DreamingService";
 import { MemoryPressureService } from "./memory/MemoryPressureService";
@@ -1721,6 +1722,7 @@ if (!gotTheLock) {
     // Initialize Memory Service before queue recovery starts. AgentDaemon.initialize()
     // can immediately resume queued tasks, and their early timeline events capture to memory.
     try {
+      MemoryWriteGate.initialize(dbManager);
       MemoryService.initialize(dbManager);
       CuratedMemoryService.initialize(dbManager);
 

@@ -185,19 +185,25 @@ export class DreamingService {
     if (candidate.target !== "curated_memory") {
       return candidate;
     }
+    if (/^Staged pending memory approval \(/.test(candidate.resolution || "")) {
+      return candidate;
+    }
 
     const applyCurated = this.deps.applyCuratedMemory || CuratedMemoryService.curate.bind(CuratedMemoryService);
+    let stagedPendingId: string | undefined;
     if (candidate.action === "curated_add") {
-      await applyCurated({
+      const result = await applyCurated({
         workspaceId,
         action: "add",
         target: "workspace",
         kind: "project_fact",
         content: candidate.proposedValue,
         reason: candidate.rationale,
+        origin: "dreaming",
       });
+      stagedPendingId = result.pendingId;
     } else if (candidate.action === "curated_replace") {
-      await applyCurated({
+      const result = await applyCurated({
         workspaceId,
         action: "replace",
         target: "workspace",
@@ -205,14 +211,25 @@ export class DreamingService {
         match: candidate.currentValue,
         content: candidate.proposedValue,
         reason: candidate.rationale,
+        origin: "dreaming",
       });
+      stagedPendingId = result.pendingId;
     } else if (candidate.action === "curated_archive") {
-      await applyCurated({
+      const result = await applyCurated({
         workspaceId,
         action: "remove",
         target: "workspace",
         match: candidate.currentValue || candidate.proposedValue,
         reason: candidate.rationale,
+        origin: "dreaming",
+      });
+      stagedPendingId = result.pendingId;
+    }
+    if (stagedPendingId) {
+      return this.repo.reviewCandidate({
+        id: candidate.id,
+        status: "accepted",
+        resolution: `Staged pending memory approval (${stagedPendingId}).`,
       });
     }
     return this.repo.reviewCandidate({

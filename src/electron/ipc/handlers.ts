@@ -365,6 +365,7 @@ import { MemoryObservationService } from "../memory/MemoryObservationService";
 import { MemorySynthesizer } from "../memory/MemorySynthesizer";
 import { CuratedMemoryService } from "../memory/CuratedMemoryService";
 import { SupermemoryService } from "../memory/SupermemoryService";
+import { MemoryWriteGate } from "../memory/MemoryWriteGate";
 import { UserProfileService } from "../memory/UserProfileService";
 import { WORKSPACE_KIT_CONTRACTS } from "../context/kit-contracts";
 import {
@@ -13938,6 +13939,73 @@ function setupMemoryHandlers(): void {
       } catch (error) {
         logger.error("[MemoryFeatures] Failed to build layer preview:", error);
         return null;
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MEMORY_WRITE_APPROVALS_LIST,
+    async (_event, data?: { workspaceId?: string; limit?: number }) => {
+      try {
+        return MemoryWriteGate.listPendingForDisplay(
+          typeof data?.workspaceId === "string" ? data.workspaceId : undefined,
+          Math.max(1, Math.min(200, Number(data?.limit || 100))),
+        );
+      } catch (error) {
+        logger.error("[MemoryWriteApprovals] Failed to list pending writes:", error);
+        return [];
+      }
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.MEMORY_WRITE_APPROVALS_GET, async (_event, id: string) => {
+    try {
+      if (typeof id !== "string" || !id.trim()) return null;
+      return MemoryWriteGate.findPendingForDisplay(id.trim()) || null;
+    } catch (error) {
+      logger.error("[MemoryWriteApprovals] Failed to get pending write:", error);
+      return null;
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.MEMORY_WRITE_APPROVALS_APPROVE,
+    async (_event, data: { id: string; workspaceId?: string }) => {
+      checkRateLimit(IPC_CHANNELS.MEMORY_WRITE_APPROVALS_APPROVE, RATE_LIMIT_CONFIGS.limited);
+      const id = typeof data?.id === "string" ? data.id.trim() : "";
+      if (!id) throw new Error("Pending memory write id is required.");
+      return MemoryWriteGate.applyPending(id, {
+        workspaceId: typeof data?.workspaceId === "string" ? data.workspaceId : undefined,
+        reviewedBy: "user",
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MEMORY_WRITE_APPROVALS_REJECT,
+    async (_event, data: { id: string; workspaceId?: string; reason?: string }) => {
+      checkRateLimit(IPC_CHANNELS.MEMORY_WRITE_APPROVALS_REJECT, RATE_LIMIT_CONFIGS.limited);
+      const id = typeof data?.id === "string" ? data.id.trim() : "";
+      if (!id) throw new Error("Pending memory write id is required.");
+      return MemoryWriteGate.rejectForDisplay(id, {
+        workspaceId: typeof data?.workspaceId === "string" ? data.workspaceId : undefined,
+        reviewedBy: "user",
+        resolution: typeof data?.reason === "string" ? data.reason.trim() : undefined,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MEMORY_WRITE_APPROVALS_COUNT,
+    async (_event, workspaceId?: string) => {
+      try {
+        return {
+          pending: MemoryWriteGate.pendingCount(
+            typeof workspaceId === "string" ? workspaceId : undefined,
+          ),
+        };
+      } catch {
+        return { pending: 0 };
       }
     },
   );

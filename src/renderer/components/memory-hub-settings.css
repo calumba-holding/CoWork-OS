@@ -106,6 +106,21 @@
   flex-wrap: wrap;
 }
 
+.memory-approval-payload {
+  margin: 10px 0 0;
+  max-height: 148px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .memory-hub-inline-primary {
   font-size: 12px;
   color: var(--color-text-primary);

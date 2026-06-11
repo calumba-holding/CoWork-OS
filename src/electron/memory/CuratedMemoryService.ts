@@ -11,6 +11,7 @@ import type {
   CuratedMemoryKind,
   CuratedMemoryTarget,
 } from "../../shared/types";
+import { MemoryWriteGate, type MemoryWriteOrigin } from "./MemoryWriteGate";
 
 const USER_BLOCK_START = "<!-- cowork:auto:curated-user:start -->";
 const USER_BLOCK_END = "<!-- cowork:auto:curated-user:end -->";
@@ -123,6 +124,7 @@ export class CuratedMemoryService {
   static initialize(dbManager: DatabaseManager): void {
     if (this.initialized) return;
     const db = dbManager.getDatabase();
+    MemoryWriteGate.initialize(dbManager);
     this.curatedRepo = new CuratedMemoryRepository(db);
     this.workspaceRepo = new WorkspaceRepository(db);
     this.initialized = true;
@@ -160,10 +162,14 @@ export class CuratedMemoryService {
     content?: string;
     match?: string;
     reason?: string;
+    origin?: MemoryWriteOrigin;
+    skipMemoryWriteGate?: boolean;
   }): Promise<{
     success: boolean;
     entry?: CuratedMemoryEntry;
     updatedFile?: ".cowork/USER.md" | ".cowork/MEMORY.md";
+    staged?: boolean;
+    pendingId?: string;
     error?: string;
   }> {
     this.ensureInitialized();
@@ -191,6 +197,66 @@ export class CuratedMemoryService {
       (existingById.workspaceId !== params.workspaceId || existingById.target !== params.target)
     ) {
       return { success: false, error: "Curated memory id does not belong to this workspace/target" };
+    }
+    const resolvedMatch =
+      params.action === "add"
+        ? undefined
+        : existingById
+          ? { entry: existingById }
+          : this.findMatchCandidate(params.workspaceId, params.target, trimmedMatch, params.kind);
+    if (resolvedMatch?.error) {
+      return {
+        success: false,
+        error: resolvedMatch.error,
+      };
+    }
+    if (params.action !== "add" && !resolvedMatch?.entry) {
+      return {
+        success: false,
+        error: hasStableId
+          ? `No curated memory found for id "${params.id}"`
+          : `No curated memory matched "${trimmedMatch}"`,
+      };
+    }
+
+    if (!params.skipMemoryWriteGate) {
+      const oldValue =
+        params.action === "add" ? undefined : resolvedMatch?.entry?.content;
+      const gate = MemoryWriteGate.evaluate({
+        workspaceId: params.workspaceId,
+        taskId: params.taskId,
+        target: "curated",
+        action: params.action,
+        origin: params.origin || "agent_tool",
+        summary: `${params.action} ${params.target} curated memory`,
+        payload: {
+          action: params.action,
+          target: params.target,
+          id: params.id,
+          kind: params.kind || defaultKind,
+          content: trimmedContent || undefined,
+          match: trimmedMatch || undefined,
+          reason: params.reason,
+        },
+        oldValue,
+        proposedValue: trimmedContent || params.match,
+        reason: params.reason,
+      });
+      if (!gate.allowed) {
+        if ("blocked" in gate) {
+          return {
+            success: false,
+            error: gate.error,
+            updatedFile: targetFile,
+          };
+        }
+        return {
+          success: true,
+          staged: true,
+          pendingId: gate.pendingId,
+          updatedFile: targetFile,
+        };
+      }
     }
 
     if (params.action === "add") {
@@ -221,25 +287,7 @@ export class CuratedMemoryService {
         });
       }
     } else {
-      const matchResult =
-        existingById
-          ? { entry: existingById }
-          : this.findMatchCandidate(params.workspaceId, params.target, trimmedMatch, params.kind);
-      if (matchResult.error) {
-        return {
-          success: false,
-          error: matchResult.error,
-        };
-      }
-      const existing = matchResult.entry;
-      if (!existing) {
-        return {
-          success: false,
-          error: hasStableId
-            ? `No curated memory found for id "${params.id}"`
-            : `No curated memory matched "${trimmedMatch}"`,
-        };
-      }
+      const existing = resolvedMatch!.entry!;
       if (params.action === "replace") {
         entry = this.curatedRepo.update(existing.id, {
           kind: params.kind || existing.kind,
@@ -270,12 +318,33 @@ export class CuratedMemoryService {
     content: string;
     confidence: number;
     source?: CuratedMemoryEntry["source"];
+    skipMemoryWriteGate?: boolean;
   }): Promise<CuratedMemoryEntry | null> {
     this.ensureInitialized();
     const content = normalizeCuratedContent(params.content || "");
     if (!content) return null;
 
     const normalizedKey = normalizeMemoryKey(content);
+    if (!params.skipMemoryWriteGate) {
+      const gate = MemoryWriteGate.evaluate({
+        workspaceId: params.workspaceId,
+        taskId: params.taskId,
+        target: "curated",
+        action: "upsert",
+        origin: "distill",
+        summary: `Promote distilled ${params.target} memory`,
+        payload: {
+          target: params.target,
+          kind: params.kind,
+          content,
+          confidence: params.confidence,
+          source: params.source || "distill",
+        },
+        proposedValue: content,
+      });
+      if (!gate.allowed) return null;
+    }
+
     const existing = this.curatedRepo.findByNormalizedKey(
       params.workspaceId,
       params.target,

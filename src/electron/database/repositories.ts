@@ -4951,6 +4951,29 @@ export interface MemorySettings {
   excludedPatterns?: string[];
 }
 
+export type PendingMemoryWriteStatus = "pending" | "applying" | "applied" | "rejected" | "failed";
+
+export interface PendingMemoryWrite {
+  id: string;
+  workspaceId: string;
+  taskId?: string;
+  target: string;
+  action: string;
+  origin: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  oldValue?: string;
+  proposedValue?: string;
+  reason?: string;
+  evidence: Array<Record<string, unknown>>;
+  riskScore: number;
+  status: PendingMemoryWriteStatus;
+  createdAt: number;
+  reviewedAt?: number;
+  reviewedBy?: string;
+  resolution?: string;
+}
+
 export type MemorySearchResult =
   | {
       id: string;
@@ -6428,6 +6451,185 @@ export class MemorySettingsRepository {
         [] as string[],
         "memorySettings.excludedPatterns",
       ),
+    };
+  }
+}
+
+export class PendingMemoryWriteRepository {
+  constructor(private db: Database.Database) {}
+
+  create(input: {
+    workspaceId: string;
+    taskId?: string;
+    target: string;
+    action: string;
+    origin: string;
+    summary: string;
+    payload: Record<string, unknown>;
+    oldValue?: string;
+    proposedValue?: string;
+    reason?: string;
+    evidence?: Array<Record<string, unknown>>;
+    riskScore?: number;
+  }): PendingMemoryWrite {
+    const now = Date.now();
+    const record: PendingMemoryWrite = {
+      id: uuidv4(),
+      workspaceId: input.workspaceId,
+      taskId: input.taskId,
+      target: input.target,
+      action: input.action,
+      origin: input.origin,
+      summary: input.summary,
+      payload: input.payload,
+      oldValue: input.oldValue,
+      proposedValue: input.proposedValue,
+      reason: input.reason,
+      evidence: input.evidence || [],
+      riskScore: input.riskScore ?? 0,
+      status: "pending",
+      createdAt: now,
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO pending_memory_writes (
+          id, workspace_id, task_id, target, action, origin, summary, payload_json,
+          old_value, proposed_value, reason, evidence_json, risk_score, status,
+          created_at, reviewed_at, reviewed_by, resolution
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.workspaceId,
+        record.taskId || null,
+        record.target,
+        record.action,
+        record.origin,
+        record.summary,
+        JSON.stringify(record.payload),
+        record.oldValue || null,
+        record.proposedValue || null,
+        record.reason || null,
+        JSON.stringify(record.evidence),
+        record.riskScore,
+        record.status,
+        record.createdAt,
+        null,
+        null,
+        null,
+      );
+
+    return record;
+  }
+
+  findById(id: string): PendingMemoryWrite | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM pending_memory_writes WHERE id = ?")
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : undefined;
+  }
+
+  list(params: {
+    workspaceId?: string;
+    status?: PendingMemoryWriteStatus;
+    limit?: number;
+  } = {}): PendingMemoryWrite[] {
+    const clauses: string[] = [];
+    const values: unknown[] = [];
+    if (params.workspaceId) {
+      clauses.push("workspace_id = ?");
+      values.push(params.workspaceId);
+    }
+    if (params.status) {
+      clauses.push("status = ?");
+      values.push(params.status);
+    }
+    values.push(Math.max(1, params.limit ?? 100));
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM pending_memory_writes
+         ${where}
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(...values) as Record<string, unknown>[];
+    return rows.map((row) => this.mapRow(row));
+  }
+
+  countPending(workspaceId?: string): number {
+    if (workspaceId) {
+      const row = this.db
+        .prepare("SELECT COUNT(*) AS count FROM pending_memory_writes WHERE workspace_id = ? AND status = 'pending'")
+        .get(workspaceId) as { count?: number } | undefined;
+      return Number(row?.count || 0);
+    }
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM pending_memory_writes WHERE status = 'pending'")
+      .get() as { count?: number } | undefined;
+    return Number(row?.count || 0);
+  }
+
+  updateStatus(
+    id: string,
+    status: PendingMemoryWriteStatus,
+    details: { reviewedBy?: string; resolution?: string } = {},
+  ): PendingMemoryWrite | undefined {
+    this.db
+      .prepare(
+        `UPDATE pending_memory_writes
+         SET status = ?, reviewed_at = ?, reviewed_by = ?, resolution = ?
+         WHERE id = ?`,
+      )
+      .run(status, Date.now(), details.reviewedBy || null, details.resolution || null, id);
+    return this.findById(id);
+  }
+
+  updateStatusIfCurrent(
+    id: string,
+    expectedStatus: PendingMemoryWriteStatus,
+    status: PendingMemoryWriteStatus,
+    details: { reviewedBy?: string; resolution?: string } = {},
+  ): PendingMemoryWrite | undefined {
+    const result = this.db
+      .prepare(
+        `UPDATE pending_memory_writes
+         SET status = ?, reviewed_at = ?, reviewed_by = ?, resolution = ?
+         WHERE id = ? AND status = ?`,
+      )
+      .run(status, Date.now(), details.reviewedBy || null, details.resolution || null, id, expectedStatus);
+    return result.changes > 0 ? this.findById(id) : undefined;
+  }
+
+  private mapRow(row: Record<string, unknown>): PendingMemoryWrite {
+    return {
+      id: row.id as string,
+      workspaceId: row.workspace_id as string,
+      taskId: (row.task_id as string) || undefined,
+      target: row.target as string,
+      action: row.action as string,
+      origin: row.origin as string,
+      summary: row.summary as string,
+      payload: safeJsonParse(
+        row.payload_json as string,
+        {} as Record<string, unknown>,
+        "pendingMemoryWrite.payload",
+      ),
+      oldValue: (row.old_value as string) || undefined,
+      proposedValue: (row.proposed_value as string) || undefined,
+      reason: (row.reason as string) || undefined,
+      evidence: safeJsonParse(
+        row.evidence_json as string,
+        [] as Array<Record<string, unknown>>,
+        "pendingMemoryWrite.evidence",
+      ),
+      riskScore: Number(row.risk_score || 0),
+      status: row.status as PendingMemoryWriteStatus,
+      createdAt: Number(row.created_at || 0),
+      reviewedAt: row.reviewed_at ? Number(row.reviewed_at) : undefined,
+      reviewedBy: (row.reviewed_by as string) || undefined,
+      resolution: (row.resolution as string) || undefined,
     };
   }
 }

@@ -66,6 +66,8 @@ export class SupermemoryExternalProvider implements ExternalMemoryProvider {
           sessionId: input.sessionId,
           source: "turn_sync",
         },
+        taskId: input.taskId,
+        origin: "background",
       });
     }
   }
@@ -80,6 +82,8 @@ export class SupermemoryExternalProvider implements ExternalMemoryProvider {
         sessionId: input.sessionId,
         source: "session_extract",
       },
+      taskId: input.taskId,
+      origin: "background",
     });
   }
 

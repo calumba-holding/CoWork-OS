@@ -176,7 +176,7 @@ Multiple validation layers prevent `../` escape:
 
 ## Encrypted Settings Storage
 
-All application settings are stored encrypted using `SecureSettingsRepository`:
+Application settings stored through `SecureSettingsRepository` are encrypted inside the local SQLite database. The main `cowork-os.db` file is a normal `better-sqlite3` database, not a whole-file SQLCipher database. Treat rows outside encrypted repositories as local plaintext unless their feature explicitly documents per-field encryption.
 
 ### Encryption Hierarchy
 
@@ -211,6 +211,18 @@ All sensitive settings including API keys, preferences, and configurations are s
 - Search provider credentials
 - Channel/gateway settings
 - All user preferences
+
+### Memory Write Governance
+
+Durable memory writes can be approval-gated before commit. The Memory Hub setting `memoryWriteApprovalMode` supports:
+
+- `off`: commit immediately
+- `curated_only`: stage curated hot-memory writes
+- `external_only`: stage Supermemory/external-provider writes
+- `background_only`: stage automatic capture, Dreaming, distillation, and external mirroring writes
+- `all`: stage every durable memory write
+
+Pending approvals are stored in `pending_memory_writes`. Because this table is in the normal SQLite database, CoWork blocks sensitive external-memory payloads before they are persisted to the queue. Approval replay claims a pending row as `applying` before sending it to the target memory service, so duplicate approve attempts do not replay the same write twice.
 
 ## Rate Limiting
 
