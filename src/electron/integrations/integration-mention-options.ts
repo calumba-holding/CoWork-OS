@@ -154,9 +154,10 @@ const GOOGLE_WORKSPACE_SPLIT_OPTIONS: IntegrationMentionOption[] = [
       "gmail_create_draft",
       "gmail_send_email",
       "gmail_action",
+      "mailbox_action",
     ],
     promptHint:
-      "Use gmail_search_emails first for Gmail search/listing, then gmail_batch_read_email or gmail_read_email_thread when full message or thread context is needed. Use gmail_create_draft by default for replies; use gmail_send_email only when the user explicitly asks to send.",
+      "Use gmail_search_emails first for Gmail search/listing, then gmail_batch_read_email or gmail_read_email_thread when full message or thread context is needed. For user-facing email sending requests, use mailbox_action create_compose_frame so the user can edit recipients, cc/bcc, subject, and body before pressing Send. Use gmail_create_draft for low-level Gmail draft workflows, and gmail_send_email only when the user explicitly asks for direct unattended sending.",
     status: "configured",
   },
   {

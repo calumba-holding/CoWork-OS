@@ -1,4 +1,5 @@
 import type { UiTimelineEvent } from "./timeline-events";
+import type { ChatInlineFrame } from "./mailbox";
 
 // Core types shared between main and renderer processes
 
@@ -3206,6 +3207,7 @@ export interface TaskEvent {
   groupId?: string;
   actor?: TimelineEventActor;
   legacyType?: EventType;
+  inlineFrames?: ChatInlineFrame[];
 }
 
 export interface TaskTimelineEventV2 extends TaskEvent {
@@ -7844,6 +7846,7 @@ export const IPC_CHANNELS = {
   MAILBOX_ASK: "mailbox:ask",
   MAILBOX_ASK_EVENT: "mailbox:askEvent",
   MAILBOX_ATTACHMENT_EXTRACT_TEXT: "mailbox:attachmentExtractText",
+  MAILBOX_GET_DRAFT: "mailbox:getDraft",
   MAILBOX_CREATE_DRAFT: "mailbox:createDraft",
   MAILBOX_UPDATE_DRAFT: "mailbox:updateDraft",
   MAILBOX_ADD_DRAFT_ATTACHMENT: "mailbox:addDraftAttachment",

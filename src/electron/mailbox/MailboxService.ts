@@ -2162,6 +2162,10 @@ export class MailboxService {
     };
   }
 
+  getMailboxDraft(draftId: string): MailboxComposeDraft | null {
+    return this.getMailboxComposeDraft(draftId);
+  }
+
   async createMailboxDraft(input: MailboxComposeDraftInput): Promise<MailboxComposeDraft> {
     const accountId = this.resolveComposeAccountId(input.accountId, input.threadId);
     const now = Date.now();

@@ -2,6 +2,12 @@ import Database from "better-sqlite3";
 import { Workspace } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { MailboxService } from "../../mailbox/MailboxService";
+import type {
+  MailboxComposeDraftInput,
+  MailboxComposeMode,
+  MailboxProvider,
+  MailboxRecipientInput,
+} from "../../../shared/mailbox";
 
 type MailboxAction =
   | "sync"
@@ -15,11 +21,14 @@ type MailboxAction =
   | "schedule_reply"
   | "research_contact"
   | "apply_action"
-  | "review_bulk_action";
+  | "review_bulk_action"
+  | "create_compose_frame";
 
 interface MailboxActionInput {
   action: MailboxAction;
+  account_id?: string;
   thread_id?: string;
+  mode?: MailboxComposeMode;
   query?: string;
   category?: string;
   needs_reply?: boolean;
@@ -31,9 +40,47 @@ interface MailboxActionInput {
   draft_id?: string;
   type?: "cleanup" | "follow_up" | "archive" | "trash" | "mark_read" | "label" | "send_draft" | "discard_draft" | "schedule_event" | "dismiss_proposal";
   label?: string;
+  to?: MailboxRecipientInput[] | string[];
+  cc?: MailboxRecipientInput[] | string[];
+  bcc?: MailboxRecipientInput[] | string[];
+  subject?: string;
+  body_text?: string;
+  body_html?: string;
 }
 
 const MUTATING_ACTION_TYPES = new Set(["archive", "trash", "mark_read", "label", "send_draft", "discard_draft", "schedule_event"]);
+
+function normalizeComposeMode(mode: MailboxActionInput["mode"]): MailboxComposeMode {
+  return mode === "reply" || mode === "reply_all" || mode === "forward" ? mode : "new";
+}
+
+function normalizeRecipientInput(value: unknown): MailboxRecipientInput[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const recipients = value
+    .map((item) => {
+      if (typeof item === "string") {
+        const email = item.trim();
+        return email ? { email } : null;
+      }
+      if (item && typeof item === "object") {
+        const record = item as Record<string, unknown>;
+        const email = typeof record.email === "string" ? record.email.trim() : "";
+        if (!email) return null;
+        const name = typeof record.name === "string" ? record.name.trim() : "";
+        return { ...(name ? { name } : {}), email };
+      }
+      return null;
+    })
+    .filter((recipient): recipient is MailboxRecipientInput => recipient !== null);
+  return recipients.length > 0 ? recipients : undefined;
+}
+
+function providerForAccount(
+  accountId: string,
+  accounts: Array<{ id: string; provider: MailboxProvider }>,
+): MailboxProvider {
+  return accounts.find((account) => account.id === accountId)?.provider || "gmail";
+}
 
 export class MailboxTools {
   private mailboxService: MailboxService;
@@ -121,6 +168,39 @@ export class MailboxTools {
           limit: input.limit,
         });
         break;
+      case "create_compose_frame": {
+        const draftInput: MailboxComposeDraftInput = {
+          accountId: input.account_id,
+          threadId: input.thread_id,
+          mode: normalizeComposeMode(input.mode),
+          subject: input.subject,
+          bodyText: input.body_text,
+          bodyHtml: input.body_html,
+          to: normalizeRecipientInput(input.to),
+          cc: normalizeRecipientInput(input.cc),
+          bcc: normalizeRecipientInput(input.bcc),
+        };
+        const draft = await this.mailboxService.createMailboxDraft(draftInput);
+        const state = await this.mailboxService.getMailboxClientState();
+        const provider = providerForAccount(draft.accountId, state.accounts);
+        this.daemon.logEvent(this.taskId, "assistant_message", {
+          message: "Here's a draft you can review and send.",
+          inlineFrames: [
+            {
+              kind: "mail_compose",
+              draftId: draft.id,
+              accountId: draft.accountId,
+              provider,
+              mode: draft.mode,
+              origin: "assistant_generated",
+              status: draft.status,
+            },
+          ],
+          source: "mailbox_compose_frame",
+        });
+        data = { draft };
+        break;
+      }
       case "apply_action":
         if (!input.type) throw new Error("Missing type for apply_action");
         if (MUTATING_ACTION_TYPES.has(input.type)) {

@@ -7215,12 +7215,22 @@ ${skillDescriptions}`;
                 "research_contact",
                 "apply_action",
                 "review_bulk_action",
+                "create_compose_frame",
               ],
               description: "Mailbox workflow action to perform",
+            },
+            account_id: {
+              type: "string",
+              description: "Optional mailbox account ID for compose-frame drafts",
             },
             thread_id: {
               type: "string",
               description: "Mailbox thread ID for thread-scoped actions",
+            },
+            mode: {
+              type: "string",
+              enum: ["new", "reply", "reply_all", "forward"],
+              description: "Compose mode for create_compose_frame",
             },
             query: {
               type: "string",
@@ -7278,6 +7288,69 @@ ${skillDescriptions}`;
             label: {
               type: "string",
               description: "Label to apply during mailbox label actions",
+            },
+            to: {
+              type: "array",
+              description: "Recipients for create_compose_frame",
+              items: {
+                oneOf: [
+                  { type: "string" },
+                  {
+                    type: "object",
+                    properties: {
+                      name: { type: "string" },
+                      email: { type: "string" },
+                    },
+                    required: ["email"],
+                  },
+                ],
+              },
+            },
+            cc: {
+              type: "array",
+              description: "Cc recipients for create_compose_frame",
+              items: {
+                oneOf: [
+                  { type: "string" },
+                  {
+                    type: "object",
+                    properties: {
+                      name: { type: "string" },
+                      email: { type: "string" },
+                    },
+                    required: ["email"],
+                  },
+                ],
+              },
+            },
+            bcc: {
+              type: "array",
+              description: "Bcc recipients for create_compose_frame",
+              items: {
+                oneOf: [
+                  { type: "string" },
+                  {
+                    type: "object",
+                    properties: {
+                      name: { type: "string" },
+                      email: { type: "string" },
+                    },
+                    required: ["email"],
+                  },
+                ],
+              },
+            },
+            subject: {
+              type: "string",
+              description: "Subject for create_compose_frame",
+            },
+            body_text: {
+              type: "string",
+              description: "Plain text email body for create_compose_frame",
+            },
+            body_html: {
+              type: "string",
+              description: "Optional HTML email body for create_compose_frame",
             },
           },
           required: ["action"],

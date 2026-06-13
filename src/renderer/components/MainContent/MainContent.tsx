@@ -37,6 +37,7 @@ import {
   IntegrationMentionOption,
   IntegrationMentionSelection,
 } from "../../../shared/types";
+import type { ChatInlineFrame } from "../../../shared/mailbox";
 import { parseLeadingSkillSlashCommand } from "../../../shared/skill-slash-commands";
 import {
   parseOnboardingSlashCommand,
@@ -71,6 +72,7 @@ import { CliAgentFrame } from "../CliAgentFrame";
 import { isCliAgentChildTask, resolveCliAgentType } from "../../../shared/cli-agent-detection";
 import { MultiLlmSelectionPanel } from "../MultiLlmSelectionPanel";
 import { AssistantMessageContent } from "../AssistantMessageContent";
+import { AutoMailComposeFrame, MailComposeFrame } from "../MailComposeFrame";
 import type { AgentRoleData, LlmWikiVaultEntry, LlmWikiVaultSummary } from "../../../electron/preload";
 import { useVoiceInput } from "../../hooks/useVoiceInput";
 import { useVoiceTalkMode } from "../../hooks/useVoiceTalkMode";
@@ -493,6 +495,31 @@ function getTruncatedTaskEventDetailId(event: TaskEvent): string | null {
 function getTaskEventPayloadRenderSignature(event: TaskEvent): string {
   const detailId = getTruncatedTaskEventDetailId(event);
   return detailId ? `truncated:${detailId}` : "full";
+}
+
+function isChatInlineFrame(value: unknown): value is ChatInlineFrame {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as { kind?: unknown }).kind === "mail_compose" &&
+    typeof (value as { draftId?: unknown }).draftId === "string"
+  );
+}
+
+function getTaskEventInlineFrames(event: TaskEvent): ChatInlineFrame[] {
+  const frames = (event.payload as { inlineFrames?: unknown } | undefined)?.inlineFrames;
+  return Array.isArray(frames) ? frames.filter(isChatInlineFrame) : [];
+}
+
+function getPreviousUserMessageText(events: TaskEvent[], beforeIndex: number): string {
+  for (let index = Math.min(beforeIndex - 1, events.length - 1); index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event || getEffectiveTaskEventType(event) !== "user_message") continue;
+    const message = event.payload?.message;
+    return typeof message === "string" ? message : "";
+  }
+  return "";
 }
 
 function AgentReasoningPanel(props: {
@@ -2466,6 +2493,8 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                 if (isAssistantMessage || isCompletionSummaryMessage) {
                   const messageText = isCompletionSummaryMessage ? completionSummaryText : event.payload?.message || "";
                   const cleanedMessageText = cleanAssistantMessageForDisplay(messageText);
+                  const inlineFrames = getTaskEventInlineFrames(event);
+                  const sourceUserMessage = getPreviousUserMessageText(events, item.eventIndex);
                   const quotedAssistantMessage = createQuotedAssistantMessage(
                     cleanedMessageText,
                     event.id,
@@ -2515,6 +2544,25 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                             />
                           </div>
                         </div>
+                        {(inlineFrames.length > 0 || (isAssistantMessage && event.id)) && (
+                          <div className="chat-inline-frames">
+                            {inlineFrames.map((frame) => (
+                              <MailComposeFrame
+                                key={`${frame.kind}:${frame.draftId}`}
+                                frame={frame}
+                              />
+                            ))}
+                            {inlineFrames.length === 0 && isLastAssistant && !isTaskWorking && (
+                              <AutoMailComposeFrame
+                                eventId={event.id}
+                                taskId={event.taskId}
+                                assistantMessage={cleanedMessageText}
+                                sourceUserMessage={sourceUserMessage}
+                                allowCreate={true}
+                              />
+                            )}
+                          </div>
+                        )}
                         <div className="message-actions">
                           <MessageCopyButton text={messageText} />
                           <MessageSpeakButton text={messageText} voiceEnabled={voiceEnabled} />

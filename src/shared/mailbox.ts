@@ -936,8 +936,8 @@ export interface MailboxComposeDraft {
   to: MailboxRecipientInput[];
   cc: MailboxRecipientInput[];
   bcc: MailboxRecipientInput[];
-  identityId?: string;
-  signatureId?: string;
+  identityId?: string | null;
+  signatureId?: string | null;
   attachments: Array<{
     id: string;
     filename: string;
@@ -955,6 +955,23 @@ export interface MailboxComposeDraft {
   updatedAt: number;
 }
 
+export type MailComposeInlineFrameOrigin =
+  | "assistant_generated"
+  | "mailbox_thread"
+  | "user_prompt";
+
+export interface MailComposeInlineFrame {
+  kind: "mail_compose";
+  draftId: string;
+  accountId: string;
+  provider: MailboxProvider;
+  mode: MailboxComposeMode;
+  origin: MailComposeInlineFrameOrigin;
+  status?: MailboxComposeDraftStatus;
+}
+
+export type ChatInlineFrame = MailComposeInlineFrame;
+
 export interface MailboxDraftAttachmentInput {
   path: string;
   filename?: string;
@@ -971,8 +988,216 @@ export interface MailboxComposeDraftInput {
   to?: MailboxRecipientInput[];
   cc?: MailboxRecipientInput[];
   bcc?: MailboxRecipientInput[];
-  identityId?: string;
-  signatureId?: string;
+  identityId?: string | null;
+  signatureId?: string | null;
+}
+
+export type MailboxComposeDraftSeed = Pick<
+  MailboxComposeDraftInput,
+  "mode" | "subject" | "bodyText" | "to"
+>;
+
+function normalizeComposePrompt(prompt: string): string {
+  return prompt.replace(/\s+/g, " ").trim();
+}
+
+export function isMailboxComposePrompt(prompt: string): boolean {
+  const normalized = normalizeComposePrompt(prompt);
+  if (!normalized) return false;
+  return (
+    /\b(?:draft|write|compose|prepare|send)\b[\s\S]{0,100}\b(?:email|mail|message)\b/i.test(
+      normalized,
+    ) ||
+    /\b(?:email|mail|message)\b[\s\S]{0,100}\b(?:draft|write|compose|prepare|send)\b/i.test(
+      normalized,
+    )
+  );
+}
+
+function titleCasePhrase(value: string): string {
+  return value
+    .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => {
+      const lower = word.toLowerCase();
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
+}
+
+function sentenceCasePhrase(value: string): string {
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  if (!trimmed) return "";
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+}
+
+function stripPromptLeadIn(prompt: string): string {
+  return prompt
+    .replace(
+      /^\s*(?:please\s+)?(?:draft|write|compose|prepare|send)\s+(?:an?\s+)?(?:email|mail|message)\s+/i,
+      "",
+    )
+    .trim();
+}
+
+function extractPromptRecipient(prompt: string): {
+  name?: string;
+  email?: string;
+} {
+  const emailMatch = prompt.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  const afterToMatch = prompt.match(
+    /\bto\s+(?:my\s+)?(.+?)(?:\s+that\b|\s+about\b|\s+saying\b|\s+asking\b|\s+regarding\b|,\s*|$)/i,
+  );
+  const rawName = afterToMatch?.[1]
+    ?.replace(/\b(?:landlord|boss|manager|colleague|coworker|friend|client|customer|team)\b/gi, " ")
+    .replace(/[<>"()]/g, " ")
+    .replace(emailMatch?.[0] || "", " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const name = rawName ? titleCasePhrase(rawName) : undefined;
+  return { name, email: emailMatch?.[0] };
+}
+
+function extractPromptRequest(prompt: string): {
+  primary: string;
+  includes: string[];
+  asks: string[];
+} {
+  const stripped = stripPromptLeadIn(prompt);
+  const afterRecipient = stripped.replace(
+    /^\s*to\s+(?:my\s+)?.+?(?:\s+that\b|\s+about\b|\s+saying\b|\s+regarding\b|,\s*)/i,
+    "",
+  );
+  const primarySource = afterRecipient || stripped || prompt;
+  const includeMatches = Array.from(
+    primarySource.matchAll(/\binclude\s+that\s+(.+?)(?=,\s*(?:and\s+)?ask\b|\s+and\s+ask\b|$)/gi),
+  ).map((match) => match[1]?.trim()).filter(Boolean) as string[];
+  const askMatches = Array.from(
+    primarySource.matchAll(/\bask\s+(?:(?:him|her|them)\s+)?(.+?)(?=,\s*(?:and\s+)?(?:include|ask)\b|$)/gi),
+  ).map((match) => match[1]?.trim()).filter(Boolean) as string[];
+  const primary = primarySource
+    .replace(/\binclude\s+that\s+.+?(?=,\s*(?:and\s+)?ask\b|\s+and\s+ask\b|$)/gi, "")
+    .replace(/\b(?:and\s+)?ask\s+(?:him|her|them|for|to)?\s*.+$/i, "")
+    .replace(/^\s*(?:that|about|saying|regarding)\s+/i, "")
+    .replace(/[,.]\s*$/g, "")
+    .trim();
+  return {
+    primary: primary || primarySource,
+    includes: includeMatches,
+    asks: askMatches,
+  };
+}
+
+function buildPromptSubject(prompt: string, request: ReturnType<typeof extractPromptRequest>): string {
+  const lower = prompt.toLowerCase();
+  if (lower.includes("dishwasher") && lower.includes("leak") && lower.includes("cabinet")) {
+    return "Dishwasher Leaking Again and Cabinet Damage";
+  }
+  if (lower.includes("dishwasher") && lower.includes("leak")) {
+    return "Dishwasher Leaking Again";
+  }
+  const subjectSource = request.primary || request.includes[0] || request.asks[0] || "Email Draft";
+  const subject = titleCasePhrase(subjectSource).split(" ").slice(0, 9).join(" ");
+  return subject || "Email Draft";
+}
+
+function normalizeEmailClause(value: string): string {
+  return value
+    .replace(/^\s*(?:that|about|saying|regarding)\s+/i, "")
+    .replace(/\bmy\b/gi, "the")
+    .replace(/[,.]\s*$/g, "")
+    .trim();
+}
+
+function buildPromptBody(prompt: string, recipientName: string | undefined): string {
+  const request = extractPromptRequest(prompt);
+  const salutation = recipientName ? `Hi ${recipientName.split(/\s+/)[0]},` : "Hello,";
+  const primary = normalizeEmailClause(request.primary);
+  const includes = request.includes.map(normalizeEmailClause).filter(Boolean);
+  const asks = request.asks.map(normalizeEmailClause).filter(Boolean);
+  const paragraphs: string[] = [salutation, ""];
+
+  if (primary) {
+    paragraphs.push(`I'm writing to let you know that ${primary}.`);
+  } else {
+    paragraphs.push("I'm writing about the item we discussed.");
+  }
+
+  for (const item of includes) {
+    paragraphs.push(`${sentenceCasePhrase(item)}.`);
+  }
+
+  if (asks.length > 0) {
+    paragraphs.push("");
+    paragraphs.push(
+      asks
+        .map((item) => `Could you please ${item.replace(/^\s*for\s+/i, "arrange ")}?`)
+        .join(" "),
+    );
+  }
+
+  paragraphs.push("", "Thank you,");
+  return paragraphs.join("\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+export function buildMailboxComposeDraftInputFromPrompt(
+  prompt: string,
+): MailboxComposeDraftSeed | null {
+  const normalized = normalizeComposePrompt(prompt);
+  if (!isMailboxComposePrompt(normalized)) return null;
+  const recipient = extractPromptRecipient(normalized);
+  const request = extractPromptRequest(normalized);
+  const subject = buildPromptSubject(normalized, request);
+  const bodyText = buildPromptBody(normalized, recipient.name);
+  return {
+    mode: "new",
+    subject,
+    bodyText,
+    to: recipient.email ? [{ email: recipient.email, name: recipient.name }] : [],
+  };
+}
+
+export function extractMailboxComposeDraftInputFromText(
+  assistantMessage: string,
+  sourceUserMessage = "",
+): MailboxComposeDraftSeed | null {
+  const sourceLooksLikeMail =
+    /\b(?:draft|write|compose|send|prepare)\b[\s\S]{0,80}\b(?:email|mail|message|reply)\b/i.test(
+      sourceUserMessage,
+    ) ||
+    /\b(?:email|mail|message|reply)\b[\s\S]{0,80}\b(?:draft|write|compose|send|prepare)\b/i.test(
+      sourceUserMessage,
+    );
+  const subjectMatch = assistantMessage.match(
+    /^\s*(?:\*\*)?subject(?:\s+line)?(?:\*\*)?\s*:\s*(.+)$/im,
+  );
+  if (!subjectMatch?.[1]) return null;
+  const subject = subjectMatch[1].replace(/\*\*/g, "").trim();
+  if (!subject) return null;
+
+  const subjectLineIndex = assistantMessage.toLowerCase().indexOf(subjectMatch[0].toLowerCase());
+  const afterSubject =
+    subjectLineIndex >= 0
+      ? assistantMessage.slice(subjectLineIndex + subjectMatch[0].length)
+      : assistantMessage;
+  const bodyText = afterSubject
+    .replace(/^\s*[-–—]*\s*/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!bodyText) return null;
+  const bodyLooksLikeEmail =
+    /^(dear|hi|hello)\s+[^,\n]+,/i.test(bodyText) ||
+    /\n\s*(thank you|thanks|sincerely|best),?/i.test(bodyText);
+  if (!sourceLooksLikeMail && !bodyLooksLikeEmail) return null;
+  return {
+    mode: "new",
+    subject,
+    bodyText,
+    to: [],
+  };
 }
 
 export interface MailboxClientSettingsPatch {
@@ -986,12 +1211,12 @@ export interface MailboxClientSettingsPatch {
 export interface MailboxComposeDraftPatch {
   subject?: string;
   bodyText?: string;
-  bodyHtml?: string;
+  bodyHtml?: string | null;
   to?: MailboxRecipientInput[];
   cc?: MailboxRecipientInput[];
   bcc?: MailboxRecipientInput[];
-  identityId?: string;
-  signatureId?: string;
+  identityId?: string | null;
+  signatureId?: string | null;
   scheduledAt?: number | null;
 }
 

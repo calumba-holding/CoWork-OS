@@ -125,6 +125,40 @@ describe("appendRendererTaskEvents", () => {
     expect(result[1].type).toBe("progress_update");
   });
 
+  it("replaces existing events by ID when re-emitted with updated payload", () => {
+    const original = makeEvent({
+      id: "evt-123",
+      taskId: "t1",
+      type: "assistant_message",
+      timestamp: 1,
+      payload: { message: "Here is a draft." },
+    });
+    const updated = makeEvent({
+      id: "evt-123",
+      taskId: "t1",
+      type: "assistant_message",
+      timestamp: 1,
+      payload: {
+        message: "Here is a draft.",
+        inlineFrames: [{ kind: "mail_compose", draftId: "d1" }],
+      },
+    });
+    const result = appendRendererTaskEvents([original], [updated]);
+    expect(result).toHaveLength(1);
+    expect((result[0].payload as Record<string, unknown>).inlineFrames).toBeDefined();
+  });
+
+  it("appends event with new ID that does not match any existing event", () => {
+    const prev = [
+      makeEvent({ id: "evt-1", taskId: "t1", type: "user_message", timestamp: 1 }),
+    ];
+    const incoming = [
+      makeEvent({ id: "evt-2", taskId: "t1", type: "assistant_message", timestamp: 2 }),
+    ];
+    const result = appendRendererTaskEvents(prev, incoming);
+    expect(result).toHaveLength(2);
+  });
+
   it("handles mixed replaceable and non-replaceable incoming events", () => {
     const existing = makeEvent({
       taskId: "t1",

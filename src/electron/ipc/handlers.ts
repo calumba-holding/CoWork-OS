@@ -3511,6 +3511,13 @@ export async function setupIpcHandlers(
     return mailboxService.getMailboxClientState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_GET_DRAFT, async (event, data?: Any) => {
+    assertTrustedMailboxSender(event);
+    const draftId = typeof data?.draftId === "string" ? data.draftId : "";
+    if (!draftId) throw new Error("Missing mailbox draft id");
+    return mailboxService.getMailboxDraft(draftId);
+  });
+
   ipcMain.handle(
     IPC_CHANNELS.MAILBOX_SYNC,
     async (event, data?: { limit?: number; source?: "auto" | "manual" }) => {

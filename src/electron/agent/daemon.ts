@@ -165,6 +165,11 @@ import { buildEntropySweepPrompt, collectBlastRadiusPaths } from "./post-task-en
 import { OrchestrationGraphEngine, type OrchestrationGraphNodeInput } from "./orchestration/OrchestrationGraphEngine";
 import { OrchestrationGraphRepository } from "./orchestration/OrchestrationGraphRepository";
 import { MCPClientManager } from "../mcp/client/MCPClientManager";
+import { getMailboxServiceInstance } from "../mailbox/MailboxService";
+import {
+  extractMailboxComposeDraftInputFromText,
+  type ChatInlineFrame,
+} from "../../shared/mailbox";
 
 export interface AgentDaemonOptions {
   startupRecovery?: boolean;
@@ -435,6 +440,8 @@ export class AgentDaemon extends EventEmitter {
   private evidenceRefsByTask: Map<string, Map<string, EvidenceRef>> = new Map();
   private mediaPreviewMessagesByTask: Map<string, Set<string>> = new Map();
   private lastKnownLlmProviderByTask: Map<string, string> = new Map();
+  private materializedMailComposeFrameSignatures: Set<string> = new Set();
+  private materializedMailComposeFrameTasks: Set<string> = new Set();
   private timelineMetrics = {
     totalEvents: 0,
     droppedEvents: 0,
@@ -5518,6 +5525,97 @@ export class AgentDaemon extends EventEmitter {
     return Array.from((this.evidenceRefsByTask.get(taskId) || new Map()).values());
   }
 
+  private maybeMaterializeMailComposeInlineFrame(
+    event: TaskEvent,
+    effectiveType: string | undefined,
+    task: Task | undefined,
+  ): void {
+    if (
+      effectiveType !== "assistant_message" &&
+      effectiveType !== "task_completed"
+    ) {
+      return;
+    }
+    const payload =
+      event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+        ? (event.payload as Record<string, unknown>)
+        : {};
+    if (Array.isArray(payload.inlineFrames) && payload.inlineFrames.length > 0) return;
+    if (this.materializedMailComposeFrameTasks.has(event.taskId)) return;
+    if (effectiveType === "assistant_message" && payload.internal === true) return;
+
+    const message =
+      effectiveType === "task_completed"
+        ? typeof payload.resultSummary === "string"
+          ? payload.resultSummary
+          : ""
+        : typeof payload.message === "string"
+          ? payload.message
+          : "";
+    if (!message.trim()) return;
+
+    const sourceTask = task || this.taskRepo.findById(event.taskId);
+    const sourceUserMessage = [
+      typeof (sourceTask as Any)?.rawPrompt === "string" ? (sourceTask as Any).rawPrompt : "",
+      typeof (sourceTask as Any)?.userPrompt === "string" ? (sourceTask as Any).userPrompt : "",
+      typeof sourceTask?.prompt === "string" ? sourceTask.prompt : "",
+      typeof sourceTask?.title === "string" ? sourceTask.title : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const draftInput = extractMailboxComposeDraftInputFromText(message, sourceUserMessage);
+    if (!draftInput) return;
+
+    const signature = crypto
+      .createHash("sha1")
+      .update([event.taskId, effectiveType, draftInput.subject || "", draftInput.bodyText || ""].join("\n"))
+      .digest("hex");
+    if (this.materializedMailComposeFrameSignatures.has(signature)) return;
+    this.materializedMailComposeFrameSignatures.add(signature);
+    this.materializedMailComposeFrameTasks.add(event.taskId);
+
+    const mailboxService = getMailboxServiceInstance();
+    if (!mailboxService) {
+      log.warn("[mail-compose-frame] Mailbox service unavailable while materializing inline frame");
+      this.materializedMailComposeFrameSignatures.delete(signature);
+      this.materializedMailComposeFrameTasks.delete(event.taskId);
+      return;
+    }
+
+    void (async () => {
+      try {
+        const draft = await mailboxService.createMailboxDraft(draftInput);
+        const clientState = await mailboxService.getMailboxClientState();
+        const account = clientState.accounts.find((candidate) => candidate.id === draft.accountId);
+        const frame: ChatInlineFrame = {
+          kind: "mail_compose",
+          draftId: draft.id,
+          accountId: draft.accountId,
+          provider: account?.provider || "gmail",
+          mode: draft.mode,
+          origin: "assistant_generated",
+          status: draft.status,
+        };
+        const nextPayload = {
+          ...payload,
+          inlineFrames: [frame],
+        };
+        this.eventRepo.updatePayloadById(event.id, nextPayload);
+        this.emitTaskEvent({
+          ...event,
+          payload: nextPayload,
+        });
+        log.info(
+          `[mail-compose-frame] Materialized compose draft ${draft.id} for task ${event.taskId} from ${effectiveType}`,
+        );
+      } catch (error) {
+        this.materializedMailComposeFrameSignatures.delete(signature);
+        this.materializedMailComposeFrameTasks.delete(event.taskId);
+        log.warn("[mail-compose-frame] Failed to materialize compose draft:", error);
+      }
+    })();
+  }
+
   private persistTimelineEvent(
     event: TaskEvent,
     options: {
@@ -5550,6 +5648,7 @@ export class AgentDaemon extends EventEmitter {
     ) as Record<string, unknown>;
 
     const task = this.taskRepo.findById(event.taskId);
+    this.maybeMaterializeMailComposeInlineFrame(storedEvent, effectiveType, task);
     if (task && effectiveType === "llm_usage") {
       const usagePayload = storedLegacyPayload as {
         providerType?: string;

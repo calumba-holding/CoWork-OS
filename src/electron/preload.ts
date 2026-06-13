@@ -2262,6 +2262,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   extractMailboxAttachmentText: (attachmentId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_ATTACHMENT_EXTRACT_TEXT, { attachmentId }) as Promise<MailboxAttachmentRecord>,
+  getMailboxDraft: (draftId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_GET_DRAFT, { draftId }) as Promise<MailboxComposeDraft | null>,
   createMailboxDraft: (input: MailboxComposeDraftInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_CREATE_DRAFT, input) as Promise<MailboxComposeDraft>,
   updateMailboxDraft: (draftId: string, patch: MailboxComposeDraftPatch) =>
@@ -5119,6 +5121,7 @@ export interface ElectronAPI {
   askMailbox: (input: MailboxAskInput) => Promise<MailboxAskResult>;
   onMailboxAskEvent: (callback: (event: MailboxAskRunEvent) => void) => () => void;
   extractMailboxAttachmentText: (attachmentId: string) => Promise<MailboxAttachmentRecord>;
+  getMailboxDraft: (draftId: string) => Promise<MailboxComposeDraft | null>;
   createMailboxDraft: (input: MailboxComposeDraftInput) => Promise<MailboxComposeDraft>;
   updateMailboxDraft: (draftId: string, patch: MailboxComposeDraftPatch) => Promise<MailboxComposeDraft>;
   addMailboxDraftAttachment: (draftId: string, input: MailboxDraftAttachmentInput) => Promise<MailboxComposeDraft>;
