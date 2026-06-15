@@ -6,6 +6,7 @@ export type ReplaySpeed = 1 | 2 | 5 | 10;
 export interface ReplayControls {
   isReplayMode: boolean;
   isPlaying: boolean;
+  areControlsVisible: boolean;
   replayIndex: number;
   totalEvents: number;
   speed: ReplaySpeed;
@@ -14,6 +15,8 @@ export interface ReplayControls {
   pause: () => void;
   resume: () => void;
   reset: () => void;
+  hideControls: () => void;
+  showControls: () => void;
   setSpeed: (s: ReplaySpeed) => void;
 }
 
@@ -28,6 +31,7 @@ function clamp(value: number, min: number, max: number): number {
 export function useReplayMode(events: TaskEvent[], task: Task | undefined): ReplayControls {
   const [isReplayMode, setIsReplayMode] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [areControlsVisible, setAreControlsVisible] = useState(true);
   const [replayIndex, setReplayIndex] = useState(0);
   const [speed, setSpeedState] = useState<ReplaySpeed>(1);
 
@@ -53,6 +57,7 @@ export function useReplayMode(events: TaskEvent[], task: Task | undefined): Repl
     }
     setIsReplayMode(false);
     setIsPlaying(false);
+    setAreControlsVisible(true);
     setReplayIndex(0);
   }, [taskId]);
 
@@ -127,6 +132,7 @@ export function useReplayMode(events: TaskEvent[], task: Task | undefined): Repl
     replayIndexRef.current = 0;
     setIsReplayMode(true);
     setIsPlaying(true);
+    setAreControlsVisible(true);
     isPlayingRef.current = true;
   }, [task]);
 
@@ -158,6 +164,14 @@ export function useReplayMode(events: TaskEvent[], task: Task | undefined): Repl
     speedRef.current = s;
   }, []);
 
+  const hideControls = useCallback(() => {
+    setAreControlsVisible(false);
+  }, []);
+
+  const showControls = useCallback(() => {
+    setAreControlsVisible(true);
+  }, []);
+
   const replayEvents = useMemo(
     () => (isReplayMode ? events.slice(0, replayIndex) : events),
     [isReplayMode, events, replayIndex],
@@ -166,6 +180,7 @@ export function useReplayMode(events: TaskEvent[], task: Task | undefined): Repl
   return {
     isReplayMode,
     isPlaying,
+    areControlsVisible,
     replayIndex,
     totalEvents: events.length,
     speed,
@@ -174,6 +189,8 @@ export function useReplayMode(events: TaskEvent[], task: Task | undefined): Repl
     pause,
     resume,
     reset,
+    hideControls,
+    showControls,
     setSpeed,
   };
 }

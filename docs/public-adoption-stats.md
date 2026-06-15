@@ -86,6 +86,12 @@ These numbers are acquisition and download-intent signals for CoWork OS. They do
 | 9 | /CoWork-OS/CoWork-OS/pulls | 20 | 15 |
 | 10 | /CoWork-OS/CoWork-OS/tree/main/resources/skills/taste-skill | 14 | 12 |
 
+## Documentation Follow-up
+
+Heartbeat run `2e973eac-c4a0-4fdd-8bd5-af36d5cb64e6` reviewed this snapshot against the current project-management context using the repository copy from `main` as an alternative input source.
+
+No immediate product documentation follow-up is required from this stats snapshot alone. The file already states the core interpretation boundaries: these are public acquisition and download-intent signals, not active usage, retention, task success, model configuration, or telemetry. Keep future website or launch-material references aligned with that framing, and consume `data/adoption/public-stats-latest.json` for implementation work.
+
 ## Data Policy
 
 - This report uses GitHub repository, release, traffic, and npm download APIs.

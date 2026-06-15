@@ -132,6 +132,7 @@ import {
   Square,
   ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Clock,
   X,
@@ -9618,12 +9619,22 @@ function MainContentComponent({
                       Replay
                     </button>
                   )}
+                {replayControls?.isReplayMode && !replayControls.areControlsVisible && (
+                  <button
+                    className="replay-entry-btn"
+                    onClick={replayControls.showControls}
+                    title="Show replay controls"
+                  >
+                    <SlidersHorizontal aria-hidden="true" />
+                    Replay controls
+                  </button>
+                )}
               </div>
             </div>
           )}
 
           {/* Replay controls bar — shown when replay mode is active */}
-          {replayControls?.isReplayMode && (
+          {replayControls?.isReplayMode && replayControls.areControlsVisible && (
             <ReplayControlsBar controls={replayControls} />
           )}
 

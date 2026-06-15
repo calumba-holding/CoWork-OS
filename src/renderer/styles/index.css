@@ -3593,6 +3593,8 @@ a,
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .replay-btn {
@@ -3624,6 +3626,14 @@ a,
 .replay-btn-play:hover {
   background: var(--color-accent-subtle);
   color: var(--color-accent-hover);
+}
+
+.replay-btn-hide {
+  width: 26px;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
+  margin-left: 4px;
 }
 
 .replay-step-counter {

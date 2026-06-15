@@ -1,3 +1,4 @@
+import { X } from "lucide-react";
 import type { ReplayControls, ReplaySpeed } from "../hooks/useReplayMode";
 
 const SPEEDS: ReplaySpeed[] = [1, 2, 5, 10];
@@ -17,6 +18,7 @@ export function ReplayControlsBar({ controls }: ReplayControlsBarProps) {
     reset,
     startReplay,
     setSpeed,
+    hideControls,
   } = controls;
 
   const isComplete = replayIndex >= totalEvents;
@@ -95,6 +97,15 @@ export function ReplayControlsBar({ controls }: ReplayControlsBarProps) {
               {s}×
             </button>
           ))}
+          <button
+            type="button"
+            className="replay-btn replay-btn-hide"
+            onClick={hideControls}
+            title="Hide replay controls"
+            aria-label="Hide replay controls"
+          >
+            <X size={13} strokeWidth={2} />
+          </button>
         </div>
       </div>
     </div>
