@@ -2108,7 +2108,8 @@ export class ToolRegistry {
     );
     register(
       "drag",
-      async ({ request }) => this.computerUseTools.drag(request.input.path, request.input.captureId),
+      async ({ request }) =>
+        this.computerUseTools.drag(request.input.path, request.input.captureId),
       serialSchedulerSpec,
     );
     register(
@@ -2125,12 +2126,14 @@ export class ToolRegistry {
     );
     register(
       "type_text",
-      async ({ request }) => this.computerUseTools.typeText(request.input.text),
+      async ({ request }) =>
+        this.computerUseTools.typeText(request.input.text),
       serialSchedulerSpec,
     );
     register(
       "keypress",
-      async ({ request }) => this.computerUseTools.pressKeys(request.input.keys),
+      async ({ request }) =>
+        this.computerUseTools.pressKeys(request.input.keys),
       serialSchedulerSpec,
     );
     register(
@@ -3697,7 +3700,8 @@ ${skillDescriptions}`;
       return await this.computerUseTools.doubleClick(input.x, input.y, input.captureId);
     if (name === "move_mouse")
       return await this.computerUseTools.moveMouse(input.x, input.y, input.captureId);
-    if (name === "drag") return await this.computerUseTools.drag(input.path, input.captureId);
+    if (name === "drag")
+      return await this.computerUseTools.drag(input.path, input.captureId);
     if (name === "scroll")
       return await this.computerUseTools.scroll(
         input.x,
@@ -3706,8 +3710,10 @@ ${skillDescriptions}`;
         input.scrollY,
         input.captureId,
       );
-    if (name === "type_text") return await this.computerUseTools.typeText(input.text);
-    if (name === "keypress") return await this.computerUseTools.pressKeys(input.keys);
+    if (name === "type_text")
+      return await this.computerUseTools.typeText(input.text);
+    if (name === "keypress")
+      return await this.computerUseTools.pressKeys(input.keys);
     if (name === "wait") return await this.computerUseTools.wait(input.ms);
 
     // Batch image processing

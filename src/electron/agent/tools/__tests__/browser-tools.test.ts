@@ -1,9 +1,14 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { BrowserTools } from "../browser-tools";
 import { GuardrailManager } from "../../../guardrails/guardrail-manager";
+import { BuiltinToolsSettingsManager } from "../builtin-settings";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("BrowserTools browser_navigate", () => {
   const workspace = {
@@ -22,6 +27,7 @@ describe("BrowserTools browser_navigate", () => {
     const daemon = {
       logEvent: vi.fn(),
       registerArtifact: vi.fn(),
+      requestApproval: vi.fn(),
     } as Any;
 
     return {
@@ -72,7 +78,7 @@ describe("BrowserTools browser_navigate", () => {
     expect(result.status).toBe(200);
   });
 
-  it("uses the visible in-app browser workbench by default when available", async () => {
+  it("uses headless Playwright by default even when the visible workbench service is available", async () => {
     const browserWorkbenchService = {
       getSession: vi.fn().mockReturnValue(null),
       navigate: vi.fn().mockResolvedValue({
@@ -86,7 +92,12 @@ describe("BrowserTools browser_navigate", () => {
     const { tools } = makeTools(browserWorkbenchService);
     const headlessNavigate = vi.fn();
     (tools as Any).browserService = {
-      navigate: headlessNavigate,
+      navigate: headlessNavigate.mockResolvedValue({
+        url: "https://example.com",
+        title: "Example Domain",
+        status: 200,
+        isError: false,
+      }),
       close: vi.fn(),
     };
 
@@ -95,14 +106,8 @@ describe("BrowserTools browser_navigate", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.visible).toBe(true);
-    expect(browserWorkbenchService.navigate).toHaveBeenCalledWith({
-      taskId: "task-1",
-      sessionId: undefined,
-      url: "https://example.com",
-      waitUntil: "load",
-    });
-    expect(headlessNavigate).not.toHaveBeenCalled();
+    expect(browserWorkbenchService.navigate).not.toHaveBeenCalled();
+    expect(headlessNavigate).toHaveBeenCalled();
   });
 
   it("keeps using an active visible workbench when profile options are supplied later", async () => {
@@ -145,7 +150,11 @@ describe("BrowserTools browser_navigate", () => {
     expect(headlessNavigate).not.toHaveBeenCalled();
   });
 
-  it("ignores the legacy headless flag for normal visible workbench routing", async () => {
+  it("uses the visible workbench when visible mode is enabled", async () => {
+    vi.spyOn(BuiltinToolsSettingsManager, "getComputerUseAutomationSettings").mockReturnValue({
+      browserAutomationMode: "visible",
+      nativeComputerUseMode: "background_first",
+    });
     const browserWorkbenchService = {
       getSession: vi.fn().mockReturnValue(null),
       navigate: vi.fn().mockResolvedValue({
@@ -164,13 +173,88 @@ describe("BrowserTools browser_navigate", () => {
 
     const result = await tools.executeTool("browser_navigate", {
       url: "https://example.com",
-      headless: true,
     });
 
     expect(result.success).toBe(true);
     expect(result.visible).toBe(true);
+    expect(browserWorkbenchService.navigate).toHaveBeenCalledWith({
+      taskId: "task-1",
+      sessionId: undefined,
+      url: "https://example.com",
+      waitUntil: "load",
+    });
+    expect((tools as Any).browserService.navigate).not.toHaveBeenCalled();
+  });
+
+  it("asks before opening the visible workbench in ask mode", async () => {
+    vi.spyOn(BuiltinToolsSettingsManager, "getComputerUseAutomationSettings").mockReturnValue({
+      browserAutomationMode: "ask",
+      nativeComputerUseMode: "background_first",
+    });
+    const browserWorkbenchService = {
+      getSession: vi.fn().mockReturnValue(null),
+      navigate: vi.fn().mockResolvedValue({
+        success: true,
+        url: "https://example.com",
+        title: "Example Domain",
+        status: null,
+        visible: true,
+      }),
+    };
+    const { tools, daemon } = makeTools(browserWorkbenchService);
+    daemon.requestApproval.mockResolvedValue(true);
+    (tools as Any).browserService = {
+      navigate: vi.fn(),
+      close: vi.fn(),
+    };
+
+    const result = await tools.executeTool("browser_navigate", {
+      url: "https://example.com",
+      visible: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.visible).toBe(true);
+    expect(daemon.requestApproval).toHaveBeenCalledWith(
+      "task-1",
+      "browser",
+      expect.stringContaining("visible browser workbench"),
+      expect.objectContaining({ kind: "browser_visible_workbench", tool: "browser_navigate" }),
+      { allowAutoApprove: false },
+    );
     expect(browserWorkbenchService.navigate).toHaveBeenCalled();
     expect((tools as Any).browserService.navigate).not.toHaveBeenCalled();
+  });
+
+  it("uses headless Playwright when visible workbench ask mode is denied", async () => {
+    vi.spyOn(BuiltinToolsSettingsManager, "getComputerUseAutomationSettings").mockReturnValue({
+      browserAutomationMode: "ask",
+      nativeComputerUseMode: "background_first",
+    });
+    const browserWorkbenchService = {
+      getSession: vi.fn().mockReturnValue(null),
+      navigate: vi.fn(),
+    };
+    const { tools, daemon } = makeTools(browserWorkbenchService);
+    daemon.requestApproval.mockResolvedValue(false);
+    (tools as Any).browserService = {
+      navigate: vi.fn().mockResolvedValue({
+        url: "https://example.com",
+        title: "Example Domain",
+        status: 200,
+        isError: false,
+      }),
+      close: vi.fn(),
+    };
+
+    const result = await tools.executeTool("browser_navigate", {
+      url: "https://example.com",
+      visible: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(browserWorkbenchService.navigate).not.toHaveBeenCalled();
+    expect((tools as Any).browserService.navigate).toHaveBeenCalled();
   });
 
   it("uses headless Playwright when forced", async () => {

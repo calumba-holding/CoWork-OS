@@ -39,6 +39,10 @@ interface BuiltinToolsSettingsData {
   toolAutoApprove: Record<string, boolean>;
   runCommandApprovalMode: "per_command" | "single_bundle";
   codexRuntimeMode: "native" | "acpx";
+  computerUseAutomation: {
+    browserAutomationMode: "background" | "visible" | "ask";
+    nativeComputerUseMode: "background_first" | "ask_visible" | "visible";
+  };
   version: string;
 }
 
@@ -159,7 +163,16 @@ export function BuiltinToolsSettings() {
           };
         }
       }
-      setSettings({ ...loadedSettings, categories: mergedCategories });
+      setSettings({
+        ...loadedSettings,
+        categories: mergedCategories,
+        computerUseAutomation: {
+          browserAutomationMode:
+            loadedSettings.computerUseAutomation?.browserAutomationMode || "background",
+          nativeComputerUseMode:
+            loadedSettings.computerUseAutomation?.nativeComputerUseMode || "background_first",
+        },
+      });
       setCategories(loadedCategories);
     } catch (error) {
       console.error("Failed to load built-in tools settings:", error);
@@ -319,6 +332,54 @@ export function BuiltinToolsSettings() {
     }
   };
 
+  const handleBrowserAutomationMode = async (mode: "background" | "visible" | "ask") => {
+    if (!settings) return;
+
+    const newSettings = {
+      ...settings,
+      computerUseAutomation: {
+        ...settings.computerUseAutomation,
+        browserAutomationMode: mode,
+      },
+    };
+
+    setSettings(newSettings);
+
+    try {
+      setSaving(true);
+      await window.electronAPI.saveBuiltinToolsSettings(newSettings);
+    } catch (error) {
+      console.error("Failed to save settings:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleNativeComputerUseMode = async (
+    mode: "background_first" | "ask_visible" | "visible",
+  ) => {
+    if (!settings) return;
+
+    const newSettings = {
+      ...settings,
+      computerUseAutomation: {
+        ...settings.computerUseAutomation,
+        nativeComputerUseMode: mode,
+      },
+    };
+
+    setSettings(newSettings);
+
+    try {
+      setSaving(true);
+      await window.electronAPI.saveBuiltinToolsSettings(newSettings);
+    } catch (error) {
+      console.error("Failed to save settings:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleToolToggle = async (tool: string, enabled: boolean) => {
     if (!settings) return;
 
@@ -327,7 +388,7 @@ export function BuiltinToolsSettings() {
       toolOverrides: {
         ...settings.toolOverrides,
         [tool]: {
-          ...(settings.toolOverrides?.[tool] || {}),
+          ...settings.toolOverrides?.[tool],
           enabled,
         },
       },
@@ -375,6 +436,10 @@ export function BuiltinToolsSettings() {
             category === "shell" ? settings.runCommandApprovalMode : "per_command";
           const runCommandTimeout =
             category === "shell" ? (settings.toolTimeouts?.run_command ?? "") : "";
+          const browserAutomationMode =
+            settings.computerUseAutomation?.browserAutomationMode || "background";
+          const nativeComputerUseMode =
+            settings.computerUseAutomation?.nativeComputerUseMode || "background_first";
 
           return (
             <div
@@ -516,6 +581,57 @@ export function BuiltinToolsSettings() {
                       disabled={!config.enabled}
                       placeholder="30000"
                     />
+                  </div>
+                </div>
+              )}
+
+              {category === "computer_use" && expandedCategory === category && (
+                <div className="builtin-tool-advanced">
+                  <div className="builtin-tool-advanced-row">
+                    <div className="builtin-tool-advanced-text">
+                      <div className="builtin-tool-advanced-label">Browser automation</div>
+                      <div className="builtin-tool-advanced-hint">
+                        Background uses headless browser control unless a task already has a visible
+                        browser session.
+                      </div>
+                    </div>
+                    <select
+                      className="builtin-tool-mode-select"
+                      value={browserAutomationMode}
+                      onChange={(e) =>
+                        handleBrowserAutomationMode(
+                          e.target.value as "background" | "visible" | "ask",
+                        )
+                      }
+                      disabled={!config.enabled}
+                    >
+                      <option value="background">Background (Recommended)</option>
+                      <option value="visible">Visible workbench</option>
+                      <option value="ask">Ask</option>
+                    </select>
+                  </div>
+
+                  <div className="builtin-tool-advanced-row">
+                    <div className="builtin-tool-advanced-text">
+                      <div className="builtin-tool-advanced-label">Native desktop control</div>
+                      <div className="builtin-tool-advanced-hint">
+                        Background first tries Accessibility actions before visible Mac control.
+                      </div>
+                    </div>
+                    <select
+                      className="builtin-tool-mode-select"
+                      value={nativeComputerUseMode}
+                      onChange={(e) =>
+                        handleNativeComputerUseMode(
+                          e.target.value as "background_first" | "ask_visible" | "visible",
+                        )
+                      }
+                      disabled={!config.enabled}
+                    >
+                      <option value="background_first">Background first (Recommended)</option>
+                      <option value="ask_visible">Ask before visible control</option>
+                      <option value="visible">Visible control</option>
+                    </select>
                   </div>
                 </div>
               )}

@@ -170,7 +170,7 @@ describe("evaluateToolAvailability computer_use", () => {
       taskText: "Open https://example.com and click the sign in button.",
     });
     expect(r.decision).toBe("defer");
-    expect(r.reason).toBe("computer_use_intent_missing");
+    expect(r.reason).toBe("prefer_browser_background_for_web_surface");
   });
 
   it("allows screen_context_resolve for vague on-screen references", () => {

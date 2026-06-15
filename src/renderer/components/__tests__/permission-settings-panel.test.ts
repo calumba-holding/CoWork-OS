@@ -66,6 +66,10 @@ describe("PermissionSettingsPanel helpers", () => {
         toolAutoApprove: {},
         runCommandApprovalMode: "per_command",
         codexRuntimeMode: "native",
+        computerUseAutomation: {
+          browserAutomationMode: "background",
+          nativeComputerUseMode: "background_first",
+        },
         version: "1.0.0",
       },
     );
@@ -109,6 +113,10 @@ describe("PermissionSettingsPanel helpers", () => {
         toolAutoApprove: {},
         runCommandApprovalMode: "single_bundle",
         codexRuntimeMode: "native",
+        computerUseAutomation: {
+          browserAutomationMode: "background",
+          nativeComputerUseMode: "background_first",
+        },
         version: "1.0.0",
       },
     );

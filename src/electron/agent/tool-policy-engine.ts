@@ -485,6 +485,9 @@ export function evaluateToolAvailability(
           : { decision: "defer", reason: "screen_context_intent_missing", metadata };
       }
       if (isComputerUseToolName(normalizedToolName)) {
+        if (WEB_SURFACE_PATTERN.test(taskText) && !COMPUTER_USE_INTENT_PATTERN.test(taskText)) {
+          return { decision: "defer", reason: "prefer_browser_background_for_web_surface", metadata };
+        }
         return hasNativeDesktopGuiIntent(taskText) || ctx.taskDomain === "operations"
           ? { decision: "allow", metadata }
           : { decision: "defer", reason: "computer_use_intent_missing", metadata };

@@ -19,6 +19,7 @@ import {
 } from "../../browser/browser-workbench-service";
 import { normalizeBrowserUrl } from "../../browser/browser-session-manager";
 import { evaluateNetworkPolicy } from "../../security/network-policy";
+import { BuiltinToolsSettingsManager } from "./builtin-settings";
 
 // oxlint-disable-next-line typescript-eslint/no-explicit-any
 type Any = any;
@@ -57,6 +58,7 @@ export class BrowserTools {
   };
   private browserUseCloudClient: BrowserUseCloudClient | null = null;
   private browserUseCloudSession: BrowserUseCloudSessionState | null = null;
+  private visibleWorkbenchApprovals = new Set<string>();
 
   constructor(
     private workspace: Workspace,
@@ -176,6 +178,8 @@ export class BrowserTools {
   private shouldPreferVisibleWorkbench(input: unknown): boolean {
     const toolInput = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
     if (this.getRequestedBrowserProvider(input) === "browser-use-cloud") return false;
+    const automationMode =
+      BuiltinToolsSettingsManager.getComputerUseAutomationSettings().browserAutomationMode;
     const forceHeadless =
       toolInput.force_headless === true ||
       toolInput.mode === "headless" ||
@@ -184,10 +188,75 @@ export class BrowserTools {
     if (forceHeadless) return false;
     if (typeof toolInput.debugger_url === "string" && toolInput.debugger_url.trim()) return false;
     if (this.hasVisibleWorkbenchSession(input)) return true;
+    if (automationMode === "background") return false;
+    if (automationMode === "ask") return false;
+    if (typeof toolInput.profile === "string" && toolInput.profile.trim()) return false;
+    if (typeof toolInput.browser_channel === "string" && toolInput.browser_channel.trim()) return false;
+    if (this.browserState.profile || this.browserState.debuggerUrl) return false;
+    return automationMode === "visible";
+  }
+
+  private hasExplicitVisibleWorkbenchRequest(input: unknown): boolean {
+    const toolInput = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+    return toolInput.browser_surface === "visible" || toolInput.visible === true;
+  }
+
+  private canStartVisibleWorkbench(input: unknown): boolean {
+    const toolInput = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+    if (this.getRequestedBrowserProvider(input) === "browser-use-cloud") return false;
+    if (
+      toolInput.force_headless === true ||
+      toolInput.mode === "headless" ||
+      toolInput.visible === false ||
+      toolInput.browser_surface === "headless"
+    ) {
+      return false;
+    }
+    if (typeof toolInput.debugger_url === "string" && toolInput.debugger_url.trim()) return false;
     if (typeof toolInput.profile === "string" && toolInput.profile.trim()) return false;
     if (typeof toolInput.browser_channel === "string" && toolInput.browser_channel.trim()) return false;
     if (this.browserState.profile || this.browserState.debuggerUrl) return false;
     return true;
+  }
+
+  private visibleWorkbenchApprovalKey(input: unknown): string {
+    return this.getSessionId(input) || "default";
+  }
+
+  private async requestVisibleWorkbenchApproval(input: unknown, url: string): Promise<boolean> {
+    const key = this.visibleWorkbenchApprovalKey(input);
+    if (this.visibleWorkbenchApprovals.has(key)) return true;
+    const requester = (this.daemon as Any)?.requestApproval;
+    if (typeof requester !== "function") return false;
+    const approved = await requester.call(
+      this.daemon,
+      this.taskId,
+      "browser",
+      "Open a visible browser workbench for this task?",
+      {
+        kind: "browser_visible_workbench",
+        tool: "browser_navigate",
+        url,
+        sessionId: key,
+      },
+      { allowAutoApprove: false },
+    );
+    if (approved) {
+      this.visibleWorkbenchApprovals.add(key);
+    }
+    return approved;
+  }
+
+  private async shouldUseVisibleWorkbenchForNavigation(input: unknown): Promise<boolean> {
+    if (this.shouldPreferVisibleWorkbench(input)) return true;
+    const automationMode =
+      BuiltinToolsSettingsManager.getComputerUseAutomationSettings().browserAutomationMode;
+    if (automationMode !== "ask") return false;
+    if (!this.hasExplicitVisibleWorkbenchRequest(input)) return false;
+    if (!this.canStartVisibleWorkbench(input)) return false;
+    const rawUrl = input && typeof input === "object" ? (input as Record<string, unknown>).url : undefined;
+    const url = typeof rawUrl === "string" ? rawUrl : "";
+    return await this.requestVisibleWorkbenchApproval(input, url);
   }
 
   private getRequestedBrowserProvider(input: unknown): BrowserProvider {
@@ -507,10 +576,10 @@ export class BrowserTools {
       {
         name: "browser_navigate",
         description:
-          "Navigate the browser to a URL. For interactive testing, this opens and controls the visible in-app browser workbench for the active task by default. " +
+          "Navigate the browser to a URL. By default, CoWork uses background/headless browser control unless settings or the tool input request a visible workbench. " +
           "If a visible workbench session already exists, continue using it even when profile/browser_channel options are supplied. " +
-          "The legacy headless flag is compatibility-only and does not override the visible workbench for normal site testing. " +
-          "Optional: set force_headless=true only when the user explicitly asks for background/headless Playwright. " +
+          "Optional: set visible=true or browser_surface='visible' when the user wants to watch or interact with the shared browser. " +
+          "Optional: set force_headless=true or browser_surface='headless' when the user explicitly asks for background/headless Playwright. " +
           "Optional: set profile to use a Playwright browser profile or external signed-in Chrome fallback (not the embedded workbench). " +
           'Optional: set browser_channel to "chrome" (system Google Chrome) or "brave" (system Brave); default is bundled Chromium. ' +
           "NOTE: For RESEARCH tasks (finding news, trends, discussions), use web_search instead - it aggregates results from multiple sources. " +
@@ -1245,7 +1314,7 @@ export class BrowserTools {
       }
 
       case "browser_navigate": {
-        if (this.shouldPreferVisibleWorkbench(input)) {
+        if (await this.shouldUseVisibleWorkbenchForNavigation(input)) {
           const visibleUrl = this.ensureVisibleNavigationAllowed(input?.url);
           const visibleResult = await this.browserWorkbenchService.navigate({
             taskId: this.taskId,

@@ -787,6 +787,10 @@ interface BuiltinToolsSettings {
   toolAutoApprove: Record<string, boolean>;
   runCommandApprovalMode: "per_command" | "single_bundle";
   codexRuntimeMode: "native" | "acpx";
+  computerUseAutomation: {
+    browserAutomationMode: "background" | "visible" | "ask";
+    nativeComputerUseMode: "background_first" | "ask_visible" | "visible";
+  };
   version: string;
 }
 

@@ -12,6 +12,13 @@ import {
   type ComputerUseHelperWindow,
   isRecoverableScreenshotError,
 } from "../../computer-use/helper-runtime";
+import { BuiltinToolsSettingsManager } from "./builtin-settings";
+import {
+  normalizeNativeComputerUseMode,
+  type NativeComputerUseMode,
+} from "../../../shared/computer-use-contract";
+
+type Any = any; // oxlint-disable-line typescript-eslint/no-explicit-any
 
 const CUA_CAPTURE_REFRESH_WAIT_MS = 150;
 const CUA_SCREENSHOT_RETRY_WAIT_MS = 250;
@@ -98,6 +105,7 @@ interface ScreenshotSelection {
 interface ActionPreparationResult {
   target: ComputerUseTargetState;
   capture: ComputerUseCaptureState;
+  visibleControl: boolean;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -377,6 +385,7 @@ function parseWindowsKeypressSpec(pid: number, keys: string[]): ComputerUseHelpe
  */
 export class ComputerUseTools {
   private static persistedState = new Map<string, PersistedComputerUseState>();
+  private static visibleControlGrants = new Map<string, Set<string>>();
 
   private currentTarget: ComputerUseTargetState | null = null;
   private currentCapture: ComputerUseCaptureState | null = null;
@@ -389,6 +398,11 @@ export class ComputerUseTools {
     const saved = ComputerUseTools.persistedState.get(taskId);
     this.currentTarget = saved?.currentTarget ?? null;
     this.currentCapture = saved?.currentCapture ?? null;
+  }
+
+  static resetForTesting(): void {
+    ComputerUseTools.persistedState.clear();
+    ComputerUseTools.visibleControlGrants.clear();
   }
 
   setWorkspace(workspace: Workspace): void {
@@ -424,6 +438,77 @@ export class ComputerUseTools {
     await this.helper().activateApp(target.pid);
     await this.helper().raiseWindow(target.pid, target.windowId);
     await sleep(CUA_CAPTURE_REFRESH_WAIT_MS);
+  }
+
+  private resolveNativeControlMode(): NativeComputerUseMode {
+    return normalizeNativeComputerUseMode(
+      BuiltinToolsSettingsManager.getComputerUseAutomationSettings().nativeComputerUseMode,
+    );
+  }
+
+  private visibleControlGrantKey(target: ComputerUseTargetState): string {
+    return `${target.pid}:${target.windowId}`;
+  }
+
+  private hasVisibleControlGrant(target: ComputerUseTargetState): boolean {
+    return ComputerUseTools.visibleControlGrants
+      .get(this.taskId)
+      ?.has(this.visibleControlGrantKey(target)) === true;
+  }
+
+  private rememberVisibleControlGrant(target: ComputerUseTargetState): void {
+    let grants = ComputerUseTools.visibleControlGrants.get(this.taskId);
+    if (!grants) {
+      grants = new Set();
+      ComputerUseTools.visibleControlGrants.set(this.taskId, grants);
+    }
+    grants.add(this.visibleControlGrantKey(target));
+  }
+
+  private isVisibleControlAllowed(target: ComputerUseTargetState): boolean {
+    return this.resolveNativeControlMode() === "visible" || this.hasVisibleControlGrant(target);
+  }
+
+  private async requestVisibleControlApproval(
+    toolName: string,
+    target: ComputerUseTargetState,
+    reason: string,
+  ): Promise<boolean> {
+    const requester = (this.daemon as Any)?.requestApproval;
+    if (typeof requester !== "function") return false;
+    return await requester.call(
+      this.daemon,
+      this.taskId,
+      "computer_use",
+      `Allow visible Computer Use to control ${target.appName}?`,
+      {
+        kind: "computer_use_foreground_control",
+        tool: toolName,
+        reason,
+        targetApp: target.appName,
+        bundleId: target.bundleId,
+        windowId: target.windowId,
+        windowTitle: target.windowTitle,
+      },
+      { allowAutoApprove: false },
+    );
+  }
+
+  private async ensureVisibleControlAllowed(
+    toolName: string,
+    target: ComputerUseTargetState,
+    reason: string,
+  ): Promise<void> {
+    if (this.isVisibleControlAllowed(target)) return;
+    const approved = await this.requestVisibleControlApproval(toolName, target, reason);
+    if (!approved) {
+      throw new Error(this.visibleControlRequiredMessage(toolName, target));
+    }
+    this.rememberVisibleControlGrant(target);
+  }
+
+  private visibleControlRequiredMessage(toolName: string, target: ComputerUseTargetState): string {
+    return `${toolName} needs visible control of ${target.appName}. Background Computer Use could not complete this action without real mouse/keyboard events.`;
   }
 
   private makeCaptureState(
@@ -487,6 +572,11 @@ export class ComputerUseTools {
           throw error;
         }
         this.currentTarget = await this.refreshCurrentTarget();
+        await this.ensureVisibleControlAllowed(
+          toolName,
+          this.currentTarget,
+          "background_window_capture_failed",
+        );
         await this.bringTargetToFront(this.currentTarget);
         await sleep(CUA_SCREENSHOT_RETRY_WAIT_MS);
       }
@@ -784,7 +874,10 @@ export class ComputerUseTools {
     return this.currentCapture;
   }
 
-  private async prepareAction(toolName: string, captureId?: string): Promise<ActionPreparationResult> {
+  private async prepareAction(
+    toolName: string,
+    captureId?: string,
+  ): Promise<ActionPreparationResult> {
     await this.ensureReady();
     const target = await this.refreshCurrentTarget();
     const capture = this.requireCurrentCapture(captureId);
@@ -795,8 +888,11 @@ export class ComputerUseTools {
       windowId: target.windowId,
       captureId: capture.id,
     });
-    await this.bringTargetToFront(target);
-    return { target, capture };
+    const visibleControl = this.isVisibleControlAllowed(target);
+    if (visibleControl) {
+      await this.bringTargetToFront(target);
+    }
+    return { target, capture, visibleControl };
   }
 
   async screenshot(selection: ScreenshotSelection = {}): Promise<ComputerUseToolResult> {
@@ -816,7 +912,9 @@ export class ComputerUseTools {
           : await this.resolveFrontmostTarget();
 
     this.persistState();
-    await this.bringTargetToFront(this.currentTarget);
+    if (this.isVisibleControlAllowed(this.currentTarget)) {
+      await this.bringTargetToFront(this.currentTarget);
+    }
     return await this.captureTarget("screenshot");
   }
 
@@ -826,7 +924,7 @@ export class ComputerUseTools {
     button: ComputerUseMouseButton = "left",
     captureId?: string,
   ): Promise<ComputerUseToolResult> {
-    const { target, capture } = await this.prepareAction("click", captureId);
+    const { target, capture, visibleControl } = await this.prepareAction("click", captureId);
     validatePointInCapture(x, y, capture);
     try {
       if (button === "left") {
@@ -847,20 +945,32 @@ export class ComputerUseTools {
             captureWidth: capture.width,
             captureHeight: capture.height,
           });
-          if (!focusResult.focused) {
-            await this.helper().mouseClick({
-              windowId: target.windowId,
-              pid: target.pid,
-              x,
-              y,
-              captureWidth: capture.width,
-              captureHeight: capture.height,
-              button: button as ComputerUseHelperMouseButton,
-              clickCount: 1,
-            });
+          if (focusResult.focused) {
+            return await this.captureTarget(
+              "click",
+              "Background accessibility focused the target, but did not confirm a press. Use another action or approve visible control if a real mouse click is required.",
+            );
           }
+          await this.ensureVisibleControlAllowed("click", target, "background_ax_press_failed");
+          if (!visibleControl) {
+            await this.bringTargetToFront(target);
+          }
+          await this.helper().mouseClick({
+            windowId: target.windowId,
+            pid: target.pid,
+            x,
+            y,
+            captureWidth: capture.width,
+            captureHeight: capture.height,
+            button: button as ComputerUseHelperMouseButton,
+            clickCount: 1,
+          });
         }
       } else {
+        await this.ensureVisibleControlAllowed("click", target, "non_left_mouse_button");
+        if (!visibleControl) {
+          await this.bringTargetToFront(target);
+        }
         await this.helper().mouseClick({
           windowId: target.windowId,
           pid: target.pid,
@@ -882,10 +992,21 @@ export class ComputerUseTools {
     }
   }
 
-  async doubleClick(x: number, y: number, captureId?: string): Promise<ComputerUseToolResult> {
-    const { target, capture } = await this.prepareAction("double_click", captureId);
+  async doubleClick(
+    x: number,
+    y: number,
+    captureId?: string,
+  ): Promise<ComputerUseToolResult> {
+    const { target, capture, visibleControl } = await this.prepareAction(
+      "double_click",
+      captureId,
+    );
     validatePointInCapture(x, y, capture);
     try {
+      if (!visibleControl) {
+        await this.ensureVisibleControlAllowed("double_click", target, "double_click");
+        await this.bringTargetToFront(target);
+      }
       await this.helper().mouseClick({
         windowId: target.windowId,
         pid: target.pid,
@@ -906,10 +1027,21 @@ export class ComputerUseTools {
     }
   }
 
-  async moveMouse(x: number, y: number, captureId?: string): Promise<ComputerUseToolResult> {
-    const { target, capture } = await this.prepareAction("move_mouse", captureId);
+  async moveMouse(
+    x: number,
+    y: number,
+    captureId?: string,
+  ): Promise<ComputerUseToolResult> {
+    const { target, capture, visibleControl } = await this.prepareAction(
+      "move_mouse",
+      captureId,
+    );
     validatePointInCapture(x, y, capture);
     try {
+      if (!visibleControl) {
+        await this.ensureVisibleControlAllowed("move_mouse", target, "mouse_move");
+        await this.bringTargetToFront(target);
+      }
       await this.helper().mouseMove({
         windowId: target.windowId,
         pid: target.pid,
@@ -935,7 +1067,7 @@ export class ComputerUseTools {
     if (!Array.isArray(path) || path.length < 2) {
       throw new Error("drag requires a path with at least two points.");
     }
-    const { target, capture } = await this.prepareAction("drag", captureId);
+    const { target, capture, visibleControl } = await this.prepareAction("drag", captureId);
     const normalizedPath = path.map((point, index) => {
       const px = requireFiniteCoordinate(`path[${index}].x`, point.x);
       const py = requireFiniteCoordinate(`path[${index}].y`, point.y);
@@ -943,6 +1075,10 @@ export class ComputerUseTools {
       return { x: px, y: py };
     });
     try {
+      if (!visibleControl) {
+        await this.ensureVisibleControlAllowed("drag", target, "mouse_drag");
+        await this.bringTargetToFront(target);
+      }
       await this.helper().mouseDrag({
         windowId: target.windowId,
         pid: target.pid,
@@ -967,11 +1103,15 @@ export class ComputerUseTools {
     scrollY: number,
     captureId?: string,
   ): Promise<ComputerUseToolResult> {
-    const { target, capture } = await this.prepareAction("scroll", captureId);
+    const { target, capture, visibleControl } = await this.prepareAction("scroll", captureId);
     validatePointInCapture(x, y, capture);
     const normalizedScrollX = requireIntegerInRange("scrollX", scrollX, -10_000, 10_000);
     const normalizedScrollY = requireIntegerInRange("scrollY", scrollY, -10_000, 10_000);
     try {
+      if (!visibleControl) {
+        await this.ensureVisibleControlAllowed("scroll", target, "mouse_scroll");
+        await this.bringTargetToFront(target);
+      }
       await this.helper().scrollAtPoint({
         windowId: target.windowId,
         pid: target.pid,
@@ -1005,8 +1145,11 @@ export class ComputerUseTools {
       windowId: target.windowId,
       textLength: text.length,
     });
-    await this.bringTargetToFront(target);
     try {
+      let nextVisibleControl = this.isVisibleControlAllowed(target);
+      if (nextVisibleControl) {
+        await this.bringTargetToFront(target);
+      }
       const focused = await this.helper().focusedElement(target.pid);
       if (focused.exists && focused.canSetValue && !focused.isSecure && focused.elementRef) {
         await this.helper().setValue(focused.elementRef, text);
@@ -1028,6 +1171,15 @@ export class ComputerUseTools {
         ) {
           await this.helper().setValue(focusedTextInput.elementRef, text);
         } else {
+          if (!nextVisibleControl) {
+            await this.ensureVisibleControlAllowed(
+              "type_text",
+              target,
+              "background_text_value_set_failed",
+            );
+            nextVisibleControl = true;
+            await this.bringTargetToFront(target);
+          }
           await this.helper().typeText(text, target.pid, target.windowId);
         }
       }
@@ -1058,8 +1210,9 @@ export class ComputerUseTools {
       windowId: target.windowId,
       keys,
     });
-    await this.bringTargetToFront(target);
     try {
+      await this.ensureVisibleControlAllowed("keypress", target, "keyboard_event");
+      await this.bringTargetToFront(target);
       await this.helper().pressKeys({ ...parseKeypressSpec(target.pid, keys), windowId: target.windowId });
       return await this.captureTarget("keypress");
     } catch (error) {
@@ -1088,13 +1241,12 @@ export class ComputerUseTools {
     if (options?.headless || (process.platform !== "darwin" && process.platform !== "win32")) {
       return [];
     }
-
     return [
       {
         name: "screenshot",
         description:
           "Capture the current controlled window in a native desktop app. Call this first. " +
-          "Passing app and/or windowTitle retargets control to that window. Returns a fresh captureId and PNG image.",
+          "Passing app and/or windowTitle retargets control to that window. Defaults to background window capture; visible control is a fallback only when approved.",
         input_schema: {
           type: "object",
           properties: {

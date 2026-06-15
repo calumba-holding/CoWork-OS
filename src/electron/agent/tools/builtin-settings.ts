@@ -9,6 +9,11 @@ import * as path from "path";
 import { SecureSettingsRepository } from "../../database/SecureSettingsRepository";
 import { getUserDataDir } from "../../utils/user-data-dir";
 import { createLogger } from "../../utils/logger";
+import {
+  normalizeBrowserAutomationMode,
+  normalizeNativeComputerUseMode,
+  type ComputerUseAutomationSettings,
+} from "../../../shared/computer-use-contract";
 
 const log = createLogger("BuiltinSettings");
 
@@ -60,6 +65,8 @@ export interface BuiltinToolsSettings {
   runCommandApprovalMode: RunCommandApprovalMode;
   // Default runtime for explicit Codex child-task flows
   codexRuntimeMode: CodexRuntimeMode;
+  // Computer/browser automation defaults.
+  computerUseAutomation: ComputerUseAutomationSettings;
   // Version for migrations
   version: string;
 }
@@ -132,6 +139,10 @@ const DEFAULT_SETTINGS: BuiltinToolsSettings = {
   toolAutoApprove: {},
   runCommandApprovalMode: "single_bundle",
   codexRuntimeMode: "native",
+  computerUseAutomation: {
+    browserAutomationMode: "background",
+    nativeComputerUseMode: "background_first",
+  },
   version: "1.0.0",
 };
 
@@ -402,7 +413,7 @@ export class BuiltinToolsSettingsManager {
       },
       toolOverrides: {
         ...defaults.toolOverrides,
-        ...(settings.toolOverrides || {}),
+        ...settings.toolOverrides,
       },
       toolTimeouts: settings.toolTimeouts || {},
       toolAutoApprove: settings.toolAutoApprove || {},
@@ -411,6 +422,14 @@ export class BuiltinToolsSettingsManager {
           ? "per_command"
           : defaults.runCommandApprovalMode,
       codexRuntimeMode: settings.codexRuntimeMode === "acpx" ? "acpx" : "native",
+      computerUseAutomation: {
+        browserAutomationMode: normalizeBrowserAutomationMode(
+          settings.computerUseAutomation?.browserAutomationMode,
+        ),
+        nativeComputerUseMode: normalizeNativeComputerUseMode(
+          settings.computerUseAutomation?.nativeComputerUseMode,
+        ),
+      },
       version: settings.version || defaults.version,
     };
   }
@@ -499,6 +518,18 @@ export class BuiltinToolsSettingsManager {
   static getCodexRuntimeMode(): CodexRuntimeMode {
     const settings = this.loadSettings();
     return settings.codexRuntimeMode === "acpx" ? "acpx" : "native";
+  }
+
+  static getComputerUseAutomationSettings(): ComputerUseAutomationSettings {
+    const settings = this.loadSettings();
+    return {
+      browserAutomationMode: normalizeBrowserAutomationMode(
+        settings.computerUseAutomation?.browserAutomationMode,
+      ),
+      nativeComputerUseMode: normalizeNativeComputerUseMode(
+        settings.computerUseAutomation?.nativeComputerUseMode,
+      ),
+    };
   }
 
   /**
