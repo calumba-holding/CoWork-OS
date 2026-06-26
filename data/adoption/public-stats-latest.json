@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-25T06:55:43.636Z",
-  "generatedDay": "2026-06-25",
+  "generatedAt": "2026-06-26T07:01:58.066Z",
+  "generatedDay": "2026-06-26",
   "privacy": {
     "source": "Public GitHub/npm APIs plus owner-only GitHub traffic APIs when available.",
     "appTelemetry": false,
@@ -13,13 +13,13 @@
       "fullName": "CoWork-OS/CoWork-OS",
       "htmlUrl": "https://github.com/CoWork-OS/CoWork-OS",
       "defaultBranch": "main",
-      "stars": 364,
+      "stars": 365,
       "forks": 56,
       "watchers": 2,
       "openIssues": 10,
       "archived": false,
-      "pushedAt": "2026-06-24T06:56:19Z",
-      "updatedAt": "2026-06-25T06:22:27Z"
+      "pushedAt": "2026-06-25T06:55:45Z",
+      "updatedAt": "2026-06-25T11:26:50Z"
     },
     "releases": {
       "releaseCount": 59,
@@ -29,13 +29,13 @@
         "publishedAt": "2026-06-08T10:07:49Z",
         "htmlUrl": "https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.49"
       },
-      "totalAssetDownloadCount": 1654,
-      "totalInstallAssetDownloadCount": 1108,
-      "metadataAssetDownloadCount": 546,
+      "totalAssetDownloadCount": 1669,
+      "totalInstallAssetDownloadCount": 1115,
+      "metadataAssetDownloadCount": 554,
       "platformTotals": {
-        "macos": 643,
+        "macos": 647,
         "server": 30,
-        "windows": 435
+        "windows": 438
       },
       "assets": [
         {
@@ -47,8 +47,8 @@
           "sizeBytes": 7342,
           "downloadCount": 2,
           "browserDownloadUrl": "https://github.com/CoWork-OS/CoWork-OS/releases/download/v0.5.49/builder-debug.yml",
-          "previousDownloadCount": 1,
-          "deltaSincePreviousSnapshot": 1
+          "previousDownloadCount": 2,
+          "deltaSincePreviousSnapshot": 0
         },
         {
           "releaseTag": "v0.5.49",
@@ -57,10 +57,10 @@
           "assetName": "CoWork-OS-0.5.49-arm64-mac.zip",
           "platform": "macos",
           "sizeBytes": 259088366,
-          "downloadCount": 13,
+          "downloadCount": 14,
           "browserDownloadUrl": "https://github.com/CoWork-OS/CoWork-OS/releases/download/v0.5.49/CoWork-OS-0.5.49-arm64-mac.zip",
           "previousDownloadCount": 13,
-          "deltaSincePreviousSnapshot": 0
+          "deltaSincePreviousSnapshot": 1
         },
         {
           "releaseTag": "v0.5.49",
@@ -71,8 +71,8 @@
           "sizeBytes": 270499,
           "downloadCount": 4,
           "browserDownloadUrl": "https://github.com/CoWork-OS/CoWork-OS/releases/download/v0.5.49/CoWork-OS-0.5.49-arm64-mac.zip.blockmap",
-          "previousDownloadCount": 3,
-          "deltaSincePreviousSnapshot": 1
+          "previousDownloadCount": 4,
+          "deltaSincePreviousSnapshot": 0
         },
         {
           "releaseTag": "v0.5.49",
@@ -81,10 +81,10 @@
           "assetName": "CoWork-OS-0.5.49-arm64.dmg",
           "platform": "macos",
           "sizeBytes": 269132642,
-          "downloadCount": 22,
+          "downloadCount": 25,
           "browserDownloadUrl": "https://github.com/CoWork-OS/CoWork-OS/releases/download/v0.5.49/CoWork-OS-0.5.49-arm64.dmg",
-          "previousDownloadCount": 21,
-          "deltaSincePreviousSnapshot": 1
+          "previousDownloadCount": 22,
+          "deltaSincePreviousSnapshot": 3
         },
         {
           "releaseTag": "v0.5.49",
@@ -119,8 +119,8 @@
           "sizeBytes": 108,
           "downloadCount": 3,
           "browserDownloadUrl": "https://github.com/CoWork-OS/CoWork-OS/releases/download/v0.5.49/cowork-os-server-linux-x64-v0.5.49.tar.gz.sha256",
-          "previousDownloadCount": 2,
-          "deltaSincePreviousSnapshot": 1
+          "previousDownloadCount": 3,
+          "deltaSincePreviousSnapshot": 0
         },
         {
           "releaseTag": "v0.5.49",
@@ -129,10 +129,10 @@
           "assetName": "CoWork-OS-Setup-0.5.49.exe",
           "platform": "windows",
           "sizeBytes": 229612889,
-          "downloadCount": 67,
+          "downloadCount": 70,
           "browserDownloadUrl": "https://github.com/CoWork-OS/CoWork-OS/releases/download/v0.5.49/CoWork-OS-Setup-0.5.49.exe",
-          "previousDownloadCount": 63,
-          "deltaSincePreviousSnapshot": 4
+          "previousDownloadCount": 67,
+          "deltaSincePreviousSnapshot": 3
         },
         {
           "releaseTag": "v0.5.49",
@@ -153,10 +153,10 @@
           "assetName": "latest-mac.yml",
           "platform": "metadata",
           "sizeBytes": 515,
-          "downloadCount": 103,
+          "downloadCount": 111,
           "browserDownloadUrl": "https://github.com/CoWork-OS/CoWork-OS/releases/download/v0.5.49/latest-mac.yml",
-          "previousDownloadCount": 94,
-          "deltaSincePreviousSnapshot": 9
+          "previousDownloadCount": 103,
+          "deltaSincePreviousSnapshot": 8
         },
         {
           "releaseTag": "v0.5.49",
@@ -3305,33 +3305,33 @@
     "downloads": {
       "lastDay": {
         "period": "last-day",
-        "downloads": 7,
-        "start": "2026-06-23",
-        "end": "2026-06-23"
+        "downloads": 3,
+        "start": "2026-06-24",
+        "end": "2026-06-24"
       },
       "lastWeek": {
         "period": "last-week",
-        "downloads": 102,
-        "start": "2026-06-17",
-        "end": "2026-06-23"
+        "downloads": 71,
+        "start": "2026-06-18",
+        "end": "2026-06-24"
       },
       "lastMonth": {
         "period": "last-month",
-        "downloads": 1138,
-        "start": "2026-05-25",
-        "end": "2026-06-23"
+        "downloads": 1060,
+        "start": "2026-05-26",
+        "end": "2026-06-24"
       }
     }
   },
   "deltas": {
     "releaseDownloads": {
-      "totalDeltaSincePreviousSnapshot": 5,
+      "totalDeltaSincePreviousSnapshot": 7,
       "platformDeltasSincePreviousSnapshot": {
-        "macos": 1,
+        "macos": 4,
         "server": 0,
-        "windows": 4
+        "windows": 3
       }
     },
-    "previousSnapshotGeneratedAt": "2026-06-24T06:56:17.074Z"
+    "previousSnapshotGeneratedAt": "2026-06-25T06:55:43.636Z"
   }
 }
