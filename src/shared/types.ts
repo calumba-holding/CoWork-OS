@@ -9090,7 +9090,13 @@ export interface MoaPreset {
   concurrency?: number;
 }
 
-export type OpenAIReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type OpenAIReasoningEffort =
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra";
 export type AzureReasoningEffort = "low" | "medium" | "high" | "extra_high";
 export type LLMReasoningEffort = OpenAIReasoningEffort | AzureReasoningEffort;
 export type LLMTextVerbosity = "low" | "medium" | "high";

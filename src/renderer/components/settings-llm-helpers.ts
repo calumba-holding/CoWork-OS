@@ -70,7 +70,12 @@ export function resolveOpenAIReasoningEffort(
   openai?: LLMSettingsData["openai"] | null,
 ): OpenAIReasoningEffort {
   const value = openai?.reasoningEffort;
-  return value === "low" || value === "medium" || value === "high" || value === "xhigh"
+  return value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh" ||
+    value === "max" ||
+    value === "ultra"
     ? value
     : "medium";
 }

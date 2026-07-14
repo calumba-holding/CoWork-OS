@@ -5568,7 +5568,7 @@ export interface ElectronAPI {
   getLLMConfigStatus: () => Promise<{
     currentProvider: LLMProviderType;
     currentModel: string;
-    currentReasoningEffort?: "low" | "medium" | "high" | "extra_high";
+    currentReasoningEffort?: LLMReasoningEffort;
     providers: Array<{
       type: LLMProviderType;
       name: string;
@@ -5579,7 +5579,7 @@ export interface ElectronAPI {
       key: string;
       displayName: string;
       description: string;
-      reasoningEfforts?: Array<"low" | "medium" | "high" | "extra_high">;
+      reasoningEfforts?: LLMReasoningEffort[];
     }>;
   }>;
   getLLMRoutingStatus: () => Promise<LLMRoutingRuntimeState>;
@@ -5599,7 +5599,7 @@ export interface ElectronAPI {
     key: string;
     displayName: string;
     description: string;
-    reasoningEfforts?: Array<"low" | "medium" | "high" | "extra_high">;
+    reasoningEfforts?: LLMReasoningEffort[];
   }>>;
   getAnthropicModels: (credentials?: {
     apiKey?: string;

@@ -39,6 +39,9 @@ const OPENAI_CODEX_PROVIDER = "openai-codex";
 const OPENAI_CODEX_API = "openai-codex-responses";
 const OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const CHATGPT_SUBSCRIPTION_MODEL_IDS = [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
@@ -619,6 +622,8 @@ export class OpenAIProvider implements LLMProvider {
         maxTokens: request.maxTokens,
         signal: request.signal,
         sessionId: request.promptCache?.cacheKey,
+        reasoningEffort: this.getOpenAIReasoningEffort(request),
+        textVerbosity: this.getOpenAITextVerbosity(request),
       });
 
       // pi-ai returns an AssistantMessage even on errors (stopReason: "error"/"aborted").
@@ -802,6 +807,21 @@ export class OpenAIProvider implements LLMProvider {
   private getDefaultCodexModels(): Array<{ id: string; name: string; description: string }> {
     return [
       {
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        description: "GPT-5.6 Sol for ChatGPT subscription access",
+      },
+      {
+        id: "gpt-5.6-terra",
+        name: "GPT-5.6 Terra",
+        description: "GPT-5.6 Terra for ChatGPT subscription access",
+      },
+      {
+        id: "gpt-5.6-luna",
+        name: "GPT-5.6 Luna",
+        description: "GPT-5.6 Luna for ChatGPT subscription access",
+      },
+      {
         id: "gpt-5.5",
         name: "GPT-5.5",
         description: "Latest ChatGPT/Codex subscription model",
@@ -852,6 +872,9 @@ export class OpenAIProvider implements LLMProvider {
     if (modelId === "o1-preview") return "o1 Preview";
     if (modelId === "o3-mini") return "o3 Mini";
     // ChatGPT internal models
+    if (modelId === "gpt-5.6-sol") return "GPT-5.6 Sol";
+    if (modelId === "gpt-5.6-terra") return "GPT-5.6 Terra";
+    if (modelId === "gpt-5.6-luna") return "GPT-5.6 Luna";
     if (modelId === "gpt-5.5") return "GPT-5.5";
     if (modelId === "gpt-5.4") return "GPT-5.4";
     if (modelId === "gpt-5.4-mini") return "GPT-5.4 Mini";
@@ -877,6 +900,9 @@ export class OpenAIProvider implements LLMProvider {
     if (modelId === "o1-mini") return "Fast reasoning model";
     if (modelId.includes("o3")) return "Next generation reasoning";
     // ChatGPT internal models
+    if (modelId === "gpt-5.6-sol") return "GPT-5.6 Sol for ChatGPT subscription access";
+    if (modelId === "gpt-5.6-terra") return "GPT-5.6 Terra for ChatGPT subscription access";
+    if (modelId === "gpt-5.6-luna") return "GPT-5.6 Luna for ChatGPT subscription access";
     if (modelId === "gpt-5.5") return "Latest ChatGPT/Codex subscription model";
     if (modelId === "gpt-5.4") return "Current Codex model for ChatGPT subscription access";
     if (modelId === "gpt-5.4-mini") return "Fast GPT-5.4 model for ChatGPT subscription access";

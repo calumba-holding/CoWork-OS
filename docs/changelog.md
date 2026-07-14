@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **ChatGPT subscription GPT-5.6 controls**: added `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` to the ChatGPT OAuth model catalog; added model-specific Low/Medium/High/Extra High/Max/Ultra effort choices matching Codex (Ultra on Sol and Terra only); and forwarded reasoning effort plus response verbosity through the ChatGPT Codex Responses transport. See [LLM Providers & Costs](providers.md#openai--chatgpt).
 - **Bundled `unbroker` skill**: added a global consent-gated privacy cleanup workflow for authorized data-broker and people-search opt-outs, with a local PII ledger, deterministic `pdd.py` action queue, human-task digest, recurring recheck support, and related docs. Added [Unbroker Skill](skills/unbroker.md).
 - **Mixture of Agents docs**: documented the new virtual LLM provider, preset configuration, advisor/aggregator runtime flow, failover behavior, UI testing path, and corporate TLS/Zscaler troubleshooting. Added [Mixture of Agents](mixture-of-agents.md).
 - **Video attachment analysis**: uploaded `.mp4`, `.mov`, and `.webm` files are copied into the workspace, sampled into representative frames, passed to image-capable models, and shown as contact-sheet/full-frame image artifacts in the task timeline. Added [Video Attachments](video-attachments.md) documentation.

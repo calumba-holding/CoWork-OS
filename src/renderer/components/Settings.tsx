@@ -81,6 +81,7 @@ import {
   type MoaPreset,
 } from "../../shared/types";
 import { CUSTOM_PROVIDER_MAP } from "../../shared/llm-provider-catalog";
+import { getLlmModelReasoningEfforts } from "../../shared/llm-model-selection";
 import {
   buildClaudeCredentialInput,
   resolveOpenAIReasoningEffort,
@@ -332,7 +333,33 @@ const OPENAI_REASONING_EFFORT_OPTIONS: Array<{
     label: "Extra High",
     description: "Maximum effort for the hardest asynchronous tasks.",
   },
+  {
+    value: "max",
+    label: "Max",
+    description: "Maximum reasoning depth for the hardest problems.",
+  },
+  {
+    value: "ultra",
+    label: "Ultra",
+    description: "Maximum reasoning with automatic task delegation.",
+  },
 ];
+
+const DEFAULT_OPENAI_REASONING_EFFORTS: OpenAIReasoningEffort[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
+
+function getOpenAIReasoningEffortOptions(modelKey: string) {
+  const modelEfforts = getLlmModelReasoningEfforts("openai", modelKey);
+  const supportedEfforts =
+    modelEfforts.length > 0 ? modelEfforts : DEFAULT_OPENAI_REASONING_EFFORTS;
+  return OPENAI_REASONING_EFFORT_OPTIONS.filter((option) =>
+    supportedEfforts.includes(option.value),
+  );
+}
 
 const OPENAI_TEXT_VERBOSITY_OPTIONS: Array<{
   value: LLMTextVerbosity;
@@ -1504,6 +1531,19 @@ export function Settings({
   );
   const [openaiReasoningEffort, setOpenaiReasoningEffort] =
     useState<OpenAIReasoningEffort>("medium");
+  const openaiReasoningEffortOptions = useMemo(
+    () => getOpenAIReasoningEffortOptions(openaiModel),
+    [openaiModel],
+  );
+  useEffect(() => {
+    if (
+      !openaiReasoningEffortOptions.some(
+        (option) => option.value === openaiReasoningEffort,
+      )
+    ) {
+      setOpenaiReasoningEffort("medium");
+    }
+  }, [openaiReasoningEffort, openaiReasoningEffortOptions]);
   const [openaiTextVerbosity, setOpenaiTextVerbosity] =
     useState<LLMTextVerbosity>("medium");
   const [openaiOAuthConnected, setOpenaiOAuthConnected] = useState(false);
@@ -6006,7 +6046,7 @@ export function Settings({
                       )
                     }
                   >
-                    {OPENAI_REASONING_EFFORT_OPTIONS.map((option) => (
+                    {openaiReasoningEffortOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
                       </option>
@@ -6014,7 +6054,7 @@ export function Settings({
                   </select>
                   <small>
                     {
-                      OPENAI_REASONING_EFFORT_OPTIONS.find(
+                      openaiReasoningEffortOptions.find(
                         (option) => option.value === openaiReasoningEffort,
                       )?.description
                     }

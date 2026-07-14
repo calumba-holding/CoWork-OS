@@ -12,6 +12,8 @@ type PiAiCompleteOptions = {
   maxTokens?: number;
   signal?: AbortSignal;
   sessionId?: string;
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  textVerbosity?: "low" | "medium" | "high";
 };
 
 export type PiAiModule = {

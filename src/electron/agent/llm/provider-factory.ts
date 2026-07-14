@@ -58,6 +58,7 @@ import type {
   AzureReasoningEffort,
   CustomProviderConfig,
   LLMReasoningEffort,
+  OpenAIReasoningEffort,
   LlmProfile,
   LLMProviderFallbackConfig,
   MoaModelSlot,
@@ -78,6 +79,9 @@ const observedModelMaxTokens = new Map<string, number>();
 const logger = createLogger("LLMProviderFactory");
 const OPENAI_OAUTH_DEFAULT_MODEL = "gpt-5.5";
 const OPENAI_OAUTH_SUPPORTED_MODELS = new Set([
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
@@ -941,7 +945,7 @@ export interface LLMSettings {
   openai?: {
     apiKey?: string;
     model?: string;
-    reasoningEffort?: "low" | "medium" | "high" | "xhigh";
+    reasoningEffort?: OpenAIReasoningEffort;
     textVerbosity?: "low" | "medium" | "high";
     // OAuth tokens (alternative to API key)
     accessToken?: string;
@@ -3039,6 +3043,21 @@ export class LLMProviderFactory {
           settings.openai?.authMethod === "oauth"
             ? [
                 {
+                  key: "gpt-5.6-sol",
+                  displayName: "GPT-5.6 Sol",
+                  description: "GPT-5.6 Sol for ChatGPT subscription access",
+                },
+                {
+                  key: "gpt-5.6-terra",
+                  displayName: "GPT-5.6 Terra",
+                  description: "GPT-5.6 Terra for ChatGPT subscription access",
+                },
+                {
+                  key: "gpt-5.6-luna",
+                  displayName: "GPT-5.6 Luna",
+                  description: "GPT-5.6 Luna for ChatGPT subscription access",
+                },
+                {
                   key: "gpt-5.5",
                   displayName: "GPT-5.5",
                   description: "Latest ChatGPT/Codex subscription model",
@@ -3482,7 +3501,11 @@ export class LLMProviderFactory {
 
     if (providerType === "azure") {
       const azureReasoningEffort: AzureReasoningEffort =
-        reasoningEffort === "xhigh" ? "extra_high" : reasoningEffort;
+        reasoningEffort === "xhigh" ||
+        reasoningEffort === "max" ||
+        reasoningEffort === "ultra"
+          ? "extra_high"
+          : reasoningEffort;
       return {
         ...settings,
         azure: {
@@ -4188,6 +4211,21 @@ export class LLMProviderFactory {
         logger.error("Failed to get OpenAI models from pi-ai SDK:", error);
         // Return ChatGPT-specific defaults for OAuth users
         return [
+          {
+            id: "gpt-5.6-sol",
+            name: "GPT-5.6 Sol",
+            description: "GPT-5.6 Sol for ChatGPT subscription access",
+          },
+          {
+            id: "gpt-5.6-terra",
+            name: "GPT-5.6 Terra",
+            description: "GPT-5.6 Terra for ChatGPT subscription access",
+          },
+          {
+            id: "gpt-5.6-luna",
+            name: "GPT-5.6 Luna",
+            description: "GPT-5.6 Luna for ChatGPT subscription access",
+          },
           {
             id: "gpt-5.5",
             name: "GPT-5.5",
