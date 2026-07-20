@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Output filtering**: reduced YAML capability-list false positives by requiring stronger system-prompt context.
 - **Multitask resource stability**: bounded renderer memory, MCP process lifecycles, synthesis prompt size, SQLite contention, and executor cache pressure.
 - **Collaborative execution status**: added an explicit execute phase so active child work is no longer shown as generic thinking.
+- **Blocked task progress status**: preserved the blocked state in task-progress summaries instead of classifying every blocked task as waiting for approval.
 - **Read-only review safety**: snapshot git state and restrict system interaction tools during review tasks.
 - **Workspace verification deduplication**: deduplicate identical verification commands in the same workspace.
 

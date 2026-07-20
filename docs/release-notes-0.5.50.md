@@ -36,7 +36,7 @@ Release `0.5.50` brings CoWork OS's largest post-`0.5.49` capability update: a m
 - Added a durable deduplicated workflow inbox, bounded Gmail/Drive cursor pagination, startup requeue/recovery, explicit outcome verification for interrupted steps, cancellation propagation, one-attempt external-write policy, connector allowlist/schema enforcement, key-based stored-payload redaction, and retention cleanup.
 - Fixed the Automations page's alignment and scroll containment with responsive grid/card wrapping and layout regression tests. Registered the complete workflow IPC handler set, ordered legacy `workflow_run_id` migration before dependent indexes, and made the dev launcher fail early with the existing PID before macOS can rebrand/relaunch an active Electron bundle and abort during application registration.
 - Hardened build-health routine evidence checks so inspection steps remain read-only and verification requires concrete command or API evidence.
-- Hid replay controls behind an explicit toggle and improved task-progress phase reporting during collaborative execution.
+- Hid replay controls behind an explicit toggle, improved task-progress phase reporting during collaborative execution, and preserved genuinely blocked tasks as blocked instead of treating them as approval waits.
 - Reduced memory FTS work on Electron's main thread with a prompt-recall fast path, bounded caches, batched tier tracking, and richer slow-query diagnostics.
 - Reused refreshed Google Workspace OAuth tokens during mailbox sync to avoid repeated settings writes.
 - Tightened output-filter prompt-leak patterns to reduce YAML capability-list false positives.
@@ -92,4 +92,5 @@ For npm publication, use a clean checkout or release worktree. Explicitly run `n
 - Hide replay controls behind a toggle.
 - Poll email draft status while sending.
 - Add GPT-5.6 ChatGPT subscription controls.
+- Preserve blocked task progress status.
 - Refresh public adoption statistics throughout the release cycle.
